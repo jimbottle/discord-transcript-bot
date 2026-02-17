@@ -20,7 +20,7 @@ class VoloBot(discord.Bot):
     def __init__(self, loop):
 
         super().__init__(command_prefix="!", loop=loop,
-                         activity=discord.CustomActivity(name='Transcribing Audio to Text'))
+                         activity=discord.CustomActivity(name='Monitoring voice subnets'))
         self.guild_to_helper = {}
         self.guild_is_recording = {}
         self.guild_whisper_sinks = {}
@@ -33,12 +33,19 @@ class VoloBot(discord.Bot):
             self.transcriber_type = "local"
         if PLAYER_MAP_FILE_PATH:
             with open(PLAYER_MAP_FILE_PATH, "r", encoding="utf-8") as file:
-                self.player_map = yaml.safe_load(file)
+                self.player_map = yaml.safe_load(file) or {}
 
     
 
     async def on_ready(self):
         logger.info(f"Logged in as {self.user} to Discord.")
+        # Sync slash commands globally (needed for DM-capable commands like /ask)
+        await self.sync_commands()
+        logger.info("Synced global commands.")
+        # Also sync to each guild for instant guild-level updates
+        for guild in self.guilds:
+            await self.sync_commands(guild_ids=[guild.id])
+            logger.info(f"Synced commands to guild {guild.name} ({guild.id})")
         self._is_ready = True
 
 
@@ -140,14 +147,25 @@ class VoloBot(discord.Bot):
         return transcriptions
 
     async def update_player_map(self, ctx: discord.context.ApplicationContext):
-        player_map = {}
+        # Load existing file to preserve entries from other guilds and manual edits
+        existing_map = {}
+        if PLAYER_MAP_FILE_PATH:
+            try:
+                with open(PLAYER_MAP_FILE_PATH, "r", encoding="utf-8") as file:
+                    existing_map = yaml.safe_load(file) or {}
+            except FileNotFoundError:
+                pass
+
+        # Only add new members that don't already have entries (preserve manual edits)
         for member in ctx.guild.members:
-            player_map[member.id] = {
-                "player": member.name,
-                "character": member.display_name
-            }
-        logger.info(f"{str(player_map)}")
-        self.player_map.update(player_map)
+            if member.id not in existing_map:
+                existing_map[member.id] = {
+                    "player": member.name,
+                    "character": member.display_name
+                }
+
+        self.player_map = existing_map
+        logger.info(f"{str(self.player_map)}")
         if PLAYER_MAP_FILE_PATH:
             with open(PLAYER_MAP_FILE_PATH, "w", encoding="utf-8") as file:
                 yaml.dump(self.player_map, file, default_flow_style=False, allow_unicode=True)
