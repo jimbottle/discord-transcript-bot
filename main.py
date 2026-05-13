@@ -132,7 +132,6 @@ if __name__ == "__main__":
                 await asyncio.sleep(1)
 
             vc = await author_vc.channel.connect(reconnect=False, timeout=15)
-            await asyncio.sleep(2)
             if not vc.is_connected():
                 try:
                     await vc.disconnect(force=True)
@@ -403,11 +402,12 @@ if __name__ == "__main__":
     @bot.slash_command(name="health", description="Show system health status.")
     async def health(ctx: discord.context.ApplicationContext):
         await ctx.defer(ephemeral=True)
-        from src.bot.health import HealthCheck
-        check = HealthCheck()
-        await asyncio.to_thread(check.run_all, autofix=False, bot=bot)
-        status = "All systems operational." if check.all_ok() else "Critical checks failing."
-        await ctx.followup.send(f"**{status}**\n```\n{check.summary()}\n```")
+        # Reuse the bot's existing HealthCheck instance so any ollama process
+        # it spawned at startup stays tracked, and to avoid re-loading the
+        # whisper model on every /health invocation.
+        await asyncio.to_thread(bot.health.run_all, autofix=False, bot=bot)
+        status = "All systems operational." if bot.health.all_ok() else "Critical checks failing."
+        await ctx.followup.send(f"**{status}**\n```\n{bot.health.summary()}\n```")
 
     try:
         loop.run_until_complete(bot.start(DISCORD_BOT_TOKEN))

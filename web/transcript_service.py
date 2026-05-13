@@ -1,5 +1,4 @@
 import json
-import os
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -27,7 +26,7 @@ def get_transcript(filename):
     if "/" in filename or "\\" in filename or ".." in filename:
         return None
     path = TRANSCRIPTS_DIR / filename
-    if not path.is_file() or not path.resolve().parent == TRANSCRIPTS_DIR.resolve():
+    if not path.is_file() or path.resolve().parent != TRANSCRIPTS_DIR.resolve():
         return None
     return path.read_text(encoding="utf-8", errors="replace")
 

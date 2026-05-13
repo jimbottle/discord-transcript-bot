@@ -197,7 +197,11 @@ class HealthCheck:
                 w.setframerate(16000)
                 w.writeframes(b"\x00" * 3200)  # 0.1s of silence
             buf.seek(0)
-            audio_model.transcribe(buf)
+            # transcribe() returns (segments_generator, info). Iterate the
+            # generator to actually exercise decoding — otherwise this check
+            # passes without verifying the model can decode at all.
+            segments, _info = audio_model.transcribe(buf)
+            list(segments)
             self._record("whisper_model", True, "Model loaded and responding")
         except Exception as e:
             self._record("whisper_model", False, f"Whisper model failed: {e}")

@@ -21,12 +21,8 @@
                 Stopped
             {%- endif -%}
         </span>
-        <form action="{{ url_for('bot_start') }}" method="post">
-            <button type="submit" {% if bot_status.status in ('ready', 'unhealthy', 'starting', 'initializing') %}disabled{% endif %}>Start Bot</button>
-        </form>
-        <form action="{{ url_for('bot_stop') }}" method="post">
-            <button type="submit" class="secondary" {% if bot_status.status not in ('ready', 'unhealthy', 'starting', 'initializing') %}disabled{% endif %}>Stop Bot</button>
-        </form>
+        <button id="btn-bot-start" type="button" {% if bot_status.status in ('ready', 'unhealthy', 'starting', 'initializing') %}disabled{% endif %}>Start Bot</button>
+        <button id="btn-bot-stop" type="button" class="secondary" {% if bot_status.status not in ('ready', 'unhealthy', 'starting', 'initializing') %}disabled{% endif %}>Stop Bot</button>
     </div>
     <ul id="health-checks" class="health-check-list" style="{% if not bot_status.checks %}display:none{% endif %}">
         {% if bot_status.checks %}
@@ -69,49 +65,86 @@
 
 {% block scripts %}
 <script>
+const STATUS_URL = "{{ url_for('bot_status') }}";
+const START_URL = "{{ url_for('bot_start') }}";
+const STOP_URL = "{{ url_for('bot_stop') }}";
+
+function renderStatus(data) {
+    const badge = document.getElementById("status-badge");
+    const checkList = document.getElementById("health-checks");
+    const startBtn = document.getElementById("btn-bot-start");
+    const stopBtn = document.getElementById("btn-bot-stop");
+
+    let label;
+    if (data.status === "initializing") {
+        label = "Initializing";
+        if (data.current_check) label += ": " + data.current_check;
+        label += "...";
+    } else if (data.status === "starting") {
+        label = "Starting...";
+    } else {
+        label = data.status.charAt(0).toUpperCase() + data.status.slice(1);
+    }
+
+    badge.textContent = label;
+    badge.className = "status-badge status-" + data.status;
+
+    const processAlive = ["ready", "unhealthy", "starting", "initializing"].includes(data.status);
+    startBtn.disabled = processAlive;
+    stopBtn.disabled = !processAlive;
+
+    // Build the check list via createElement + textContent so check messages
+    // (which may contain exception text from third-party errors) can never
+    // be parsed as HTML.
+    const checks = data.checks || {};
+    const names = Object.keys(checks);
+    while (checkList.firstChild) checkList.removeChild(checkList.firstChild);
+    if (names.length > 0) {
+        for (const name of names) {
+            const c = checks[name];
+            let cls, icon;
+            if (c.ok) { cls = "check-pass"; icon = "\u2713"; }
+            else if (c.critical) { cls = "check-fail"; icon = "\u2717"; }
+            else { cls = "check-warn"; icon = "\u26A0"; }
+            const li = document.createElement("li");
+            li.className = "health-check " + cls;
+            li.appendChild(document.createTextNode(icon + " "));
+            const strong = document.createElement("strong");
+            strong.textContent = name;
+            li.appendChild(strong);
+            li.appendChild(document.createTextNode(": " + (c.message || "")));
+            checkList.appendChild(li);
+        }
+        checkList.style.display = "";
+    } else {
+        checkList.style.display = "none";
+    }
+}
+
+async function postBotAction(url, button) {
+    button.disabled = true;
+    try {
+        const res = await fetch(url, {
+            method: "POST",
+            headers: { "X-Requested-With": "XMLHttpRequest" },
+        });
+        if (res.ok) {
+            renderStatus(await res.json());
+        }
+    } catch (e) {
+        console.error("Bot action error:", e);
+    }
+}
+
+document.getElementById("btn-bot-start").addEventListener("click", (e) =>
+    postBotAction(START_URL, e.currentTarget));
+document.getElementById("btn-bot-stop").addEventListener("click", (e) =>
+    postBotAction(STOP_URL, e.currentTarget));
+
 setInterval(async () => {
     try {
-        const res = await fetch("{{ url_for('bot_status') }}");
-        const data = await res.json();
-        const badge = document.getElementById("status-badge");
-        const checkList = document.getElementById("health-checks");
-
-        // Build badge label
-        let label;
-        if (data.status === "initializing") {
-            label = "Initializing";
-            if (data.current_check) label += ": " + data.current_check;
-            label += "...";
-        } else if (data.status === "starting") {
-            label = "Starting...";
-        } else {
-            label = data.status.charAt(0).toUpperCase() + data.status.slice(1);
-        }
-
-        badge.textContent = label;
-        badge.className = "status-badge status-" + data.status;
-
-        // Button states
-        const processAlive = ["ready", "unhealthy", "starting", "initializing"].includes(data.status);
-        document.querySelector('[action*="bot/start"] button').disabled = processAlive;
-        document.querySelector('[action*="bot/stop"] button').disabled = !processAlive;
-
-        // Check list
-        const checks = data.checks || {};
-        const names = Object.keys(checks);
-        if (names.length > 0) {
-            checkList.innerHTML = names.map(name => {
-                const c = checks[name];
-                let cls, icon;
-                if (c.ok) { cls = "check-pass"; icon = "\u2713"; }
-                else if (c.critical) { cls = "check-fail"; icon = "\u2717"; }
-                else { cls = "check-warn"; icon = "\u26A0"; }
-                return `<li class="health-check ${cls}">${icon} <strong>${name}</strong>: ${c.message}</li>`;
-            }).join("");
-            checkList.style.display = "";
-        } else {
-            checkList.style.display = "none";
-        }
+        const res = await fetch(STATUS_URL);
+        renderStatus(await res.json());
     } catch (e) {
         console.error("Status poll error:", e);
     }

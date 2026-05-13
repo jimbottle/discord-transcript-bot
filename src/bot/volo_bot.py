@@ -56,14 +56,17 @@ class VoloBot(discord.Bot):
         # session, but the NEW gateway session won't populate guild.me.voice
         # with the old state — so we can't rely on checking me.voice.channel.
         # Sending channel=None is a no-op if we're not in voice, but clears
-        # any ghost if we are.
-        for guild in self.guilds:
+        # any ghost if we are. Run concurrently so N guilds don't serialize
+        # the bot's readiness behind N×sleep.
+        async def _ghost_cleanup(guild):
             logger.debug(f"Sending voice-state disconnect for guild {guild.name} (ghost cleanup)")
             try:
                 await guild.change_voice_state(channel=None)
             except Exception as e:
                 logger.error(f"Failed to send voice-state disconnect for {guild.name}: {e}")
-            await asyncio.sleep(0.5)
+
+        if self.guilds:
+            await asyncio.gather(*(_ghost_cleanup(g) for g in self.guilds), return_exceptions=True)
 
         # Run startup health checks in a thread so blocking autofix
         # (ollama serve poll, model pull) doesn't freeze the event loop.

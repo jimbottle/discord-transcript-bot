@@ -13,6 +13,15 @@ class BotManager:
     def __init__(self):
         self._process = None
         self._stderr_log = None
+        self._stderr_fh = None
+
+    def _close_stderr_fh(self):
+        if self._stderr_fh is not None:
+            try:
+                self._stderr_fh.close()
+            except OSError:
+                pass
+            self._stderr_fh = None
 
     @property
     def running(self):
@@ -77,6 +86,8 @@ class BotManager:
     def start(self):
         if self.running:
             return False
+        # Close any leftover stderr handle from a prior run
+        self._close_stderr_fh()
         # Clear stale health file from any previous run
         try:
             os.remove(HEALTH_STATUS_FILE)
@@ -84,12 +95,12 @@ class BotManager:
             pass
         self._stderr_log = os.path.join(PROJECT_ROOT, ".logs", "bot_stderr.log")
         os.makedirs(os.path.dirname(self._stderr_log), exist_ok=True)
-        stderr_file = open(self._stderr_log, "a")
+        self._stderr_fh = open(self._stderr_log, "a")
         self._process = subprocess.Popen(
             [self._python_executable(), "main.py"],
             cwd=PROJECT_ROOT,
             stdout=subprocess.DEVNULL,
-            stderr=stderr_file,
+            stderr=self._stderr_fh,
         )
         return True
 
@@ -102,6 +113,7 @@ class BotManager:
         except subprocess.TimeoutExpired:
             self._process.kill()
         self._process = None
+        self._close_stderr_fh()
         try:
             os.remove(HEALTH_STATUS_FILE)
         except FileNotFoundError:

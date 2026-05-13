@@ -95,11 +95,13 @@ class WhisperSink(Sink):
         self.executor = ThreadPoolExecutor(max_workers=8)  # TODO: Adjust this
         self.player_map = player_map
 
-        # Per-session transcript file
+        # Per-session transcript file, kept open for the lifetime of the sink
+        # so we don't pay an open/close on every utterance.
         transcript_dir = os.path.join(os.getcwd(), "transcripts")
         os.makedirs(transcript_dir, exist_ok=True)
         session_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         self.session_file = os.path.join(transcript_dir, f"{session_time}.txt")
+        self._session_fh = open(self.session_file, "a", encoding="utf-8")
 
     def start_voice_thread(self, on_exception=None):
         def thread_exception_hook(args):
@@ -332,9 +334,14 @@ class WhisperSink(Sink):
         if transcription and transcription.strip():
             player = speaker.player or "Unknown"
             character = speaker.character or "Unknown"
-            timestamp = first_word_time[11:]
-            with open(self.session_file, "a", encoding="utf-8") as f:
-                f.write(f"[{timestamp}] {player} ({character}) [{speaker.user}]: {transcription.strip()}\n")
+            timestamp = datetime.fromtimestamp(speaker.first_word).strftime('%H:%M:%S')
+            try:
+                self._session_fh.write(
+                    f"[{timestamp}] {player} ({character}) [{speaker.user}]: {transcription.strip()}\n"
+                )
+                self._session_fh.flush()
+            except (ValueError, OSError) as e:
+                logger.warning(f"Failed to write per-session transcript line: {e}")
     
 
     @Filters.container
@@ -355,3 +362,9 @@ class WhisperSink(Sink):
         self.running = False
         self.queue.put_nowait(None)
         super().cleanup()
+        try:
+            if getattr(self, "_session_fh", None) is not None:
+                self._session_fh.close()
+                self._session_fh = None
+        except OSError:
+            pass

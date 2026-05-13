@@ -1,4 +1,6 @@
-from flask import Flask, jsonify, redirect, render_template, request, url_for
+import os
+
+from flask import Flask, abort, jsonify, render_template, request
 
 from bot_manager import BotManager
 from transcript_service import (
@@ -10,6 +12,14 @@ from transcript_service import (
 
 app = Flask(__name__)
 bot = BotManager()
+
+
+def _require_same_origin():
+    # CSRF defense: cross-origin <form> submissions cannot set custom headers,
+    # so require X-Requested-With on every state-changing request. The dashboard
+    # invokes these via fetch() with the header set.
+    if request.headers.get("X-Requested-With") != "XMLHttpRequest":
+        abort(403)
 
 
 @app.route("/")
@@ -42,14 +52,16 @@ def search():
 
 @app.route("/bot/start", methods=["POST"])
 def bot_start():
+    _require_same_origin()
     bot.start()
-    return redirect(url_for("index"))
+    return jsonify(bot.status())
 
 
 @app.route("/bot/stop", methods=["POST"])
 def bot_stop():
+    _require_same_origin()
     bot.stop()
-    return redirect(url_for("index"))
+    return jsonify(bot.status())
 
 
 @app.route("/bot/status")
@@ -58,4 +70,5 @@ def bot_status():
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5001)
+    debug = os.getenv("FLASK_DEBUG", "").lower() in ("1", "true", "yes")
+    app.run(host="127.0.0.1", port=5001, debug=debug)
