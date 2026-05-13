@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block title %}Dashboard - Transcript Bot{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+
+<article>
+    <header><h3>Bot Status</h3></header>
+    <div class="bot-controls">
+        <span id="status-badge" class="status-badge status-{{ bot_status.status }}">
+            {%- if bot_status.status == 'initializing' -%}
+                Initializing{% if bot_status.current_check %}: {{ bot_status.current_check }}{% endif %}...
+            {%- elif bot_status.status == 'starting' -%}
+                Starting...
+            {%- elif bot_status.status == 'ready' -%}
+                Ready
+            {%- elif bot_status.status == 'unhealthy' -%}
+                Unhealthy
+            {%- elif bot_status.status == 'crashed' -%}
+                Crashed
+            {%- else -%}
+                Stopped
+            {%- endif -%}
+        </span>
+        <form action="{{ url_for('bot_start') }}" method="post">
+            <button type="submit" {% if bot_status.status in ('ready', 'unhealthy', 'starting', 'initializing') %}disabled{% endif %}>Start Bot</button>
+        </form>
+        <form action="{{ url_for('bot_stop') }}" method="post">
+            <button type="submit" class="secondary" {% if bot_status.status not in ('ready', 'unhealthy', 'starting', 'initializing') %}disabled{% endif %}>Stop Bot</button>
+        </form>
+    </div>
+    <ul id="health-checks" class="health-check-list" style="{% if not bot_status.checks %}display:none{% endif %}">
+        {% if bot_status.checks %}
+        {% for name, check in bot_status.checks.items() %}
+        <li class="health-check {% if check.ok %}check-pass{% elif check.critical %}check-fail{% else %}check-warn{% endif %}">
+            {% if check.ok %}&#10003;{% elif check.critical %}&#10007;{% else %}&#9888;{% endif %}
+            <strong>{{ name }}</strong>: {{ check.message }}
+        </li>
+        {% endfor %}
+        {% endif %}
+    </ul>
+    {% if bot_status.error %}
+    <details open>
+        <summary>Error Output</summary>
+        <pre><code>{{ bot_status.error }}</code></pre>
+    </details>
+    {% endif %}
+</article>
+
+<article>
+    <header><h3>Recent Transcripts</h3></header>
+    {% if transcripts %}
+    <table>
+        <thead><tr><th>File</th><th>Size</th></tr></thead>
+        <tbody>
+        {% for t in transcripts %}
+            <tr>
+                <td><a href="{{ url_for('view_transcript', filename=t.filename) }}">{{ t.filename }}</a></td>
+                <td>{{ "%.1f"|format(t.size / 1024) }} KB</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    <a href="{{ url_for('transcripts') }}">View all transcripts</a>
+    {% else %}
+    <p>No transcripts yet.</p>
+    {% endif %}
+</article>
+{% endblock %}
+
+{% block scripts %}
+<script>
+setInterval(async () => {
+    try {
+        const res = await fetch("{{ url_for('bot_status') }}");
+        const data = await res.json();
+        const badge = document.getElementById("status-badge");
+        const checkList = document.getElementById("health-checks");
+
+        // Build badge label
+        let label;
+        if (data.status === "initializing") {
+            label = "Initializing";
+            if (data.current_check) label += ": " + data.current_check;
+            label += "...";
+        } else if (data.status === "starting") {
+            label = "Starting...";
+        } else {
+            label = data.status.charAt(0).toUpperCase() + data.status.slice(1);
+        }
+
+        badge.textContent = label;
+        badge.className = "status-badge status-" + data.status;
+
+        // Button states
+        const processAlive = ["ready", "unhealthy", "starting", "initializing"].includes(data.status);
+        document.querySelector('[action*="bot/start"] button').disabled = processAlive;
+        document.querySelector('[action*="bot/stop"] button').disabled = !processAlive;
+
+        // Check list
+        const checks = data.checks || {};
+        const names = Object.keys(checks);
+        if (names.length > 0) {
+            checkList.innerHTML = names.map(name => {
+                const c = checks[name];
+                let cls, icon;
+                if (c.ok) { cls = "check-pass"; icon = "\u2713"; }
+                else if (c.critical) { cls = "check-fail"; icon = "\u2717"; }
+                else { cls = "check-warn"; icon = "\u26A0"; }
+                return `<li class="health-check ${cls}">${icon} <strong>${name}</strong>: ${c.message}</li>`;
+            }).join("");
+            checkList.style.display = "";
+        } else {
+            checkList.style.display = "none";
+        }
+    } catch (e) {
+        console.error("Status poll error:", e);
+    }
+}, 3000);
+</script>
+{% endblock %}

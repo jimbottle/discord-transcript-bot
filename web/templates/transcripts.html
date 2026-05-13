@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Transcripts - Transcript Bot{% endblock %}
+{% block content %}
+<h1>Transcripts</h1>
+
+<h3>Text Transcripts</h3>
+{% if txt_files %}
+<table>
+    <thead><tr><th>File</th><th>Size</th></tr></thead>
+    <tbody>
+    {% for t in txt_files %}
+        <tr>
+            <td><a href="{{ url_for('view_transcript', filename=t.filename) }}">{{ t.filename }}</a></td>
+            <td>{{ "%.1f"|format(t.size / 1024) }} KB</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p>No text transcripts found.</p>
+{% endif %}
+
+<h3>JSON Logs</h3>
+{% if log_files %}
+<table>
+    <thead><tr><th>File</th><th>Size</th></tr></thead>
+    <tbody>
+    {% for l in log_files %}
+        <tr>
+            <td>{{ l.filename }}</td>
+            <td>{{ "%.1f"|format(l.size / 1024) }} KB</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p>No log files found.</p>
+{% endif %}
+{% endblock %}

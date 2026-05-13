@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Transcript Bot{% endblock %}</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <header class="container">
+        <nav>
+            <ul>
+                <li><a href="{{ url_for('index') }}"><strong>Transcript Bot</strong></a></li>
+                <li><a href="{{ url_for('transcripts') }}">Transcripts</a></li>
+                <li><a href="{{ url_for('search') }}">Search</a></li>
+            </ul>
+        </nav>
+    </header>
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

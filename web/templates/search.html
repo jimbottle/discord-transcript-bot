@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Search - Transcript Bot{% endblock %}
+{% block content %}
+<h1>Search Transcripts</h1>
+
+<form action="{{ url_for('search') }}" method="get">
+    <fieldset role="group">
+        <input type="search" name="q" value="{{ query }}" placeholder="Search transcript logs...">
+        <button type="submit">Search</button>
+    </fieldset>
+</form>
+
+{% if query %}
+<p>{{ results|length }} result{{ 's' if results|length != 1 }} for "<strong>{{ query }}</strong>"</p>
+
+{% for r in results %}
+<div class="search-result">
+    <p>{{ r.text }}</p>
+    <p class="search-meta">
+        {% if r.player %}<strong>{{ r.player }}</strong>{% if r.character and r.character != r.player %} ({{ r.character }}){% endif %} &middot; {% endif %}
+        {{ r.date }} {{ r.time }} &middot; {{ r.source }}
+    </p>
+</div>
+{% endfor %}
+{% endif %}
+{% endblock %}

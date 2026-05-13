@@ -1,0 +1,107 @@
+/* Status indicator */
+.status-badge {
+    display: inline-block;
+    padding: 0.25rem 0.75rem;
+    border-radius: 1rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+}
+
+.status-ready {
+    background: #d4edda;
+    color: #155724;
+}
+
+.status-unhealthy {
+    background: #f8d7da;
+    color: #721c24;
+}
+
+.status-stopped {
+    background: #f8d7da;
+    color: #721c24;
+}
+
+.status-crashed {
+    background: #fff3cd;
+    color: #856404;
+}
+
+.status-starting {
+    background: #fff3cd;
+    color: #856404;
+}
+
+.status-initializing {
+    background: #fff3cd;
+    color: #856404;
+}
+
+/* Health check list */
+.health-check-list {
+    list-style: none;
+    padding: 0;
+    margin: 0.75rem 0 0;
+    font-size: 0.85rem;
+}
+
+.health-check {
+    padding: 0.2rem 0;
+}
+
+.check-pass {
+    color: #155724;
+}
+
+.check-fail {
+    color: #721c24;
+}
+
+.check-warn {
+    color: #856404;
+}
+
+/* Transcript content */
+.transcript-content {
+    white-space: pre-wrap;
+    font-family: var(--pico-font-family-monospace);
+    font-size: 0.85rem;
+    background: var(--pico-card-background-color);
+    padding: 1rem;
+    border-radius: var(--pico-border-radius);
+    max-height: 80vh;
+    overflow-y: auto;
+}
+
+/* Search results */
+.search-result {
+    border-left: 3px solid var(--pico-primary);
+    padding-left: 1rem;
+    margin-bottom: 1rem;
+}
+
+.search-meta {
+    font-size: 0.8rem;
+    color: var(--pico-muted-color);
+}
+
+/* Bot controls */
+.bot-controls {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.bot-controls form {
+    margin: 0;
+}
+
+
+/* Nav */
+nav ul {
+    list-style: none;
+    padding: 0;
+    display: flex;
+    gap: 1rem;
+}

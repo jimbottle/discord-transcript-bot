@@ -4,6 +4,9 @@ help:
 start:
 	python main.py
 	
+web:
+	cd web && python app.py
+
 rabbitmq:
 	podman run --rm -d \
 			--hostname heybilly-rabbit \

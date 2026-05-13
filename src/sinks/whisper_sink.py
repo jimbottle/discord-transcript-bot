@@ -2,6 +2,7 @@ import asyncio
 import io
 import json
 import logging
+import os
 import threading
 import time
 import wave
@@ -93,6 +94,12 @@ class WhisperSink(Sink):
         self.voice_queue = Queue()
         self.executor = ThreadPoolExecutor(max_workers=8)  # TODO: Adjust this
         self.player_map = player_map
+
+        # Per-session transcript file
+        transcript_dir = os.path.join(os.getcwd(), "transcripts")
+        os.makedirs(transcript_dir, exist_ok=True)
+        session_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        self.session_file = os.path.join(transcript_dir, f"{session_time}.txt")
 
     def start_voice_thread(self, on_exception=None):
         def thread_exception_hook(args):
@@ -320,6 +327,14 @@ class WhisperSink(Sink):
         transcription_logger.info(log_message)
         # Place into queue for processing
         self.transcription_output_queue.put_nowait(log_message)
+
+        # Write human-readable line to per-session transcript file
+        if transcription and transcription.strip():
+            player = speaker.player or "Unknown"
+            character = speaker.character or "Unknown"
+            timestamp = first_word_time[11:]
+            with open(self.session_file, "a", encoding="utf-8") as f:
+                f.write(f"[{timestamp}] {player} ({character}) [{speaker.user}]: {transcription.strip()}\n")
     
 
     @Filters.container

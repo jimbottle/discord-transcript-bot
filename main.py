@@ -98,26 +98,77 @@ if __name__ == "__main__":
         if bot._is_ready is False:
             await ctx.respond("System's still booting up, choom. Try again in a sec.", ephemeral=True)
             return
+        await ctx.defer()
+        # Quick gateway sanity check — full health was verified at startup.
+        # Avoid running heavy checks (whisper transcription) in a thread here
+        # as GIL contention can starve the gateway heartbeat.
+        if not bot.is_ready() or bot.latency == float('inf') or bot.latency > 5.0:
+            await ctx.followup.send(
+                "Gateway connection is unstable. Try again in a moment, or run `/health` for details.",
+            )
+            return
         author_vc = ctx.author.voice
         if not author_vc:
-            await ctx.respond("You're not in a voice channel. Jack in first, then call me.", ephemeral=True)
+            await ctx.followup.send("You're not in a voice channel. Jack in first, then call me.")
             return
-        # check if we are already connected to a voice channel
-        if bot.guild_to_helper.get(ctx.guild_id, None):
-            await ctx.respond("Already connected on this server. One channel at a time.", ephemeral=True)
+        # check if we are already connected or mid-connection
+        guild_id = ctx.guild_id
+        if bot.guild_to_helper.get(guild_id, None):
+            await ctx.followup.send("Already connected on this server. One channel at a time.")
             return
-        await ctx.trigger_typing()
+        if guild_id in bot._connecting_guilds:
+            await ctx.followup.send("Already connecting. Hold on.")
+            return
+        bot._connecting_guilds.add(guild_id)
         try:
-            guild_id = ctx.guild_id
-            vc = await author_vc.channel.connect()
+            # Clean up any ghost voice client from a crashed previous session
+            existing_vc = ctx.guild.voice_client
+            if existing_vc:
+                logger.warning(f"Cleaning up ghost voice client for guild {guild_id}")
+                try:
+                    await existing_vc.disconnect(force=True)
+                except Exception:
+                    pass
+                await asyncio.sleep(1)
+
+            vc = await author_vc.channel.connect(reconnect=False, timeout=15)
+            await asyncio.sleep(2)
+            if not vc.is_connected():
+                try:
+                    await vc.disconnect(force=True)
+                except Exception:
+                    pass
+                try:
+                    await ctx.guild.change_voice_state(channel=None)
+                except Exception:
+                    pass
+                await ctx.followup.send("Voice connection failed — could not establish a stable connection. Try again.")
+                return
             helper = bot.guild_to_helper.get(guild_id, BotHelper(bot))
             helper.guild_id = guild_id
             helper.set_vc(vc)
             bot.guild_to_helper[guild_id] = helper
-            await ctx.respond("Jacked in. Connected to the voice channel and standing by.", ephemeral=False)
+            await ctx.followup.send("Jacked in. Connected to the voice channel and standing by.")
             await ctx.guild.change_voice_state(channel=author_vc.channel, self_mute=True)
         except Exception as e:
-            await ctx.respond(f"{e}", ephemeral=True)
+            # Force-leave at the gateway level. The bot appears in the
+            # channel as soon as OP 4 is sent (before voice WS connects),
+            # so we must send channel=None to leave even if VoiceClient
+            # was never fully constructed.
+            remaining_vc = ctx.guild.voice_client
+            if remaining_vc:
+                try:
+                    await remaining_vc.disconnect(force=True)
+                except Exception:
+                    pass
+            try:
+                await ctx.guild.change_voice_state(channel=None)
+            except Exception:
+                pass
+            bot.guild_to_helper.pop(guild_id, None)
+            await ctx.followup.send(f"Failed to connect to voice: {e}")
+        finally:
+            bot._connecting_guilds.discard(guild_id)
 
     @bot.slash_command(name="scribe", description="Start transcribing voice to text.")
     async def ink(ctx: discord.context.ApplicationContext):
@@ -335,6 +386,10 @@ if __name__ == "__main__":
             discord.EmbedField(
                 name="/generate_pdf", value="Export transcript as PDF.", inline=True),
             discord.EmbedField(
+                name="/update_player_map", value="Sync player names with roster.", inline=True),
+            discord.EmbedField(
+                name="/health", value="Show system health status.", inline=True),
+            discord.EmbedField(
                 name="/help", value="Show this menu.", inline=True),
         ]
 
@@ -345,7 +400,14 @@ if __name__ == "__main__":
 
         await ctx.respond(embed=embed, ephemeral=True)
 
-
+    @bot.slash_command(name="health", description="Show system health status.")
+    async def health(ctx: discord.context.ApplicationContext):
+        await ctx.defer(ephemeral=True)
+        from src.bot.health import HealthCheck
+        check = HealthCheck()
+        await asyncio.to_thread(check.run_all, autofix=False, bot=bot)
+        status = "All systems operational." if check.all_ok() else "Critical checks failing."
+        await ctx.followup.send(f"**{status}**\n```\n{check.summary()}\n```")
 
     try:
         loop.run_until_complete(bot.start(DISCORD_BOT_TOKEN))

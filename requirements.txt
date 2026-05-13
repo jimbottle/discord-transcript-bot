@@ -1,5 +1,7 @@
 #Discord Voice
-py-cord[voice]
+# Pinned to fix/voice-rec-2 branch for DAVE receive support (PR #3159).
+# Switch back to a released version once 2.8.0 ships with the receive PR merged.
+py-cord[voice] @ git+https://github.com/Pycord-Development/pycord@fix/voice-rec-2
 
 aio-pika
 pyyaml
@@ -19,11 +21,17 @@ openai
 faster_whisper
 speechrecognition
 
+# LLM for /ask command
+ollama
+
 # torch support of cuda 12
 #--extra-index-url https://download.pytorch.org/whl/cu121
 #torch
 
 # torch cpu only support
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch 
+torch
+
+# Web UI
+flask
 
