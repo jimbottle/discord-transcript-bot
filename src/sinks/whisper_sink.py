@@ -95,13 +95,16 @@ class WhisperSink(Sink):
         self.executor = ThreadPoolExecutor(max_workers=8)  # TODO: Adjust this
         self.player_map = player_map
 
-        # Per-session transcript file, kept open for the lifetime of the sink
-        # so we don't pay an open/close on every utterance.
+        # Per-session transcript file. Path is fixed at construction so all
+        # utterances from this sink land in the same file, but the handle is
+        # opened lazily on first write — so a sink that's constructed but
+        # never used won't leave an empty file on disk.
         transcript_dir = os.path.join(os.getcwd(), "transcripts")
         os.makedirs(transcript_dir, exist_ok=True)
         session_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         self.session_file = os.path.join(transcript_dir, f"{session_time}.txt")
-        self._session_fh = open(self.session_file, "a", encoding="utf-8")
+        self._session_fh = None
+        self._session_fh_lock = threading.Lock()
 
     def start_voice_thread(self, on_exception=None):
         def thread_exception_hook(args):
@@ -335,13 +338,31 @@ class WhisperSink(Sink):
             player = speaker.player or "Unknown"
             character = speaker.character or "Unknown"
             timestamp = datetime.fromtimestamp(speaker.first_word).strftime('%H:%M:%S')
+            line = f"[{timestamp}] {player} ({character}) [{speaker.user}]: {transcription.strip()}\n"
+            fh = self._get_session_fh()
+            if fh is None:
+                return
             try:
-                self._session_fh.write(
-                    f"[{timestamp}] {player} ({character}) [{speaker.user}]: {transcription.strip()}\n"
-                )
-                self._session_fh.flush()
+                fh.write(line)
+                fh.flush()
             except (ValueError, OSError) as e:
                 logger.warning(f"Failed to write per-session transcript line: {e}")
+
+    def _get_session_fh(self):
+        """Lazily open the per-session transcript file. Returns None if the
+        sink is shutting down (so an in-flight executor task completing after
+        close() doesn't race on a freshly cleared handle).
+        """
+        with self._session_fh_lock:
+            if not self.running:
+                return None
+            if self._session_fh is None:
+                try:
+                    self._session_fh = open(self.session_file, "a", encoding="utf-8")
+                except OSError as e:
+                    logger.warning(f"Failed to open per-session transcript file: {e}")
+                    return None
+            return self._session_fh
     
 
     @Filters.container
@@ -362,9 +383,10 @@ class WhisperSink(Sink):
         self.running = False
         self.queue.put_nowait(None)
         super().cleanup()
-        try:
-            if getattr(self, "_session_fh", None) is not None:
-                self._session_fh.close()
-                self._session_fh = None
-        except OSError:
-            pass
+        with self._session_fh_lock:
+            try:
+                if self._session_fh is not None:
+                    self._session_fh.close()
+                    self._session_fh = None
+            except OSError:
+                pass

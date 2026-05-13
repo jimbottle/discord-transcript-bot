@@ -14,11 +14,16 @@ app = Flask(__name__)
 bot = BotManager()
 
 
-def _require_same_origin():
-    # CSRF defense: cross-origin <form> submissions cannot set custom headers,
-    # so require X-Requested-With on every state-changing request. The dashboard
-    # invokes these via fetch() with the header set.
+def _require_csrf_header():
+    # CSRF defense for state-changing endpoints. Cross-origin <form> submissions
+    # cannot set custom headers, so requiring X-Requested-With blocks the classic
+    # form-CSRF attack. Additionally reject any request whose Origin is set and
+    # doesn't match this host — defense in depth against a browser extension or
+    # other same-machine actor that can set arbitrary headers.
     if request.headers.get("X-Requested-With") != "XMLHttpRequest":
+        abort(403)
+    origin = request.headers.get("Origin")
+    if origin and origin != request.host_url.rstrip("/"):
         abort(403)
 
 
@@ -52,14 +57,14 @@ def search():
 
 @app.route("/bot/start", methods=["POST"])
 def bot_start():
-    _require_same_origin()
+    _require_csrf_header()
     bot.start()
     return jsonify(bot.status())
 
 
 @app.route("/bot/stop", methods=["POST"])
 def bot_stop():
-    _require_same_origin()
+    _require_csrf_header()
     bot.stop()
     return jsonify(bot.status())
 
