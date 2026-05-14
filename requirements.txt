@@ -15,6 +15,7 @@ reportlab
 # Lets keep our code clean
 black
 pylint
+pytest
 
 #openai and speech recognition
 openai

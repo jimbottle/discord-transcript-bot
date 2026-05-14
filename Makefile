@@ -3,9 +3,18 @@ help:
 
 start:
 	python main.py
-	
+
 web:
 	cd web && python app.py
+
+test:
+	./venv/bin/python -m pytest tests/ -v
+
+preflight:
+	./scripts/preflight.sh
+
+verify-session:
+	./scripts/post_session_verify.sh
 
 rabbitmq:
 	podman run --rm -d \
