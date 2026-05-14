@@ -8,7 +8,10 @@ web:
 	cd web && python app.py
 
 test:
-	./venv/bin/python -m pytest tests/ -v
+	./venv/bin/python -m pytest tests/ -v -m "not integration"
+
+test-integration:
+	./venv/bin/python -m pytest tests/ -v -m integration
 
 preflight:
 	./scripts/preflight.sh

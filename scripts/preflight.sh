@@ -13,8 +13,8 @@ if [ ! -x "$VENV_PY" ]; then
     exit 1
 fi
 
-echo "=== Phase 1: pytest ==="
-"$VENV_PY" -m pytest tests/ -q
+echo "=== Phase 1: pytest (unit) ==="
+"$VENV_PY" -m pytest tests/ -q -m "not integration"
 
 echo
 echo "=== Phase 2: health checks (autofix off) ==="
@@ -30,10 +30,9 @@ hc = HealthCheck()
 results = hc.run_all(autofix=False, bot=None)
 print(hc.summary())
 
-# Treat ollama_model as a soft fail — it doesn't affect voice transcription.
 critical_failures = [
     name for name, info in results.items()
-    if info["critical"] and not info["ok"] and name != "ollama_model"
+    if info["critical"] and not info["ok"]
 ]
 if critical_failures:
     print(f"\nFAIL: critical checks failing: {critical_failures}")

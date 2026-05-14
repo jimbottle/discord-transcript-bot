@@ -91,7 +91,7 @@ class HealthCheck:
 
         # Only check model if server is up
         if self.checks.get("ollama_server", {}).get("ok"):
-            self._check_ollama_model(autofix=autofix)
+            self._check_ollama_model()
         else:
             self._record("ollama_model", False, "Skipped — ollama server is not running")
 
@@ -322,28 +322,29 @@ class HealthCheck:
 
     # ── ollama_model ──────────────────────────────────────────────────
 
-    def _check_ollama_model(self, autofix: bool = False):
+    def _check_ollama_model(self):
         model_name = "ai/mistral:latest"
         try:
             import ollama
             models = ollama.list()
             installed = [m.model for m in models.models]
             if any(name == model_name or name.endswith("/" + model_name) for name in installed):
-                self._record("ollama_model", True, f"{model_name} is available")
+                self._record("ollama_model", True, f"{model_name} is available", critical=False)
                 return
 
-            if not autofix:
-                self._record("ollama_model", False, f"{model_name} not installed")
-                return
-
-            # Auto-fix: pull the model (stream to avoid JSON parse errors)
-            logger.info(f"Health autofix: pulling {model_name} (this may take a while)...")
-            for progress in ollama.pull(model_name, stream=True):
-                pass
-            logger.info(f"Health autofix: {model_name} pulled successfully.")
-            self._record("ollama_model", True, f"{model_name} pulled via autofix")
+            # Non-critical: /ask is the only feature that uses this model.
+            # Voice transcription works without it. We deliberately do NOT
+            # auto-pull on startup — at ~4GB it would block on_ready for
+            # several minutes. Run `ollama pull ai/mistral:latest` manually
+            # when /ask is needed.
+            self._record(
+                "ollama_model",
+                False,
+                f"{model_name} not installed (run `ollama pull {model_name}` if /ask needed)",
+                critical=False,
+            )
         except Exception as e:
-            self._record("ollama_model", False, f"Ollama model check failed: {e}")
+            self._record("ollama_model", False, f"Ollama model check failed: {e}", critical=False)
 
     # ── discord_gateway ──────────────────────────────────────────────
 
