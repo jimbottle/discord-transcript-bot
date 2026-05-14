@@ -39,46 +39,50 @@ def _has_real_token():
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(
-    not _has_real_token(),
-    reason="DISCORD_BOT_TOKEN missing or placeholder — startup test needs a real token",
-)
-@pytest.mark.skipif(
-    not VENV_PYTHON.exists(),
-    reason="venv/bin/python not found",
-)
 def test_bot_subprocess_reaches_ready_phase():
+    # Evaluate prerequisites at test run time, not module import — so a
+    # post-collection change to env or venv state is observed correctly.
+    if not _has_real_token():
+        pytest.skip("DISCORD_BOT_TOKEN missing or placeholder — startup test needs a real token")
+    if not VENV_PYTHON.exists():
+        pytest.skip(f"venv/bin/python not found at {VENV_PYTHON}")
+
     # Clean any prior health status file so we don't observe stale state
-    try:
-        HEALTH_STATUS_FILE.unlink()
-    except FileNotFoundError:
-        pass
+    HEALTH_STATUS_FILE.unlink(missing_ok=True)
 
     stderr_log = PROJECT_ROOT / ".logs" / "bot_stderr_test.log"
     stderr_log.parent.mkdir(parents=True, exist_ok=True)
+    stderr_log.unlink(missing_ok=True)
+
+    def _read_stderr_tail(n=2000):
+        try:
+            return stderr_log.read_text(errors="replace")[-n:]
+        except FileNotFoundError:
+            return "(no stderr captured)"
+
+    proc = None
     stderr_fh = open(stderr_log, "w")
-
-    proc = subprocess.Popen(
-        [str(VENV_PYTHON), "main.py"],
-        cwd=str(PROJECT_ROOT),
-        stdout=subprocess.DEVNULL,
-        stderr=stderr_fh,
-    )
-
-    deadline = time.time() + READY_TIMEOUT
-    final_phase = None
-    final_status = None
-
     try:
+        proc = subprocess.Popen(
+            [str(VENV_PYTHON), "main.py"],
+            cwd=str(PROJECT_ROOT),
+            stdout=subprocess.DEVNULL,
+            stderr=stderr_fh,
+        )
+
+        deadline = time.time() + READY_TIMEOUT
+        final_phase = None
+        final_status = None
+        premature_exit_message = None
+
         while time.time() < deadline:
-            # If the bot process dies, fail fast with whatever stderr says
             if proc.poll() is not None:
                 stderr_fh.flush()
-                err = stderr_log.read_text(errors="replace")[-2000:]
-                pytest.fail(
+                premature_exit_message = (
                     f"Bot subprocess exited prematurely (rc={proc.returncode}). "
-                    f"Last stderr:\n{err}"
+                    f"Last stderr:\n{_read_stderr_tail()}"
                 )
+                break
 
             try:
                 final_status = json.loads(HEALTH_STATUS_FILE.read_text())
@@ -90,24 +94,27 @@ def test_bot_subprocess_reaches_ready_phase():
                 break
             time.sleep(POLL_INTERVAL)
     finally:
-        # Always tear down the subprocess. SIGINT is what main.py expects
-        # for graceful shutdown.
-        proc.send_signal(signal.SIGINT)
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
+        # Always tear down the subprocess and close the stderr handle
+        # before reading the file. SIGINT is what main.py expects.
+        if proc is not None and proc.poll() is None:
+            proc.send_signal(signal.SIGINT)
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
         stderr_fh.close()
+
+    if premature_exit_message:
+        pytest.fail(premature_exit_message)
 
     assert final_phase == "ready", (
         f"Bot did not reach phase=ready within {READY_TIMEOUT}s "
         f"(observed phase={final_phase!r}). "
         f"Status: {json.dumps(final_status, indent=2) if final_status else 'never written'}. "
-        f"Stderr tail: {stderr_log.read_text(errors='replace')[-1500:]}"
+        f"Stderr tail: {_read_stderr_tail(1500)}"
     )
 
-    # Verify the final status payload carries the expected shape
     assert "checks" in final_status
     critical_failures = [
         name for name, info in final_status["checks"].items()

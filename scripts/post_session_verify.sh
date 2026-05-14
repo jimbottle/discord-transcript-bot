@@ -68,15 +68,21 @@ fi
 
 echo
 echo "=== Open transcript file handles on running bot ==="
-BOT_PID=$(pgrep -f "python main.py" || true)
-if [ -n "$BOT_PID" ]; then
-    LEAKED=$(lsof -p "$BOT_PID" 2>/dev/null | grep -c "transcripts/" || true)
-    echo "  bot pid $BOT_PID has $LEAKED transcript fd(s) open"
+BOT_PIDS=$(pgrep -f "python main.py" || true)
+if [ -z "$BOT_PIDS" ]; then
+    echo "  bot not running (skipped)"
+else
+    PID_COUNT=$(echo "$BOT_PIDS" | wc -l | tr -d ' ')
+    if [ "$PID_COUNT" -gt 1 ]; then
+        echo "  WARN: multiple bot processes match: $(echo "$BOT_PIDS" | tr '\n' ' ')"
+    fi
+    # lsof accepts comma-separated pids via -p
+    PID_LIST=$(echo "$BOT_PIDS" | tr '\n' ',' | sed 's/,$//')
+    LEAKED=$(lsof -p "$PID_LIST" 2>/dev/null | grep -c "transcripts/" || true)
+    echo "  bot pids [$PID_LIST] have $LEAKED transcript fd(s) open"
     if [ "$LEAKED" -gt 0 ]; then
         echo "  (expected 0 after /stop — investigate if non-zero)"
     fi
-else
-    echo "  bot not running (skipped)"
 fi
 
 echo

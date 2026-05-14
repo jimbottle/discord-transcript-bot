@@ -1,12 +1,13 @@
 """Smoke tests for the HealthCheck system.
 
 These run without a bot instance and without autofix. They verify the check
-runner is wired up correctly and that the whisper_model check actually
-exercises decoding (not just imports). Skips checks that need a real bot
-gateway connection.
+runner is wired up correctly. The whisper_model end-to-end decode test is
+marked `integration` so the default `make test` doesn't load
+faster-whisper large-v3 — conftest's `_fast_whisper_model` fixture stubs
+`audio_model` for the fast suite.
 """
 
-import sys
+import pytest
 
 from src.bot.health import HealthCheck
 
@@ -33,18 +34,17 @@ def test_each_check_has_required_fields():
         assert isinstance(info["ok"], bool)
 
 
+@pytest.mark.integration
 def test_whisper_check_actually_decodes():
     """Regression test for roborev #512: the transcribe() generator was
     never consumed, so the check passed silently even if decoding broke.
-    Verify that running the check loads the model and produces a non-error
-    result on real synthetic audio."""
+    Marked integration because it loads faster-whisper large-v3 (~10s on
+    first run); the conftest fixture stubs the model for the fast suite."""
     hc = HealthCheck()
     hc._check_whisper_model()
     result = hc.checks["whisper_model"]
-    # Either OK (model works) or FAIL with a real exception message.
-    # What we don't want is silent OK with a broken pipeline — covered by
-    # the fact that the check now iterates the segments.
-    assert result["message"] != "", "whisper_model check returned empty message"
+    assert result["ok"] is True, f"Real model failed to decode: {result['message']}"
+    assert result["message"] != ""
 
 
 def test_summary_renders_one_line_per_check():

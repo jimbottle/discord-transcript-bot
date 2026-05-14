@@ -93,7 +93,13 @@ class HealthCheck:
         if self.checks.get("ollama_server", {}).get("ok"):
             self._check_ollama_model()
         else:
-            self._record("ollama_model", False, "Skipped — ollama server is not running")
+            # Non-critical: ollama is only used by /ask; bot must still start.
+            self._record(
+                "ollama_model",
+                False,
+                "Skipped — ollama server is not running",
+                critical=False,
+            )
 
         if autofix:
             self._write_status("initializing", "discord_gateway")
@@ -286,12 +292,15 @@ class HealthCheck:
             return False
 
     def _check_ollama_server(self, autofix: bool = False):
+        # Non-critical: only /ask depends on ollama. Voice transcription works
+        # without it, so a host without ollama installed must still be able to
+        # start the bot.
         if self._ollama_is_reachable():
-            self._record("ollama_server", True, "Ollama server reachable")
+            self._record("ollama_server", True, "Ollama server reachable", critical=False)
             return
 
         if not autofix:
-            self._record("ollama_server", False, "Ollama server not reachable")
+            self._record("ollama_server", False, "Ollama server not reachable", critical=False)
             return
 
         # Auto-fix: start ollama serve if we haven't already
@@ -304,10 +313,10 @@ class HealthCheck:
                     stderr=subprocess.DEVNULL,
                 )
             except FileNotFoundError:
-                self._record("ollama_server", False, "ollama binary not found on PATH")
+                self._record("ollama_server", False, "ollama binary not found on PATH (only /ask needs it)", critical=False)
                 return
             except Exception as e:
-                self._record("ollama_server", False, f"Failed to start ollama: {e}")
+                self._record("ollama_server", False, f"Failed to start ollama: {e}", critical=False)
                 return
 
         # Poll for readiness (up to ~10s)
@@ -315,10 +324,10 @@ class HealthCheck:
             time.sleep(0.5)
             if self._ollama_is_reachable():
                 logger.info("Health autofix: ollama server is now reachable.")
-                self._record("ollama_server", True, "Ollama server started via autofix")
+                self._record("ollama_server", True, "Ollama server started via autofix", critical=False)
                 return
 
-        self._record("ollama_server", False, "Started ollama serve but it didn't become reachable in 10s")
+        self._record("ollama_server", False, "Started ollama serve but it didn't become reachable in 10s", critical=False)
 
     # ── ollama_model ──────────────────────────────────────────────────
 
