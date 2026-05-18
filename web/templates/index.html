@@ -21,9 +21,19 @@
                 Stopped
             {%- endif -%}
         </span>
-        <button id="btn-bot-start" type="button" {% if bot_status.status in ('ready', 'unhealthy', 'starting', 'initializing') %}disabled{% endif %}>Start Bot</button>
-        <button id="btn-bot-stop" type="button" class="secondary" {% if bot_status.status not in ('ready', 'unhealthy', 'starting', 'initializing') %}disabled{% endif %}>Stop Bot</button>
+        <button id="btn-bot-start" type="button" {% if bot_status.external or bot_status.status in ('ready', 'unhealthy', 'starting', 'initializing') %}disabled{% endif %}>Start Bot</button>
+        <button id="btn-bot-stop" type="button" class="secondary" {% if bot_status.external or bot_status.status not in ('ready', 'unhealthy', 'starting', 'initializing') %}disabled{% endif %}>Stop Bot</button>
+        <span id="pid-label" class="search-meta">{% if bot_status.pid %}pid {{ bot_status.pid }}{% endif %}</span>
     </div>
+    <p id="external-note" class="search-meta" style="{% if not bot_status.external %}display:none{% endif %}">
+        Launched outside the dashboard (e.g. <code>make start</code>) — start/stop are disabled here; manage it from where it was started.
+    </p>
+    <p id="health-summary" class="search-meta" style="{% if not bot_status.checks %}display:none{% endif %}">
+        {% if bot_status.checks %}
+        {% set ok = bot_status.checks.values() | selectattr('ok') | list | length %}
+        {{ ok }}/{{ bot_status.checks | length }} checks OK
+        {% endif %}
+    </p>
     <ul id="health-checks" class="health-check-list" style="{% if not bot_status.checks %}display:none{% endif %}">
         {% if bot_status.checks %}
         {% for name, check in bot_status.checks.items() %}
@@ -39,6 +49,22 @@
         <summary>Error Output</summary>
         <pre><code>{{ bot_status.error }}</code></pre>
     </details>
+    {% endif %}
+</article>
+
+<article>
+    <header><h3>Current Session</h3></header>
+    {% if live.filename %}
+    <p>
+        <span class="live-badge {% if live.live %}live-on{% else %}live-off{% endif %}">
+            {%- if live.live %}● LIVE{% else %}idle{% endif -%}
+        </span>
+        <a href="{{ url_for('view_transcript', filename=live.filename) }}">{{ live.filename }}</a>
+        &middot; {{ live.entries | length }} entr{{ 'y' if live.entries | length == 1 else 'ies' }}
+    </p>
+    <a href="{{ url_for('live') }}" role="button" class="secondary">Open live view &rarr;</a>
+    {% else %}
+    <p>No session transcript yet.</p>
     {% endif %}
 </article>
 
@@ -90,8 +116,27 @@ function renderStatus(data) {
     badge.className = "status-badge status-" + data.status;
 
     const processAlive = ["ready", "unhealthy", "starting", "initializing"].includes(data.status);
-    startBtn.disabled = processAlive;
-    stopBtn.disabled = !processAlive;
+    // An externally-launched bot can't be controlled from here.
+    startBtn.disabled = data.external || processAlive;
+    stopBtn.disabled = data.external || !processAlive;
+
+    const note = document.getElementById("external-note");
+    if (note) note.style.display = data.external ? "" : "none";
+
+    const pidLabel = document.getElementById("pid-label");
+    if (pidLabel) pidLabel.textContent = data.pid ? "pid " + data.pid : "";
+
+    const summary = document.getElementById("health-summary");
+    if (summary) {
+        const vals = Object.values(data.checks || {});
+        if (vals.length) {
+            const ok = vals.filter((c) => c.ok).length;
+            summary.textContent = ok + "/" + vals.length + " checks OK";
+            summary.style.display = "";
+        } else {
+            summary.style.display = "none";
+        }
+    }
 
     // Build the check list via createElement + textContent so check messages
     // (which may contain exception text from third-party errors) can never

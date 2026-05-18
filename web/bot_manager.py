@@ -40,37 +40,72 @@ class BotManager:
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return None
 
+    def _find_bot_pid(self):
+        """PID of a `main.py` bot we did NOT spawn (make start / detached),
+        or None. Best-effort via pgrep; the caller pairs this with a
+        present health file so a stale file alone never reads as running."""
+        try:
+            out = subprocess.run(
+                ["pgrep", "-f", "main.py"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        for tok in out.stdout.split():
+            try:
+                return int(tok)
+            except ValueError:
+                continue
+        return None
+
+    def _status_from_health(self, pid, external):
+        health = self._read_health()
+        if health is None:
+            return {
+                "status": "starting",
+                "pid": pid,
+                "checks": {},
+                "external": external,
+            }
+        phase = health.get("phase", "starting")
+        combined = {
+            "ready": "ready",
+            "failed": "unhealthy",
+            "initializing": "initializing",
+        }.get(phase, "starting")
+        result = {
+            "status": combined,
+            "pid": pid,
+            "checks": health.get("checks", {}),
+            "external": external,
+        }
+        if combined == "initializing" and health.get("current_check"):
+            result["current_check"] = health["current_check"]
+        return result
+
     def status(self):
         if self._process is None:
-            return {"status": "stopped", "pid": None}
+            # We didn't spawn it — but it may be running externally
+            # (`make start`, a detached run). Require BOTH a live
+            # main.py process AND a health file so a stale health file
+            # from a crashed run doesn't read as running.
+            pid = self._find_bot_pid()
+            if pid is not None and self._read_health() is not None:
+                return self._status_from_health(pid, external=True)
+            return {"status": "stopped", "pid": None, "external": False}
         rc = self._process.poll()
         if rc is None:
-            health = self._read_health()
-            if health is None:
-                return {
-                    "status": "starting",
-                    "pid": self._process.pid,
-                    "checks": {},
-                }
-            phase = health.get("phase", "starting")
-            if phase == "ready":
-                combined = "ready"
-            elif phase == "failed":
-                combined = "unhealthy"
-            elif phase == "initializing":
-                combined = "initializing"
-            else:
-                combined = "starting"
-            result = {
-                "status": combined,
-                "pid": self._process.pid,
-                "checks": health.get("checks", {}),
-            }
-            if combined == "initializing" and health.get("current_check"):
-                result["current_check"] = health["current_check"]
-            return result
+            return self._status_from_health(self._process.pid, external=False)
         error = self._read_stderr()
-        return {"status": "crashed", "pid": None, "exit_code": rc, "error": error}
+        return {
+            "status": "crashed",
+            "pid": None,
+            "exit_code": rc,
+            "error": error,
+            "external": False,
+        }
 
     def _read_stderr(self):
         if self._stderr_log and os.path.isfile(self._stderr_log):

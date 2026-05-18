@@ -34,7 +34,10 @@ def _require_csrf_header():
 def index():
     transcripts = list_transcripts()[:5]
     return render_template(
-        "index.html", transcripts=transcripts, bot_status=bot.status()
+        "index.html",
+        transcripts=transcripts,
+        bot_status=bot.status(),
+        live=get_live_session(),
     )
 
 
