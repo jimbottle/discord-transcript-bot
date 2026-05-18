@@ -332,9 +332,11 @@ class HealthCheck:
     # ── ollama_model ──────────────────────────────────────────────────
 
     def _check_ollama_model(self):
-        # Default kept identical to main.ASK_OLLAMA_MODEL so the health
-        # check verifies whatever model /ask will actually use.
-        model_name = os.getenv("ASK_OLLAMA_MODEL", "ai/mistral:latest")
+        # Shared resolver with main.py's /ask (single source of truth;
+        # empty ASK_OLLAMA_MODEL= falls back to the default) so the
+        # health check always verifies whatever model /ask will use.
+        from src.config.ollama_config import get_ask_model
+        model_name = get_ask_model()
         try:
             import ollama
             models = ollama.list()

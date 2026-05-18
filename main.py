@@ -11,17 +11,20 @@ from dotenv import load_dotenv
 
 from src.bot.helper import BotHelper
 from src.config.cliargs import CLIArgs
-from src.utils.answer import clean_ollama_answer
+from src.config.ollama_config import get_ask_model
+from src.utils.answer import TRUNCATION_SUFFIX, clean_ollama_answer
 from src.utils.commandline import CommandLine
 from src.utils.pdf_generator import pdf_generator
 
 load_dotenv()
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 PLAYER_MAP_FILE_PATH = os.getenv("PLAYER_MAP_FILE_PATH")
-# Model used by /ask. Override via env without code changes; the default
-# preserves prior behavior. Keep this default in sync with the identical
-# fallback in src/bot/health.py:_check_ollama_model.
-ASK_OLLAMA_MODEL = os.getenv("ASK_OLLAMA_MODEL", "ai/mistral:latest")
+# Model used by /ask. Resolved via the shared resolver (empty/unset env
+# → default) so main.py and src/bot/health.py can never disagree about
+# which model /ask actually uses.
+ASK_OLLAMA_MODEL = get_ask_model()
+# Discord hard-rejects messages longer than this many characters.
+DISCORD_MESSAGE_LIMIT = 2000
 
 logger = logging.getLogger()  # root logger
 
@@ -383,7 +386,24 @@ if __name__ == "__main__":
                     "`ASK_OLLAMA_MODEL` to a non-reasoning model.")
                 return
 
-            await ctx.followup.send(f"**Q:** {question}\n\n{answer}")
+            message = f"**Q:** {question}\n\n{answer}"
+            # clean_ollama_answer only caps the answer; a long /ask
+            # question can still push the composed message past Discord's
+            # hard 2000-char limit (the send would 400). Clamp the whole
+            # thing as a final guard.
+            if len(message) > DISCORD_MESSAGE_LIMIT:
+                message = message[:DISCORD_MESSAGE_LIMIT - len(TRUNCATION_SUFFIX)] + TRUNCATION_SUFFIX
+            await ctx.followup.send(message)
+        except TypeError as e:
+            # Most likely `chat() got an unexpected keyword argument
+            # 'think'` from an ollama client older than 0.5.x. The broad
+            # handler below would misleadingly blame the daemon.
+            logger.error(f"Ollama client error: {e}")
+            await ctx.followup.send(
+                "The Ollama Python client is too old for `/ask` "
+                "(needs the `think` parameter). Upgrade it: "
+                "`pip install -U 'ollama>=0.5.1'`.\n"
+                f"`{e}`")
         except Exception as e:
             logger.error(f"Ollama error: {e}")
             await ctx.followup.send(f"Failed to query the model. Make sure Ollama is running.\n`{e}`")

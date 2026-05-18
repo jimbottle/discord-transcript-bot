@@ -22,8 +22,9 @@ openai
 faster_whisper
 speechrecognition
 
-# LLM for /ask command
-ollama
+# LLM for /ask command. >=0.5.1: /ask passes think= to chat(), which
+# older clients reject with TypeError (misreported as a daemon failure).
+ollama>=0.5.1
 
 # torch support of cuda 12
 #--extra-index-url https://download.pytorch.org/whl/cu121

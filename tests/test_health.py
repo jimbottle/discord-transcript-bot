@@ -7,9 +7,54 @@ faster-whisper large-v3 — conftest's `_fast_whisper_model` fixture stubs
 `audio_model` for the fast suite.
 """
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from src.bot.health import HealthCheck
+
+
+def _stub_ollama_list(monkeypatch, installed_names):
+    """Stub ollama.list() so _check_ollama_model runs without a daemon."""
+    import ollama
+
+    fake = MagicMock()
+    fake.models = [MagicMock(model=n) for n in installed_names]
+    monkeypatch.setattr(ollama, "list", lambda: fake)
+
+
+def test_ollama_model_uses_env_override(monkeypatch):
+    """Regression for roborev #768 (MEDIUM): _check_ollama_model must
+    honor ASK_OLLAMA_MODEL, not a hardcoded literal."""
+    monkeypatch.setenv("ASK_OLLAMA_MODEL", "custom/model:99")
+    _stub_ollama_list(monkeypatch, [])  # nothing installed
+    hc = HealthCheck()
+    hc._check_ollama_model()
+    assert "custom/model:99" in hc.checks["ollama_model"]["message"]
+
+
+def test_ollama_model_default_when_env_unset(monkeypatch):
+    monkeypatch.delenv("ASK_OLLAMA_MODEL", raising=False)
+    _stub_ollama_list(monkeypatch, [])
+    hc = HealthCheck()
+    hc._check_ollama_model()
+    assert "ai/mistral:latest" in hc.checks["ollama_model"]["message"]
+
+
+def test_ollama_model_empty_env_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv("ASK_OLLAMA_MODEL", "  ")
+    _stub_ollama_list(monkeypatch, [])
+    hc = HealthCheck()
+    hc._check_ollama_model()
+    assert "ai/mistral:latest" in hc.checks["ollama_model"]["message"]
+
+
+def test_ollama_model_ok_when_resolved_model_installed(monkeypatch):
+    monkeypatch.setenv("ASK_OLLAMA_MODEL", "gemma4:26b")
+    _stub_ollama_list(monkeypatch, ["gemma4:26b"])
+    hc = HealthCheck()
+    hc._check_ollama_model()
+    assert hc.checks["ollama_model"]["ok"] is True
 
 
 def test_run_all_returns_dict_with_expected_keys():
