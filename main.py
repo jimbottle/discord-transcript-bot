@@ -217,10 +217,8 @@ if __name__ == "__main__":
 
         if bot.guild_is_recording.get(guild_id, False):
             await bot.get_transcription(ctx)
-            bot.stop_recording(ctx)
-            bot.guild_is_recording[guild_id] = False
+            bot.end_recording_session(ctx)
             await ctx.respond("Recording stopped. Data saved. Standing by for the next run.", ephemeral=False)
-            bot.cleanup_sink(ctx)
 
     @bot.slash_command(name="disconnect", description="Leave the voice channel.")
     async def disconnect(ctx: discord.context.ApplicationContext):
@@ -238,10 +236,25 @@ if __name__ == "__main__":
             return
 
         await ctx.trigger_typing()
+
+        # If we were recording, archive/teardown the session BEFORE
+        # disconnecting — drain queued transcriptions while the sink is
+        # still reachable, then stop+clear+close it. Without this,
+        # disconnecting mid-recording left guild_is_recording stuck True
+        # so a reconnect + /scribe hit "Already recording", and the sink
+        # leaked its file handle + voice thread.
+        if bot.guild_is_recording.get(guild_id, False):
+            await bot.get_transcription(ctx)
+            bot.end_recording_session(ctx)
+
         await bot_vc.disconnect()
         helper.guild_id = None
         helper.set_vc(None)
         bot.guild_to_helper.pop(guild_id, None)
+        # Belt-and-suspenders: clear the flag for this guild even if it
+        # was stale-True from a pre-fix disconnect, so any later /scribe
+        # after reconnecting starts clean.
+        bot.guild_is_recording.pop(guild_id, None)
 
         await ctx.respond("Disconnected. Session archived. Catch you on the next one, chooms.", ephemeral=False)
 

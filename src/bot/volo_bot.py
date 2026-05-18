@@ -176,6 +176,23 @@ class VoloBot(discord.Bot):
         guild_id = ctx.guild_id
         self._close_and_clean_sink_for_guild(guild_id)
 
+    def end_recording_session(self, ctx: discord.context.ApplicationContext):
+        """Tear down an active recording for ctx's guild: stop the voice
+        recording, clear the recording flag, and close/remove the sink.
+
+        Shared by /stop and /disconnect. Before this existed, /disconnect
+        skipped the teardown, so disconnecting while recording left
+        guild_is_recording stuck True — a later /scribe (even after
+        reconnecting) failed with "Already recording" — and leaked the
+        sink's file handle + voice thread. No-op if not recording.
+        """
+        guild_id = ctx.guild_id
+        if not self.guild_is_recording.get(guild_id, False):
+            return
+        self.stop_recording(ctx)
+        self.guild_is_recording[guild_id] = False
+        self.cleanup_sink(ctx)
+
     async def get_transcription(self, ctx: discord.context.ApplicationContext):
         # Get the transcription queue
         if not (self.guild_whisper_sinks.get(ctx.guild_id)):
