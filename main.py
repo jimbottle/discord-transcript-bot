@@ -15,6 +15,7 @@ from src.config.ollama_config import get_ask_model
 from src.utils.answer import clamp_message, clean_ollama_answer
 from src.utils.commandline import CommandLine
 from src.utils.pdf_generator import pdf_generator
+from src.utils.voice import disconnect_targets
 
 load_dotenv()
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
@@ -218,16 +219,34 @@ if __name__ == "__main__":
         # of expiring mid-teardown and 404ing as "The application did
         # not respond". Guard the teardown so we always confirm.
         await ctx.defer()
+        teardown_ok = True
+        # Independent try blocks: a get_transcription failure must NOT
+        # skip the actual teardown (that would leave guild_is_recording
+        # stuck True and leak the sink — the exact class this path
+        # exists to prevent).
         try:
             await bot.get_transcription(ctx)
+        except Exception as e:
+            logger.error(f"/stop get_transcription error: {e}")
+            teardown_ok = False
+        try:
             # end_recording_session joins the voice thread (blocking) —
             # run it off the event loop so a concurrent interaction
             # (e.g. an impatient second /stop) can still be ACKed and
             # doesn't itself show "The application did not respond".
             await asyncio.to_thread(bot.end_recording_session, ctx)
         except Exception as e:
-            logger.error(f"/stop teardown error: {e}")
-        await ctx.followup.send("Recording stopped. Data saved. Standing by for the next run.")
+            logger.error(f"/stop end_recording_session error: {e}")
+            teardown_ok = False
+        # Guarantee the flag clears even if teardown raised, so a later
+        # /scribe can't see "Already recording".
+        bot.guild_is_recording.pop(guild_id, None)
+        if teardown_ok:
+            await ctx.followup.send("Recording stopped. Data saved. Standing by for the next run.")
+        else:
+            await ctx.followup.send(
+                "Recording stopped, but cleanup hit an error — check the logs. "
+                "If the bot seems stuck, try `/disconnect`.")
 
     @bot.slash_command(name="disconnect", description="Leave the voice channel.")
     async def disconnect(ctx: discord.context.ApplicationContext):
@@ -251,30 +270,33 @@ if __name__ == "__main__":
 
         # Archive/teardown any active recording BEFORE disconnecting so
         # the transcript is flushed and guild_is_recording is cleared.
-        # Guarded so a teardown error can't skip the disconnect below.
-        try:
-            if bot.guild_is_recording.get(guild_id, False):
+        # Independent try blocks so a get_transcription failure can't
+        # skip the actual teardown, and neither can skip the disconnect.
+        teardown_ok = True
+        if bot.guild_is_recording.get(guild_id, False):
+            try:
                 await bot.get_transcription(ctx)
+            except Exception as e:
+                logger.error(f"/disconnect get_transcription error: {e}")
+                teardown_ok = False
+            try:
                 # Blocking voice-thread join — off the event loop so the
                 # bot stays responsive to other interactions meanwhile.
                 await asyncio.to_thread(bot.end_recording_session, ctx)
-        except Exception as e:
-            logger.error(f"/disconnect teardown error: {e}")
+            except Exception as e:
+                logger.error(f"/disconnect end_recording_session error: {e}")
+                teardown_ok = False
 
         # helper.vc can be a STALE voice client after a voice reconnect,
         # so disconnecting it alone leaves the bot in the channel while
-        # still reporting success. Disconnect the LIVE client too
-        # (ctx.guild.voice_client) with force=True, and any others in
-        # voice_clients for this guild, so the bot actually leaves.
-        targets = []
-        live_vc = ctx.guild.voice_client if ctx.guild else None
-        for cand in (live_vc, bot_vc):
-            if cand is not None and cand not in targets:
-                targets.append(cand)
-        for vc in list(bot.voice_clients):
-            if getattr(vc, "guild", None) and vc.guild.id == guild_id and vc not in targets:
-                targets.append(vc)
-        for vc in targets:
+        # still reporting success. Disconnect the live client and any
+        # others bound to this guild too (see disconnect_targets).
+        for vc in disconnect_targets(
+            ctx.guild.voice_client if ctx.guild else None,
+            bot_vc,
+            list(bot.voice_clients),
+            guild_id,
+        ):
             try:
                 await vc.disconnect(force=True)
             except Exception as e:
@@ -287,7 +309,11 @@ if __name__ == "__main__":
         # after reconnecting starts clean.
         bot.guild_is_recording.pop(guild_id, None)
 
-        await ctx.followup.send("Disconnected. Session archived. Catch you on the next one, chooms.")
+        if teardown_ok:
+            await ctx.followup.send("Disconnected. Session archived. Catch you on the next one, chooms.")
+        else:
+            await ctx.followup.send(
+                "Disconnected, but session cleanup hit an error — check the logs.")
 
     @bot.slash_command(name="generate_pdf", description="Export the transcript as a PDF.")
     async def generate_pdf(ctx: discord.context.ApplicationContext):
