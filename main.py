@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 
 from src.bot.helper import BotHelper
 from src.config.cliargs import CLIArgs
+from src.utils.answer import clean_ollama_answer
 from src.utils.commandline import CommandLine
 from src.utils.pdf_generator import pdf_generator
 
@@ -360,13 +361,23 @@ if __name__ == "__main__":
                         "role": "user",
                         "content": f"Here is the transcript:\n\n{transcript_text}\n\nQuestion: {question}"
                     }
-                ]
+                ],
+                # /ask wants a short grounded answer, not chain-of-thought.
+                # think=False disables native thinking (Gemma 4 defaults it
+                # on); clean_ollama_answer strips inline <think> for models
+                # that ignore it. num_predict caps latency — Discord
+                # truncates at ~1900 chars anyway.
+                think=False,
+                options={"num_predict": 512},
             )
-            answer = response['message']['content']
+            answer = clean_ollama_answer(response['message']['content'])
 
-            # Discord has a 2000 char limit
-            if len(answer) > 1900:
-                answer = answer[:1900] + "\n\n...(truncated)"
+            if not answer:
+                await ctx.followup.send(
+                    "The model returned no answer (it may have produced only "
+                    "internal reasoning). Try rephrasing, or set "
+                    "`ASK_OLLAMA_MODEL` to a non-reasoning model.")
+                return
 
             await ctx.followup.send(f"**Q:** {question}\n\n{answer}")
         except Exception as e:
