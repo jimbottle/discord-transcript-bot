@@ -366,9 +366,13 @@ if __name__ == "__main__":
                 # think=False disables native thinking (Gemma 4 defaults it
                 # on); clean_ollama_answer strips inline <think> for models
                 # that ignore it. num_predict caps latency — Discord
-                # truncates at ~1900 chars anyway.
+                # truncates at ~1900 chars anyway. temperature=0 keeps
+                # answers deterministic and transcript-grounded AND mirrors
+                # the local-models bench harness (bench.py runs think=False,
+                # num_predict=512, temperature=0) so a model that scores
+                # well there behaves the same here.
                 think=False,
-                options={"num_predict": 512},
+                options={"num_predict": 512, "temperature": 0},
             )
             answer = clean_ollama_answer(response['message']['content'])
 
