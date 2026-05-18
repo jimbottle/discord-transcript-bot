@@ -256,10 +256,11 @@ if __name__ == "__main__":
             logger.error(f"/stop get_transcription error: {e}")
             teardown_ok = False
         try:
-            # end_recording_session keeps the loop-affecting
-            # vc.stop_recording() on the loop thread and offloads only
-            # its blocking voice-thread join, so a concurrent
-            # interaction can still be ACKed during teardown.
+            # end_recording_session keeps vc.stop_recording() on the
+            # loop thread (thread-safe after-callback scheduling; carries
+            # a bounded ~ms/≤5s router join) and offloads the long
+            # voice-thread join. See end_recording_session's TRADEOFF
+            # docstring for why the loop isn't fully freed.
             await bot.end_recording_session(ctx)
         except Exception as e:
             logger.error(f"/stop end_recording_session error: {e}")
@@ -314,8 +315,9 @@ if __name__ == "__main__":
                 teardown_ok = False
             try:
                 # Keeps vc.stop_recording() on the loop thread (safe
-                # after-callback scheduling) and offloads only the
-                # blocking voice-thread join internally.
+                # after-callback scheduling; bounded ~ms/≤5s router
+                # join) and offloads the long voice-thread join. See
+                # end_recording_session's TRADEOFF docstring.
                 await bot.end_recording_session(ctx)
             except Exception as e:
                 logger.error(f"/disconnect end_recording_session error: {e}")

@@ -228,10 +228,19 @@ class VoloBot(discord.Bot):
         Must be awaited on the event loop. stop_recording() runs
         vc.stop_recording(), which schedules the async stop callback via
         loop.create_task() — that scheduling is NOT thread-safe off the
-        loop, so it stays on the loop thread. Only the blocking part
-        (cleanup_sink → voice-thread join, ~Whisper latency) is offloaded
-        via asyncio.to_thread so a concurrent interaction can still be
-        ACKed meanwhile.
+        loop, so stop_recording() stays on the loop thread.
+
+        TRADEOFF (not a full offload): Pycord's AudioReader._stop() also
+        runs packet_router.join(timeout=5) + _drain_all_decoders()
+        synchronously before that create_task. So a bounded blocking
+        segment stays on the loop here — typically ~ms (PacketRouter.stop
+        sets the end flag and notifies the waiter, and the drain just
+        queues buffered packets via WhisperSink.write), worst case 5s if
+        the router thread is wedged. This is deliberate: moving it off
+        the loop reintroduces the non-thread-safe create_task. The
+        genuinely long part (cleanup_sink → voice-thread join, ~Whisper
+        latency, can be 10s+) IS offloaded via asyncio.to_thread so a
+        concurrent interaction can still be ACKed during normal teardown.
         """
         guild_id = ctx.guild_id
         if not self.guild_is_recording.get(guild_id, False):
@@ -241,7 +250,10 @@ class VoloBot(discord.Bot):
         # "recording" or propagate into the /stop|/disconnect command
         # (which would 404 the interaction and look like the bot died).
         try:
-            self.stop_recording(ctx)  # loop thread: schedules after-cb safely
+            # On the loop thread: safe create_task scheduling, but also a
+            # bounded (~ms, ≤5s worst-case) packet_router join — see the
+            # method docstring's TRADEOFF note.
+            self.stop_recording(ctx)
         except Exception as e:
             logger.error(f"end_recording_session: stop_recording failed: {e}")
         self.guild_is_recording[guild_id] = False
