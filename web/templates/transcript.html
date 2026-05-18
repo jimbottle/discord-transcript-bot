@@ -1,7 +1,56 @@
 {% extends "base.html" %}
 {% block title %}{{ filename }} - Transcript Bot{% endblock %}
 {% block content %}
-<h1>{{ filename }}</h1>
-<a href="{{ url_for('transcripts') }}">&larr; Back to transcripts</a>
-<div class="transcript-content">{{ content }}</div>
+<hgroup>
+    <h1>{{ filename }}</h1>
+    <p>
+        <a href="{{ url_for('transcripts') }}">&larr; All transcripts</a>
+        &middot; {{ entries|length }} entr{{ 'y' if entries|length == 1 else 'ies' }}
+    </p>
+</hgroup>
+
+<fieldset role="group">
+    <input type="search" id="filter" placeholder="Filter by speaker or text…" aria-label="Filter transcript">
+    <button type="button" id="toggle-raw" class="secondary">Raw</button>
+</fieldset>
+
+<div id="parsed-view" class="transcript-content">
+    {% if entries %}
+    {% for e in entries %}
+    <div class="entry" data-search="{{ ((e.player or '') ~ ' ' ~ (e.character or '') ~ ' ' ~ e.text)|lower }}">
+        {% if e.player or e.time %}
+        <div class="entry-meta">
+            <strong>{{ e.player or 'Unknown' }}{% if e.character and e.character != e.player %} ({{ e.character }}){% endif %}</strong>
+            {% if e.time %} &middot; {{ e.time }}{% endif %}
+        </div>
+        {% endif %}
+        <div class="entry-text">{{ e.text }}</div>
+    </div>
+    {% endfor %}
+    {% else %}
+    <p>Empty transcript.</p>
+    {% endif %}
+</div>
+
+<pre id="raw-view" class="transcript-content" hidden><code>{{ raw }}</code></pre>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Filtering is handled by the shared transcript-filter.js. Only the
+// raw/styled toggle is page-specific.
+(function () {
+    const btn = document.getElementById("toggle-raw");
+    const parsed = document.getElementById("parsed-view");
+    const raw = document.getElementById("raw-view");
+    const filter = document.getElementById("filter");
+    btn.addEventListener("click", function () {
+        const showRaw = raw.hidden;
+        raw.hidden = !showRaw;
+        parsed.hidden = showRaw;
+        filter.disabled = showRaw;
+        btn.textContent = showRaw ? "Styled" : "Raw";
+    });
+})();
+</script>
 {% endblock %}

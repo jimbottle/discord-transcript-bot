@@ -221,6 +221,33 @@ def test_get_transcript_unknown_file_returns_none():
     assert transcript_service.get_transcript("definitely-not-here-9999.txt") is None
 
 
+@pytest.mark.parametrize(
+    "evil",
+    ["../../../etc/passwd", "a/b", "x/../y", "..\\w", ""],
+)
+def test_entry_helpers_reject_traversal(evil):
+    assert transcript_service.get_transcript_entries(evil) is None
+    assert transcript_service.get_log_entries(evil) is None
+
+
+def test_entry_helpers_unknown_file_returns_none():
+    assert transcript_service.get_transcript_entries("nope-9999.txt") is None
+    assert transcript_service.get_log_entries("nope-9999.log") is None
+
+
+def test_view_transcript_unknown_is_404(client):
+    assert client.get("/transcripts/nope-9999.txt").status_code == 404
+
+
+def test_view_log_unknown_is_404(client):
+    assert client.get("/logs/nope-9999.log").status_code == 404
+
+
+def test_view_transcript_traversal_is_404(client):
+    # Flask treats the slash as a path separator -> no route match (404).
+    assert client.get("/transcripts/..%2f..%2fetc%2fpasswd").status_code == 404
+
+
 # ── transcript_service basics ─────────────────────────────────────────
 
 

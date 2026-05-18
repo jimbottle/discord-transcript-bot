@@ -5,7 +5,9 @@ from flask import Flask, abort, jsonify, render_template, request
 from bot_manager import BotManager
 from transcript_service import (
     get_live_session,
+    get_log_entries,
     get_transcript,
+    get_transcript_entries,
     list_logs,
     list_transcripts,
     search_logs,
@@ -45,10 +47,23 @@ def transcripts():
 
 @app.route("/transcripts/<filename>")
 def view_transcript(filename):
-    content = get_transcript(filename)
-    if content is None:
+    entries = get_transcript_entries(filename)
+    if entries is None:
         return "Not found", 404
-    return render_template("transcript.html", filename=filename, content=content)
+    # raw is kept for the client-side "Raw" toggle (copy/paste) without
+    # a second request.
+    raw = get_transcript(filename) or ""
+    return render_template(
+        "transcript.html", filename=filename, entries=entries, raw=raw
+    )
+
+
+@app.route("/logs/<filename>")
+def view_log(filename):
+    entries = get_log_entries(filename)
+    if entries is None:
+        return "Not found", 404
+    return render_template("log.html", filename=filename, entries=entries)
 
 
 @app.route("/live")

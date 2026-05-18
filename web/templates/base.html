@@ -1,11 +1,23 @@
 <!doctype html>
-<html lang="en" data-theme="light">
+<html lang="en">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}Transcript Bot{% endblock %}</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script>
+        // Set the theme before first paint to avoid a flash. Persisted
+        // choice wins; otherwise follow the OS preference.
+        (function () {
+            var saved = null;
+            try { saved = localStorage.getItem("theme"); } catch (e) {}
+            var theme = saved || (window.matchMedia
+                && window.matchMedia("(prefers-color-scheme: dark)").matches
+                ? "dark" : "light");
+            document.documentElement.setAttribute("data-theme", theme);
+        })();
+    </script>
 </head>
 <body>
     <header class="container">
@@ -16,11 +28,23 @@
                 <li><a href="{{ url_for('transcripts') }}">Transcripts</a></li>
                 <li><a href="{{ url_for('search') }}">Search</a></li>
             </ul>
+            <ul>
+                <li><button id="theme-toggle" type="button" class="secondary outline" title="Toggle dark / light">◐</button></li>
+            </ul>
         </nav>
     </header>
     <main class="container">
         {% block content %}{% endblock %}
     </main>
+    <script src="{{ url_for('static', filename='transcript-filter.js') }}" defer></script>
+    <script>
+        document.getElementById("theme-toggle").addEventListener("click", function () {
+            var cur = document.documentElement.getAttribute("data-theme");
+            var next = cur === "dark" ? "light" : "dark";
+            document.documentElement.setAttribute("data-theme", next);
+            try { localStorage.setItem("theme", next); } catch (e) {}
+        });
+    </script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

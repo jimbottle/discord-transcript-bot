@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}{{ filename }} - Transcript Bot{% endblock %}
+{% block content %}
+<hgroup>
+    <h1>{{ filename }}</h1>
+    <p>
+        <a href="{{ url_for('transcripts') }}">&larr; All transcripts</a>
+        &middot; JSON log &middot; {{ entries|length }} spoken entr{{ 'y' if entries|length == 1 else 'ies' }}
+        <small>(silence rows omitted)</small>
+    </p>
+</hgroup>
+
+<input type="search" id="filter" placeholder="Filter by speaker or text…" aria-label="Filter log">
+
+<div id="parsed-view" class="transcript-content">
+    {% if entries %}
+    {% for e in entries %}
+    <div class="entry" data-search="{{ ((e.player or '') ~ ' ' ~ (e.character or '') ~ ' ' ~ e.text)|lower }}">
+        <div class="entry-meta">
+            <strong>{{ e.player or 'Unknown' }}{% if e.character and e.character != e.player %} ({{ e.character }}){% endif %}</strong>
+            {% if e.begin %} &middot; {{ e.date }} {{ e.begin }}{% if e.end %}&ndash;{{ e.end }}{% endif %}{% endif %}
+            {% if e.source %} &middot; {{ e.source }}{% endif %}
+        </div>
+        <div class="entry-text">{{ e.text }}</div>
+    </div>
+    {% endfor %}
+    {% else %}
+    <p>No spoken transcription rows in this log (all silence or empty).</p>
+    {% endif %}
+</div>
+{% endblock %}

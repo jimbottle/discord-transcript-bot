@@ -103,14 +103,75 @@ def list_transcripts():
     return results
 
 
+def _safe_path(directory, filename):
+    """Resolve `filename` strictly inside `directory`, or return None.
+
+    Single source of truth for the path-traversal guard so transcripts
+    and JSON logs can't be coaxed out of their directories.
+    """
+    if not filename or "/" in filename or "\\" in filename or ".." in filename:
+        return None
+    path = directory / filename
+    if not path.is_file() or path.resolve().parent != directory.resolve():
+        return None
+    return path
+
+
 def get_transcript(filename):
     """Read a single transcript file. Returns None if not found or path traversal."""
-    if "/" in filename or "\\" in filename or ".." in filename:
-        return None
-    path = TRANSCRIPTS_DIR / filename
-    if not path.is_file() or path.resolve().parent != TRANSCRIPTS_DIR.resolve():
+    path = _safe_path(TRANSCRIPTS_DIR, filename)
+    if path is None:
         return None
     return path.read_text(encoding="utf-8", errors="replace")
+
+
+def get_transcript_entries(filename):
+    """Parsed per-speaker entries for a session .txt, or None if invalid.
+
+    Reuses parse_transcript_line so the file viewer and the live view
+    render identically.
+    """
+    raw = get_transcript(filename)
+    if raw is None:
+        return None
+    return [e for e in (parse_transcript_line(ln) for ln in raw.splitlines()) if e]
+
+
+def get_log_entries(filename):
+    """Parsed entries for a JSON transcription .log, or None if invalid.
+
+    Each line is one JSON object written by write_transcription_log.
+    Silence rows (empty `data`) and malformed lines are skipped so the
+    viewer matches the human-readable .txt (which also omits silence).
+    """
+    path = _safe_path(LOGS_DIR, filename)
+    if path is None:
+        return None
+    entries = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        data = (row.get("data") or "").strip()
+        if not data:
+            continue
+        entries.append(
+            {
+                "date": row.get("date"),
+                "begin": row.get("begin"),
+                "end": row.get("end"),
+                "user_id": row.get("user_id"),
+                "player": row.get("player"),
+                "character": row.get("character"),
+                "source": row.get("event_source"),
+                "text": data,
+            }
+        )
+    return entries
 
 
 def list_logs():

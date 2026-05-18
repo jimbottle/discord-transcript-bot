@@ -27,7 +27,7 @@
     <tbody>
     {% for l in log_files %}
         <tr>
-            <td>{{ l.filename }}</td>
+            <td><a href="{{ url_for('view_log', filename=l.filename) }}">{{ l.filename }}</a></td>
             <td>{{ "%.1f"|format(l.size / 1024) }} KB</td>
         </tr>
     {% endfor %}
