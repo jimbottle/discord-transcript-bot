@@ -403,25 +403,21 @@ if __name__ == "__main__":
             await ctx.respond(f"Roster sync failed:\n{e}", ephemeral=True)
             raise e
 
-    @bot.slash_command(
-        name="ask",
-        description="Ask a question about the current transcript.",
-        contexts={
-            discord.InteractionContextType.guild,
-            discord.InteractionContextType.bot_dm,
-        },
-    )
-    async def ask(
+    async def _run_ask(
         ctx: discord.context.ApplicationContext,
-        question: discord.Option(str, description="Your question about the transcript"),
-        server: discord.Option(
-            str,
-            description="Server name (only needed in DMs if you share multiple servers)",
-            required=False,
-            default=None,
-        ),
+        question: str,
+        server: str,
+        *,
+        public: bool,
     ):
+        """Shared implementation for /ask and /ask-public.
 
+        `public` controls only the visibility of the deferred response
+        and the final answer: False → ephemeral (only the asker sees
+        it), True → posted to the whole channel. The early validation
+        responses below stay ephemeral in both cases (a "no transcript
+        yet" / "not connected" message shouldn't be broadcast).
+        """
         # Resolve the guild_id — either from the guild context or by finding shared guilds in DMs
         if ctx.guild_id:
             guild_id = ctx.guild_id
@@ -506,7 +502,10 @@ if __name__ == "__main__":
             )
             return
 
-        await ctx.defer()
+        # ephemeral=not public: /ask is private to the asker,
+        # /ask-public posts the answer to the whole channel. The
+        # followups below inherit this ephemerality from the defer.
+        await ctx.defer(ephemeral=not public)
 
         try:
             response = ollama.chat(
@@ -572,6 +571,46 @@ if __name__ == "__main__":
                     f"Failed to query the model. Make sure Ollama is running.\n`{e}`"
                 )
 
+    @bot.slash_command(
+        name="ask",
+        description="Ask about the transcript — answer is private to you.",
+        contexts={
+            discord.InteractionContextType.guild,
+            discord.InteractionContextType.bot_dm,
+        },
+    )
+    async def ask(
+        ctx: discord.context.ApplicationContext,
+        question: discord.Option(str, description="Your question about the transcript"),
+        server: discord.Option(
+            str,
+            description="Server name (only needed in DMs if you share multiple servers)",
+            required=False,
+            default=None,
+        ),
+    ):
+        await _run_ask(ctx, question, server, public=False)
+
+    @bot.slash_command(
+        name="ask-public",
+        description="Ask about the transcript — answer is posted to the whole channel.",
+        contexts={
+            discord.InteractionContextType.guild,
+            discord.InteractionContextType.bot_dm,
+        },
+    )
+    async def ask_public(
+        ctx: discord.context.ApplicationContext,
+        question: discord.Option(str, description="Your question about the transcript"),
+        server: discord.Option(
+            str,
+            description="Server name (only needed in DMs if you share multiple servers)",
+            required=False,
+            default=None,
+        ),
+    ):
+        await _run_ask(ctx, question, server, public=True)
+
     @bot.slash_command(name="help", description="Show available commands.")
     async def help(ctx: discord.context.ApplicationContext):
         embed_fields = [
@@ -586,7 +625,14 @@ if __name__ == "__main__":
             ),
             discord.EmbedField(name="/stop", value="Stop transcribing.", inline=True),
             discord.EmbedField(
-                name="/ask", value="Ask about the transcript.", inline=True
+                name="/ask",
+                value="Ask about the transcript (private to you).",
+                inline=True,
+            ),
+            discord.EmbedField(
+                name="/ask-public",
+                value="Ask about the transcript (answer shown to everyone).",
+                inline=True,
             ),
             discord.EmbedField(
                 name="/generate_pdf", value="Export transcript as PDF.", inline=True
