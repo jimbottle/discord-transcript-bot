@@ -12,7 +12,26 @@ This bot depends on **voice receive** — recording audio from users via pycord'
 
 ## Upstream Tracking
 
-*Last updated: 2026-04-02*
+*Last updated: 2026-05-18*
+
+### 2026-05-18 recheck — Pycord 2.8.0 released, still does NOT unblock us
+
+Pycord **2.8.0 final shipped on 2026-05-18** (PyPI). Its only DAVE changelog
+entry is *"Added support for Discord DAVE (Audio & Video E2EE) for
+voice-sending related features (#3143)"* — **send only**. The 2.8 docs
+explicitly warn recording may not work under DAVE.
+
+The receive-side PR we depend on, **#3159**, is **still a Draft**, now
+assigned to the **2.9.0 milestone**, last activity 2026-05-12 (Snazzah
+approved with minor nits). It did **not** make 2.8.0.
+
+**Action:** Keep `requirements.txt` pinned to `@fix/voice-rec-2`. Do **not**
+move to stable `py-cord==2.8.0` — it would re-break `/scribe`. Next checkpoint
+is the Pycord **2.9.0** milestone / #3159 merge.
+
+---
+
+*Earlier history (last reviewed 2026-04-02):*
 
 ### Pycord PR #2873 — Voice Internals Rewrite & DAVE Support (original)
 - URL: https://github.com/Pycord-Development/pycord/pull/2873
@@ -27,6 +46,8 @@ This bot depends on **voice receive** — recording audio from users via pycord'
 
 ### Pycord PR #3159 — Voice Receive with DAVE Support
 - URL: https://github.com/Pycord-Development/pycord/pull/3159
+- Title: "refactor(voice): Strict type checking in voice internals & DAVE Support (rec)"
+- **Status as of 2026-05-18: DRAFT, milestone 2.9.0, approved by Snazzah 2026-05-12 (minor nits) — did NOT land in 2.8.0**
 - **Status as of 2026-04-02: OPEN, labeled "hold: testing", last updated 2026-03-27**
 - Supersedes PR #3144 (earlier receive experiment, marked "NOT in a working state")
 - Includes DAVE decryption fixes from community contributor vito1317 (cherry-picked 2026-03-19)
@@ -52,6 +73,12 @@ This bot depends on **voice receive** — recording audio from users via pycord'
 - URL: https://github.com/Pycord-Development/pycord/issues/3135
 - Status as of 2026-03-16: Open — send-side fix landed via #3143 but issue remains open
 - Confirms the 4017 error on pycord 2.7.1
+
+### Pycord Release: v2.8.0 (final, 2026-05-18)
+- Includes DAVE **send** support (PR #3143) only
+- Does **NOT** include receive/Sink DAVE support (PR #3159 still draft → milestone 2.9.0)
+- 2.8 docs explicitly warn recording may not work under DAVE
+- Stable install (`pip install py-cord==2.8.0`) would re-break `/scribe` — do not use
 
 ### Pycord Release: v2.8.0rc1 (2026-03-21)
 - Includes DAVE send support (PR #3143)

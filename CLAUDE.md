@@ -75,4 +75,4 @@ Required in `.env`:
 
 ## Known Constraints
 
-- **DAVE protocol blocker (as of 2026-05-12):** Discord enforces E2EE on voice; this project depends on Pycord PR #3159 (`fix/voice-rec-2` branch) for voice-receive DAVE support. `requirements.txt` pins the branch directly. Switch to a stable release once Pycord 2.8.0 ships with the receive PR merged. See `DAVE_MIGRATION.md` for context.
+- **DAVE protocol blocker (rechecked 2026-05-18):** Discord enforces E2EE on voice; this project depends on Pycord PR #3159 (`fix/voice-rec-2` branch) for voice-**receive** DAVE support. `requirements.txt` pins the branch directly. **Pycord 2.8.0 shipped 2026-05-18 but only includes DAVE voice-*send* (PR #3143) — the receive PR #3159 is still a draft, moved to the 2.9.0 milestone.** Do NOT switch to stable `py-cord==2.8.0`; it would re-break `/scribe`. Switch to a stable pin only once #3159 is merged and released (track the 2.9.0 milestone). See `DAVE_MIGRATION.md` for context.
