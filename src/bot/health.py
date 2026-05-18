@@ -332,7 +332,9 @@ class HealthCheck:
     # ── ollama_model ──────────────────────────────────────────────────
 
     def _check_ollama_model(self):
-        model_name = "ai/mistral:latest"
+        # Default kept identical to main.ASK_OLLAMA_MODEL so the health
+        # check verifies whatever model /ask will actually use.
+        model_name = os.getenv("ASK_OLLAMA_MODEL", "ai/mistral:latest")
         try:
             import ollama
             models = ollama.list()

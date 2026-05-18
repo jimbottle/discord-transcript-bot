@@ -40,7 +40,7 @@ Setup: `python -m venv venv && source venv/bin/activate && pip install -r requir
 
 - **py-cord** (not discord.py) — the `discord` import is Pycord
 - **faster_whisper** — local transcription model (large-v3), loaded as module-level singleton in `whisper_sink.py`
-- **ollama** — powers the `/ask` command (model: `ai/mistral:latest`)
+- **ollama** — powers the `/ask` command (model: `$ASK_OLLAMA_MODEL`, default `ai/mistral:latest`)
 - **torch** — CPU-only by default (see requirements.txt for CUDA option)
 - **ffmpeg** and **libopus** — required system dependencies for voice
 
@@ -51,6 +51,7 @@ Required in `.env`:
 - `TRANSCRIPTION_METHOD` — `local` (default) or `openai`
 - `OPENAI_API_KEY` — only if using openai method
 - `PLAYER_MAP_FILE_PATH` — optional path to `player_map.yml` mapping Discord user IDs to player/character names
+- `ASK_OLLAMA_MODEL` — optional; model for `/ask`. Defaults to `ai/mistral:latest` (prior behavior). Used in both `main.py` and `src/bot/health.py:_check_ollama_model` (keep the two defaults in sync). Model choice is benchmarked in the sibling `local-models` repo (`prompts/discord_ask.json`)
 
 ## Code Style
 

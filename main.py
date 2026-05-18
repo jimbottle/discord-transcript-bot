@@ -17,6 +17,10 @@ from src.utils.pdf_generator import pdf_generator
 load_dotenv()
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 PLAYER_MAP_FILE_PATH = os.getenv("PLAYER_MAP_FILE_PATH")
+# Model used by /ask. Override via env without code changes; the default
+# preserves prior behavior. Keep this default in sync with the identical
+# fallback in src/bot/health.py:_check_ollama_model.
+ASK_OLLAMA_MODEL = os.getenv("ASK_OLLAMA_MODEL", "ai/mistral:latest")
 
 logger = logging.getLogger()  # root logger
 
@@ -346,7 +350,7 @@ if __name__ == "__main__":
 
         try:
             response = ollama.chat(
-                model="ai/mistral:latest",
+                model=ASK_OLLAMA_MODEL,
                 messages=[
                     {
                         "role": "system",
