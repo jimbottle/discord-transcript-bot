@@ -111,8 +111,9 @@ function render(data) {
     }
 
     if (entries.length === 0) {
-        if (feed.childElementCount === 0) {
+        if (!document.getElementById("empty-state")) {
             const p = document.createElement("p");
+            p.id = "empty-state";
             p.textContent = data.filename
                 ? "Session file is empty so far."
                 : "No session transcript yet.";
@@ -120,10 +121,13 @@ function render(data) {
         }
         return;
     }
-    if (reset) {
-        const empty = document.getElementById("empty-state");
-        if (empty) empty.remove();
-    }
+
+    // Clear the empty-state placeholder before appending real entries.
+    // Unconditional: on the empty→content transition `reset` is false
+    // (same file, entries grew), so a reset-gated removal would leave
+    // "Session file is empty so far." pinned above the transcript.
+    const empty = document.getElementById("empty-state");
+    if (empty) empty.remove();
 
     if (entries.length === renderedCount) return;  // nothing new
 
