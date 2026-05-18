@@ -152,6 +152,31 @@ def test_stop_voice_thread_safe_when_vc_none(tmp_path, monkeypatch):
     sink.close()
 
 
+def test_stop_voice_thread_uses_bounded_join(tmp_path, monkeypatch):
+    """Regression: an unbounded voice_thread.join() blocked the asyncio
+    event loop during /stop teardown, so a concurrent interaction (an
+    impatient second /stop) got 'The application did not respond'. The
+    join must be time-bounded so teardown can't wedge the loop forever."""
+    sink = _make_sink(tmp_path, monkeypatch)
+
+    class _FakeThread:
+        def __init__(self):
+            self.join_timeout = "NOT CALLED"
+
+        def join(self, timeout=None):
+            self.join_timeout = timeout
+
+        def is_alive(self):
+            return False
+
+    ft = _FakeThread()
+    sink.voice_thread = ft
+    sink.stop_voice_thread()  # must not raise / hang
+    assert ft.join_timeout == sink.JOIN_TIMEOUT_S, \
+        "join() must be called with a finite timeout, not unbounded"
+    sink.close()
+
+
 def test_concurrent_lazy_open_only_opens_once(tmp_path, monkeypatch):
     """Multiple executor workers may race to first-write. The lock must
     ensure exactly one file handle is opened."""

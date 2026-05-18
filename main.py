@@ -220,7 +220,11 @@ if __name__ == "__main__":
         await ctx.defer()
         try:
             await bot.get_transcription(ctx)
-            bot.end_recording_session(ctx)
+            # end_recording_session joins the voice thread (blocking) —
+            # run it off the event loop so a concurrent interaction
+            # (e.g. an impatient second /stop) can still be ACKed and
+            # doesn't itself show "The application did not respond".
+            await asyncio.to_thread(bot.end_recording_session, ctx)
         except Exception as e:
             logger.error(f"/stop teardown error: {e}")
         await ctx.followup.send("Recording stopped. Data saved. Standing by for the next run.")
@@ -251,7 +255,9 @@ if __name__ == "__main__":
         try:
             if bot.guild_is_recording.get(guild_id, False):
                 await bot.get_transcription(ctx)
-                bot.end_recording_session(ctx)
+                # Blocking voice-thread join — off the event loop so the
+                # bot stays responsive to other interactions meanwhile.
+                await asyncio.to_thread(bot.end_recording_session, ctx)
         except Exception as e:
             logger.error(f"/disconnect teardown error: {e}")
 

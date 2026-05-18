@@ -127,11 +127,23 @@ class WhisperSink(Sink):
 
         self.voice_thread.start()
 
+    # Upper bound for joining the voice thread. It should exit within a
+    # couple of seconds of self.running going False (one insert_voice
+    # loop iteration), so this is generous; it exists only so a wedged
+    # transcription future can't block teardown forever.
+    JOIN_TIMEOUT_S = 15
+
     def stop_voice_thread(self):
         self.running = False
         try:
-            if getattr(self, "voice_thread", None) is not None:
-                self.voice_thread.join()
+            thread = getattr(self, "voice_thread", None)
+            if thread is not None:
+                thread.join(timeout=self.JOIN_TIMEOUT_S)
+                if thread.is_alive():
+                    logger.warning(
+                        "Voice thread did not exit within "
+                        f"{self.JOIN_TIMEOUT_S}s; abandoning it (daemon "
+                        "thread, will not block process exit).")
         except Exception as e:
             logger.error(f"Unexpected error during thread join: {e}")
         finally:
