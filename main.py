@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from src.bot.helper import BotHelper
 from src.config.cliargs import CLIArgs
 from src.config.ollama_config import get_ask_model
-from src.utils.answer import TRUNCATION_SUFFIX, clean_ollama_answer
+from src.utils.answer import clamp_message, clean_ollama_answer
 from src.utils.commandline import CommandLine
 from src.utils.pdf_generator import pdf_generator
 
@@ -386,27 +386,28 @@ if __name__ == "__main__":
                     "`ASK_OLLAMA_MODEL` to a non-reasoning model.")
                 return
 
-            message = f"**Q:** {question}\n\n{answer}"
             # clean_ollama_answer only caps the answer; a long /ask
             # question can still push the composed message past Discord's
-            # hard 2000-char limit (the send would 400). Clamp the whole
-            # thing as a final guard.
-            if len(message) > DISCORD_MESSAGE_LIMIT:
-                message = message[:DISCORD_MESSAGE_LIMIT - len(TRUNCATION_SUFFIX)] + TRUNCATION_SUFFIX
+            # hard limit. clamp_message is the unit-tested final guard.
+            message = clamp_message(f"**Q:** {question}\n\n{answer}", DISCORD_MESSAGE_LIMIT)
             await ctx.followup.send(message)
-        except TypeError as e:
-            # Most likely `chat() got an unexpected keyword argument
-            # 'think'` from an ollama client older than 0.5.x. The broad
-            # handler below would misleadingly blame the daemon.
-            logger.error(f"Ollama client error: {e}")
-            await ctx.followup.send(
-                "The Ollama Python client is too old for `/ask` "
-                "(needs the `think` parameter). Upgrade it: "
-                "`pip install -U 'ollama>=0.5.1'`.\n"
-                f"`{e}`")
         except Exception as e:
-            logger.error(f"Ollama error: {e}")
-            await ctx.followup.send(f"Failed to query the model. Make sure Ollama is running.\n`{e}`")
+            # An ollama client older than 0.5.x rejects the think= kwarg
+            # with `TypeError: chat() got an unexpected keyword argument
+            # 'think'`. Special-case ONLY that exact message so an
+            # unrelated TypeError elsewhere in the block isn't
+            # misattributed to the client version.
+            if isinstance(e, TypeError) and "unexpected keyword argument 'think'" in str(e):
+                logger.error(f"Ollama client error: {e}")
+                await ctx.followup.send(
+                    "The Ollama Python client is too old for `/ask` "
+                    "(needs the `think` parameter). Upgrade it: "
+                    "`pip install -U 'ollama>=0.5.1'`.\n"
+                    f"`{e}`")
+            else:
+                logger.error(f"Ollama error: {e}")
+                await ctx.followup.send(
+                    f"Failed to query the model. Make sure Ollama is running.\n`{e}`")
 
     @bot.slash_command(name="help", description="Show available commands.")
     async def help(ctx: discord.context.ApplicationContext):

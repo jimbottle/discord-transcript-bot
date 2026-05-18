@@ -1,7 +1,8 @@
-"""Unit tests for src.utils.answer.clean_ollama_answer."""
+"""Unit tests for src.utils.answer."""
 from src.utils.answer import (
     DISCORD_LIMIT,
     TRUNCATION_SUFFIX,
+    clamp_message,
     clean_ollama_answer,
 )
 
@@ -113,3 +114,36 @@ def test_well_formed_block_then_closing_only_tail():
     # A clean block, then the model re-enters reasoning and only closes it.
     raw = "<think>first pass</think>more reasoning</think>Final answer."
     assert clean_ollama_answer(raw) == "Final answer."
+
+
+def test_literal_close_tag_in_answer_is_truncated():
+    """roborev #776 (LOW): documents the accepted tradeoff — a genuine
+    answer that contains the literal ``</think>`` loses everything up to
+    and including the last occurrence. This asserts the (destructive)
+    behavior so the limitation is explicit, not invisible."""
+    raw = "To strip reasoning, drop everything before </think> in the text."
+    assert clean_ollama_answer(raw) == "in the text."
+
+
+# ── clamp_message (roborev #776 LOW: composed-message clamp had no test) ──
+
+def test_clamp_message_under_limit_unchanged():
+    assert clamp_message("short", 2000) == "short"
+
+
+def test_clamp_message_at_limit_unchanged():
+    exact = "a" * 2000
+    assert clamp_message(exact, 2000) == exact
+
+
+def test_clamp_message_over_limit_truncated_to_exactly_limit():
+    out = clamp_message("b" * 5000, 2000)
+    assert len(out) == 2000
+    assert out.endswith(TRUNCATION_SUFFIX)
+    assert out == "b" * (2000 - len(TRUNCATION_SUFFIX)) + TRUNCATION_SUFFIX
+
+
+def test_clamp_message_tiny_limit_no_negative_slice():
+    # limit smaller than the suffix must not raise / negative-slice.
+    out = clamp_message("x" * 100, 5)
+    assert out == TRUNCATION_SUFFIX

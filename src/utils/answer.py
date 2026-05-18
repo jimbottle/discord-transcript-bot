@@ -32,6 +32,15 @@ def clean_ollama_answer(text: str, limit: int = DISCORD_LIMIT) -> str:
 
     A plain answer with no reasoning blocks and length <= limit is
     returned unchanged apart from whitespace trimming.
+
+    Known limitation: the stray-closing-tag strip keys off the literal
+    text ``</think>``. If a *genuine* answer itself contains that
+    literal (e.g. someone asks ``/ask`` to explain think-tag
+    stripping), everything up to and including the last occurrence is
+    discarded. This is an accepted tradeoff — preventing a reasoning
+    leak matters more for this bot than answering questions about the
+    tag itself — and is asserted explicitly in
+    ``test_answer.py::test_literal_close_tag_in_answer_is_truncated``.
     """
     if not text:
         return ""
@@ -59,3 +68,21 @@ def clean_ollama_answer(text: str, limit: int = DISCORD_LIMIT) -> str:
         cleaned = cleaned[:limit] + TRUNCATION_SUFFIX
 
     return cleaned
+
+
+def clamp_message(message: str, limit: int) -> str:
+    """Clamp a fully composed message to a hard character ``limit``.
+
+    ``clean_ollama_answer`` only bounds the *answer*; the rendered
+    ``**Q:** <question>\\n\\n<answer>`` can still exceed Discord's hard
+    2000-char limit when the question is long. Returns ``message``
+    unchanged if it already fits, otherwise truncates and appends
+    :data:`TRUNCATION_SUFFIX`. For any realistic ``limit`` (>= the
+    suffix length) the result is exactly ``limit`` chars; for a
+    degenerate tiny ``limit`` it is just the suffix — never a negative
+    slice / crash.
+    """
+    if len(message) <= limit:
+        return message
+    keep = max(0, limit - len(TRUNCATION_SUFFIX))
+    return message[:keep] + TRUNCATION_SUFFIX
