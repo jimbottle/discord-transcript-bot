@@ -6,9 +6,10 @@ no empty file created when a sink is constructed but never used.
 
 import os
 import threading
+import wave
 from unittest.mock import MagicMock
 
-from src.sinks.whisper_sink import WhisperSink
+from src.sinks.whisper_sink import Speaker, WhisperSink
 
 
 def _make_sink(tmp_path, monkeypatch):
@@ -112,6 +113,31 @@ def test_write_trims_to_data_length(tmp_path, monkeypatch):
     sink.write(vd, vd.source)
     item = sink.voice_queue.get_nowait()
     assert item[1] == b"6789", "oversized buffer keeps only the last data_length bytes"
+    sink.close()
+
+
+def test_transcribe_writes_discord_pcm_wav_header(tmp_path, monkeypatch):
+    """roborev #782 (LOW): transcribe() now sources the PCM format from
+    discord.opus.Decoder instead of the removed self.vc.decoder. Assert
+    the emitted WAV header is Discord's fixed 48kHz / 16-bit / stereo so
+    the value-equivalence of the swap is guarded (no whisper model
+    loaded — transcribe_audio is stubbed to capture the header)."""
+    sink = _make_sink(tmp_path, monkeypatch)
+    captured = {}
+
+    def _capture(wav_io):
+        wav_io.seek(0)
+        with wave.open(wav_io, "rb") as w:
+            captured["channels"] = w.getnchannels()
+            captured["sampwidth"] = w.getsampwidth()
+            captured["framerate"] = w.getframerate()
+        return ""
+
+    monkeypatch.setattr(sink, "transcribe_audio", _capture)
+    spk = Speaker(user=1, player="p", character="c", data=b"\x00\x01" * 480)
+    sink.transcribe(spk)
+
+    assert captured == {"channels": 2, "sampwidth": 2, "framerate": 48000}
     sink.close()
 
 

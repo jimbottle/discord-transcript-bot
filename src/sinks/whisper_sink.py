@@ -372,8 +372,11 @@ class WhisperSink(Sink):
     @Filters.container
     def write(self, data, user):
         """Gets audio data from discord for each user talking"""
-        # Discord will send empty bytes from when the user stopped talking to when the user starts to talk again.
-        # Its only the first data that grows massive and its only silent audio, so its trimmed.
+        # Empty buffers (b"") — no audio, or a frame not yet attributable
+        # to a user — are dropped below, not queued. Discord's first
+        # non-empty buffer after a silence gap can be a large block of
+        # silent audio; that case is bounded by the
+        # `len(pcm) > self.data_length` trim further down, not dropped.
 
         # Pycord's DAVE-capable voice receive (2.7+, the fix/voice-rec-2
         # pin) hands us a VoiceData object (already decrypted + decoded)
