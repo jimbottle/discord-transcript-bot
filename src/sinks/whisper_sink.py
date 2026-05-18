@@ -13,6 +13,7 @@ from typing import List
 
 import speech_recognition as sr
 import torch
+from discord.opus import Decoder
 from discord.sinks.core import Filters, Sink, default_filters
 from faster_whisper import WhisperModel
 from openai import OpenAI
@@ -190,20 +191,23 @@ class WhisperSink(Sink):
             return ""
 
     def transcribe(self, speaker: Speaker):
+        # Discord voice PCM is a fixed format (48kHz, 16-bit, stereo).
+        # The new voice-receive client no longer exposes self.vc.decoder,
+        # so read the constants off discord.opus.Decoder directly.
         audio_data = sr.AudioData(
             bytes().join(speaker.data),
-            self.vc.decoder.SAMPLING_RATE,
-            self.vc.decoder.SAMPLE_SIZE // self.vc.decoder.CHANNELS,
+            Decoder.SAMPLING_RATE,
+            Decoder.SAMPLE_SIZE // Decoder.CHANNELS,
         )
 
         wav_data = io.BytesIO(audio_data.get_wav_data())
 
         wav_io = io.BytesIO()
         with wave.open(wav_io, "wb") as wave_writer:
-            wave_writer.setnchannels(self.vc.decoder.CHANNELS)
+            wave_writer.setnchannels(Decoder.CHANNELS)
             wave_writer.setsampwidth(
-                self.vc.decoder.SAMPLE_SIZE // self.vc.decoder.CHANNELS)
-            wave_writer.setframerate(self.vc.decoder.SAMPLING_RATE)
+                Decoder.SAMPLE_SIZE // Decoder.CHANNELS)
+            wave_writer.setframerate(Decoder.SAMPLING_RATE)
             wave_writer.writeframes(wav_data.getvalue())
 
         wav_io.seek(0)
@@ -371,12 +375,26 @@ class WhisperSink(Sink):
         # Discord will send empty bytes from when the user stopped talking to when the user starts to talk again.
         # Its only the first data that grows massive and its only silent audio, so its trimmed.
 
-        data_len = len(data)
-        if data_len > self.data_length:
-            data = data[-self.data_length :]
+        # Pycord's DAVE-capable voice receive (2.7+, the fix/voice-rec-2
+        # pin) hands us a VoiceData object (already decrypted + decoded)
+        # instead of raw PCM bytes, and passes the User/Member as `user`
+        # instead of the integer ID. Normalize both back to the
+        # (bytes, int-id) contract the queue / player_map / transcript
+        # line still expect. The getattr fallbacks keep this working if
+        # a future Pycord reverts to the old bytes/int signature.
+        pcm = getattr(data, "pcm", data)
+        user_id = getattr(user, "id", user)
+
+        # data.source is None until the SSRC->user mapping resolves;
+        # that audio can't be attributed to a speaker, so drop it.
+        if user_id is None or not pcm:
+            return
+
+        if len(pcm) > self.data_length:
+            pcm = pcm[-self.data_length :]
         write_time = time.time()
         # Send bytes to be transcribed
-        self.voice_queue.put_nowait([user, data, write_time])
+        self.voice_queue.put_nowait([user_id, pcm, write_time])
 
     def close(self):
         logger.debug("Closing whisper sink.")
