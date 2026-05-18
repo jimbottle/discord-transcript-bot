@@ -106,6 +106,13 @@ class WhisperSink(Sink):
         self.session_file = os.path.join(transcript_dir, f"{session_time}.txt")
         self._session_fh = None
         self._session_fh_lock = threading.Lock()
+        # Distinct from `running`: `running` going False just stops the
+        # insert_voice loop accepting new audio, but a transcription
+        # submitted before /stop can still finish during teardown (the
+        # stop_voice_thread join waits for it) and must still reach the
+        # per-session .txt. Only once the file is finalized in close()
+        # do we refuse further writes (the roborev #514 race guard).
+        self._closed = False
 
     def start_voice_thread(self, on_exception=None):
         def thread_exception_hook(args):
@@ -373,12 +380,17 @@ class WhisperSink(Sink):
                 logger.warning(f"Failed to write per-session transcript line: {e}")
 
     def _get_session_fh(self):
-        """Lazily open the per-session transcript file. Returns None if the
-        sink is shutting down (so an in-flight executor task completing after
-        close() doesn't race on a freshly cleared handle).
+        """Lazily open the per-session transcript file. Returns None only
+        once the sink is fully closed — NOT merely when `running` is
+        False — so a transcription that finishes during /stop teardown
+        (its future was submitted before /stop; the stop_voice_thread
+        join blocks until it completes) still lands in the .txt. After
+        close() finalizes the file, further writes are refused (the
+        roborev #514 race guard against a late executor task re-opening
+        a freshly-closed handle).
         """
         with self._session_fh_lock:
-            if not self.running:
+            if self._closed:
                 return None
             if self._session_fh is None:
                 try:
@@ -425,6 +437,10 @@ class WhisperSink(Sink):
         self.queue.put_nowait(None)
         super().cleanup()
         with self._session_fh_lock:
+            # Set under the lock and before clearing the handle so any
+            # write racing close() either completes first or is cleanly
+            # refused — never writes to a half-closed handle.
+            self._closed = True
             try:
                 if self._session_fh is not None:
                     self._session_fh.close()

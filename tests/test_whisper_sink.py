@@ -51,6 +51,25 @@ def test_get_session_fh_returns_none_after_close(tmp_path, monkeypatch):
         "after close, lazy-open must refuse to re-open the file"
 
 
+def test_session_fh_writable_during_stop_drain(tmp_path, monkeypatch):
+    """Drain-on-stop fix: a transcription that finishes during /stop
+    teardown (running already False because stop_voice_thread ran, but
+    the sink not yet close()d) must still open/write the per-session
+    .txt. Previously _get_session_fh() returned None whenever
+    `running` was False, so a session whose only speech transcribed
+    just after /stop got NO .txt file (the JSON log still had it)."""
+    sink = _make_sink(tmp_path, monkeypatch)
+    sink.running = False  # what stop_voice_thread() sets; close() not called yet
+    fh = sink._get_session_fh()
+    assert fh is not None, "drain-window write must still get a file handle"
+    fh.write("drained line\n")
+    fh.flush()
+    assert os.path.exists(sink.session_file)
+    sink.close()
+    assert sink._get_session_fh() is None, \
+        "once close() finalizes the file, further writes are refused"
+
+
 def test_close_is_idempotent(tmp_path, monkeypatch):
     sink = _make_sink(tmp_path, monkeypatch)
     sink._get_session_fh()
