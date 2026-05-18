@@ -49,6 +49,16 @@ def parse_transcript_line(line):
     }
 
 
+def parse_transcript_text(raw):
+    """Parse a whole .txt body into entries (blank lines dropped).
+
+    Single place the line-parsing happens so the file viewer, the live
+    view, and get_transcript_entries all behave identically and each
+    only reads the file once.
+    """
+    return [e for e in (parse_transcript_line(ln) for ln in raw.splitlines()) if e]
+
+
 def get_live_session():
     """The newest session .txt is the current/most-recent session.
 
@@ -75,7 +85,7 @@ def get_live_session():
         mtime = f.stat().st_mtime
     except OSError:
         return empty
-    entries = [e for e in (parse_transcript_line(ln) for ln in raw.splitlines()) if e]
+    entries = parse_transcript_text(raw)
     age = time.time() - mtime
     return {
         "filename": f.name,
@@ -134,7 +144,7 @@ def get_transcript_entries(filename):
     raw = get_transcript(filename)
     if raw is None:
         return None
-    return [e for e in (parse_transcript_line(ln) for ln in raw.splitlines()) if e]
+    return parse_transcript_text(raw)
 
 
 def get_log_entries(filename):

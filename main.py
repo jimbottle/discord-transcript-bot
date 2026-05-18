@@ -406,7 +406,7 @@ if __name__ == "__main__":
     async def _run_ask(
         ctx: discord.context.ApplicationContext,
         question: str,
-        server: str,
+        server: str | None,
         *,
         public: bool,
     ):

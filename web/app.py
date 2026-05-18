@@ -7,9 +7,9 @@ from transcript_service import (
     get_live_session,
     get_log_entries,
     get_transcript,
-    get_transcript_entries,
     list_logs,
     list_transcripts,
+    parse_transcript_text,
     search_logs,
 )
 
@@ -50,12 +50,12 @@ def transcripts():
 
 @app.route("/transcripts/<filename>")
 def view_transcript(filename):
-    entries = get_transcript_entries(filename)
-    if entries is None:
+    # Read the file once: get raw, then parse locally (raw is also kept
+    # for the client-side Raw toggle, so no second read).
+    raw = get_transcript(filename)
+    if raw is None:
         return "Not found", 404
-    # raw is kept for the client-side "Raw" toggle (copy/paste) without
-    # a second request.
-    raw = get_transcript(filename) or ""
+    entries = parse_transcript_text(raw)
     return render_template(
         "transcript.html", filename=filename, entries=entries, raw=raw
     )

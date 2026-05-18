@@ -68,14 +68,57 @@ def test_external_initializing_carries_current_check(monkeypatch):
     assert s["external"] is True
 
 
-def test_status_from_health_unknown_phase_is_starting(monkeypatch):
+def test_status_from_health_unknown_phase_is_starting():
     bm = BotManager()
-    monkeypatch.setattr(bm, "_read_health", lambda: {"phase": "weird"})
-    assert bm._status_from_health(1, external=False)["status"] == "starting"
+    assert (
+        bm._status_from_health({"phase": "weird"}, 1, external=False)["status"]
+        == "starting"
+    )
 
 
 def test_status_from_health_missing_file_is_starting():
     bm = BotManager()
-    bm._read_health = lambda: None
-    out = bm._status_from_health(1, external=True)
+    out = bm._status_from_health(None, 1, external=True)
     assert out == {"status": "starting", "pid": 1, "checks": {}, "external": True}
+
+
+# ── _find_bot_pid: pgrep parsing + cwd identity check (roborev #797) ───
+
+
+class _FakeRun:
+    def __init__(self, stdout):
+        self.stdout = stdout
+
+
+def test_find_bot_pid_returns_first_pid_whose_cwd_is_project(monkeypatch):
+    import bot_manager as bm_mod
+
+    bm = BotManager()
+    monkeypatch.setattr(
+        bm_mod.subprocess, "run", lambda *a, **k: _FakeRun("999\n12345\nnope\n")
+    )
+    # 999 is some other main.py elsewhere; 12345 is ours.
+    cwds = {999: "/somewhere/else", 12345: bm_mod.PROJECT_ROOT}
+    monkeypatch.setattr(bm, "_proc_cwd", lambda pid: cwds.get(pid))
+    assert bm._find_bot_pid() == 12345
+
+
+def test_find_bot_pid_none_when_no_cwd_matches_project(monkeypatch):
+    import bot_manager as bm_mod
+
+    bm = BotManager()
+    monkeypatch.setattr(bm_mod.subprocess, "run", lambda *a, **k: _FakeRun("111\n"))
+    monkeypatch.setattr(bm, "_proc_cwd", lambda pid: "/not/the/project")
+    assert bm._find_bot_pid() is None
+
+
+def test_find_bot_pid_swallows_subprocess_error(monkeypatch):
+    import bot_manager as bm_mod
+
+    bm = BotManager()
+
+    def boom(*a, **k):
+        raise OSError("pgrep not found")
+
+    monkeypatch.setattr(bm_mod.subprocess, "run", boom)
+    assert bm._find_bot_pid() is None

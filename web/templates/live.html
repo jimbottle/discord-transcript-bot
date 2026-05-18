@@ -41,6 +41,42 @@ function tickUpdatedLabel() {
         "last write " + fmtAge(lastAge + extra);
 }
 
+// How many entries are already in the DOM, and for which session file.
+// Append-only rendering: we never tear down existing nodes, so a user
+// who scrolled up to re-read keeps their position, text selection is
+// preserved, and a screen reader (aria-live) only announces NEW lines —
+// not the whole transcript every poll.
+let renderedCount = 0;
+let renderedFile = null;
+
+function buildEntry(e) {
+    // createElement + textContent: transcript text is raw user speech
+    // and must never be parsed as HTML.
+    const entry = document.createElement("div");
+    entry.className = "entry";
+
+    let who = "";
+    if (e.player) {
+        who = e.player;
+        if (e.character && e.character !== e.player) who += " (" + e.character + ")";
+    }
+    if (who || e.time) {
+        const head = document.createElement("div");
+        head.className = "entry-meta";
+        const whoSpan = document.createElement("strong");
+        whoSpan.textContent = who || "Unknown";
+        head.appendChild(whoSpan);
+        if (e.time) head.appendChild(document.createTextNode(" · " + e.time));
+        entry.appendChild(head);
+    }
+
+    const body = document.createElement("div");
+    body.className = "entry-text";
+    body.textContent = e.text;
+    entry.appendChild(body);
+    return entry;
+}
+
 function render(data) {
     const badge = document.getElementById("live-badge");
     const meta = document.getElementById("session-meta");
@@ -62,50 +98,50 @@ function render(data) {
     lastFetchAt = Date.now();
     tickUpdatedLabel();
 
-    // Stick to bottom only if the user is already near it, so scrolling
-    // back to re-read isn't yanked away on each poll.
-    const nearBottom =
-        feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
+    const entries = data.entries || [];
 
-    // Rebuild via DOM APIs + textContent: transcript text is raw user
-    // speech and must never be parsed as HTML.
-    while (feed.firstChild) feed.removeChild(feed.firstChild);
+    // Full reset only when the session changed or the file shrank
+    // (new session / rotated / truncated) — otherwise it grows.
+    const reset =
+        data.filename !== renderedFile || entries.length < renderedCount;
+    if (reset) {
+        while (feed.firstChild) feed.removeChild(feed.firstChild);
+        renderedCount = 0;
+        renderedFile = data.filename;
+    }
 
-    if (!data.entries || data.entries.length === 0) {
-        const p = document.createElement("p");
-        p.textContent = data.filename
-            ? "Session file is empty so far."
-            : "No session transcript yet.";
-        feed.appendChild(p);
+    if (entries.length === 0) {
+        if (feed.childElementCount === 0) {
+            const p = document.createElement("p");
+            p.textContent = data.filename
+                ? "Session file is empty so far."
+                : "No session transcript yet.";
+            feed.appendChild(p);
+        }
         return;
     }
-
-    for (const e of data.entries) {
-        const entry = document.createElement("div");
-        entry.className = "entry";
-
-        const head = document.createElement("div");
-        head.className = "entry-meta";
-        let who = "";
-        if (e.player) {
-            who = e.player;
-            if (e.character && e.character !== e.player) who += " (" + e.character + ")";
-        }
-        const whoSpan = document.createElement("strong");
-        whoSpan.textContent = who || "Unknown";
-        head.appendChild(whoSpan);
-        if (e.time) head.appendChild(document.createTextNode(" · " + e.time));
-
-        const body = document.createElement("div");
-        body.className = "entry-text";
-        body.textContent = e.text;
-
-        if (who || e.time) entry.appendChild(head);
-        entry.appendChild(body);
-        feed.appendChild(entry);
+    if (reset) {
+        const empty = document.getElementById("empty-state");
+        if (empty) empty.remove();
     }
 
-    if (nearBottom) feed.scrollTop = feed.scrollHeight;
+    if (entries.length === renderedCount) return;  // nothing new
+
+    // Measure BEFORE appending; only auto-scroll if already at the
+    // bottom (or this is a fresh session). Otherwise leave scrollTop
+    // untouched so re-reading earlier lines isn't disrupted.
+    const stick =
+        reset ||
+        feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
+
+    const frag = document.createDocumentFragment();
+    for (let i = renderedCount; i < entries.length; i++) {
+        frag.appendChild(buildEntry(entries[i]));
+    }
+    feed.appendChild(frag);
+    renderedCount = entries.length;
+
+    if (stick) feed.scrollTop = feed.scrollHeight;
 }
 
 async function poll() {

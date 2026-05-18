@@ -8,6 +8,9 @@ Every test gets a fake BotManager via the `fake_bot` fixture — no real
 artifacts in .logs/ or transcripts/ and tests stay independent.
 """
 
+import json
+import os
+import time as _time
 from unittest.mock import MagicMock
 
 import pytest
@@ -199,6 +202,75 @@ def test_get_live_session_shape():
     data = transcript_service.get_live_session()
     assert set(data) >= {"filename", "entries", "modified", "age_seconds", "live"}
     assert isinstance(data["entries"], list)
+
+
+def test_get_live_session_picks_newest_and_freshness(tmp_path, monkeypatch):
+    """roborev #795: the newest-file selection and the mtime-based
+    `live` flag are the core logic — exercise them directly."""
+    monkeypatch.setattr(transcript_service, "TRANSCRIPTS_DIR", tmp_path)
+    (tmp_path / "2026-05-18_10-00-00.txt").write_text(
+        "[10:00:00] A (A) [1]: old line\n", encoding="utf-8"
+    )
+    new = tmp_path / "2026-05-18_12-00-00.txt"
+    new.write_text("[12:00:00] B (B) [2]: new line\n", encoding="utf-8")
+
+    s = transcript_service.get_live_session()
+    assert s["filename"] == "2026-05-18_12-00-00.txt"  # lexicographically newest
+    assert s["live"] is True  # just written
+    assert s["entries"][0]["text"] == "new line"
+
+    stale = _time.time() - (transcript_service.LIVE_FRESH_SECONDS + 60)
+    os.utime(new, (stale, stale))
+    assert transcript_service.get_live_session()["live"] is False
+
+
+def test_get_log_entries_parses_and_skips(tmp_path, monkeypatch):
+    """roborev #796: positive path — valid rows parsed (event_source
+    -> source), silence (empty data) and malformed lines skipped."""
+    monkeypatch.setattr(transcript_service, "LOGS_DIR", tmp_path)
+    log = tmp_path / "2026-05-18-transcription.log"
+    log.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "date": "2026-05-18",
+                        "begin": "18:00:01",
+                        "end": "18:00:03",
+                        "user_id": 7,
+                        "player": "P",
+                        "character": "C",
+                        "event_source": "Discord",
+                        "data": "hello there",
+                    }
+                ),
+                json.dumps({"player": "P", "data": "   "}),  # silence
+                "{ not valid json",  # malformed
+                "",  # blank
+                json.dumps(
+                    {"player": "Q", "event_source": "Discord", "data": "second"}
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    entries = transcript_service.get_log_entries("2026-05-18-transcription.log")
+    assert [e["text"] for e in entries] == ["hello there", "second"]
+    assert entries[0]["source"] == "Discord"  # event_source -> source
+    assert entries[0]["player"] == "P"
+    assert entries[0]["begin"] == "18:00:01"
+
+
+def test_view_log_renders_known_file(tmp_path, monkeypatch, client):
+    monkeypatch.setattr(transcript_service, "LOGS_DIR", tmp_path)
+    (tmp_path / "ok.log").write_text(
+        json.dumps({"player": "Zed", "event_source": "Discord", "data": "ping"}) + "\n",
+        encoding="utf-8",
+    )
+    r = client.get("/logs/ok.log")
+    assert r.status_code == 200
+    assert b"Zed" in r.data and b"ping" in r.data
 
 
 # ── Path traversal defense ────────────────────────────────────────────

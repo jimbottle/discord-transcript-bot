@@ -40,10 +40,33 @@ class BotManager:
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return None
 
+    def _proc_cwd(self, pid):
+        """The working directory of `pid`, or None. lsof is on macOS &
+        Linux; -Fn makes the cwd line machine-parseable."""
+        try:
+            out = subprocess.run(
+                ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        for line in out.stdout.splitlines():
+            if line.startswith("n"):
+                return line[1:]
+        return None
+
     def _find_bot_pid(self):
         """PID of a `main.py` bot we did NOT spawn (make start / detached),
-        or None. Best-effort via pgrep; the caller pairs this with a
-        present health file so a stale file alone never reads as running."""
+        or None.
+
+        `main.py` is a very common entrypoint name, so a name match
+        alone is not enough — a crashed run can leave a stale health
+        file while some unrelated `python main.py` runs elsewhere. So we
+        confirm a candidate's working directory IS this project before
+        trusting it as our bot.
+        """
         try:
             out = subprocess.run(
                 ["pgrep", "-f", "main.py"],
@@ -53,15 +76,18 @@ class BotManager:
             )
         except (OSError, subprocess.SubprocessError):
             return None
+        project = os.path.realpath(PROJECT_ROOT)
         for tok in out.stdout.split():
             try:
-                return int(tok)
+                pid = int(tok)
             except ValueError:
                 continue
+            cwd = self._proc_cwd(pid)
+            if cwd and os.path.realpath(cwd) == project:
+                return pid
         return None
 
-    def _status_from_health(self, pid, external):
-        health = self._read_health()
+    def _status_from_health(self, health, pid, external):
         if health is None:
             return {
                 "status": "starting",
@@ -88,16 +114,21 @@ class BotManager:
     def status(self):
         if self._process is None:
             # We didn't spawn it — but it may be running externally
-            # (`make start`, a detached run). Require BOTH a live
-            # main.py process AND a health file so a stale health file
-            # from a crashed run doesn't read as running.
-            pid = self._find_bot_pid()
-            if pid is not None and self._read_health() is not None:
-                return self._status_from_health(pid, external=True)
+            # (`make start`, a detached run). Require BOTH a health file
+            # AND a main.py process whose cwd is this project (see
+            # _find_bot_pid). Read health once and reuse it (no
+            # double-read / TOCTOU). Skip the pgrep+lsof cost entirely
+            # when there's no health file.
+            health = self._read_health()
+            pid = self._find_bot_pid() if health is not None else None
+            if pid is not None:
+                return self._status_from_health(health, pid, external=True)
             return {"status": "stopped", "pid": None, "external": False}
         rc = self._process.poll()
         if rc is None:
-            return self._status_from_health(self._process.pid, external=False)
+            return self._status_from_health(
+                self._read_health(), self._process.pid, external=False
+            )
         error = self._read_stderr()
         return {
             "status": "crashed",
