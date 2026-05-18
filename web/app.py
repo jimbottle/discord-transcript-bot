@@ -4,6 +4,7 @@ from flask import Flask, abort, jsonify, render_template, request
 
 from bot_manager import BotManager
 from transcript_service import (
+    get_live_session,
     get_transcript,
     list_logs,
     list_transcripts,
@@ -30,7 +31,9 @@ def _require_csrf_header():
 @app.route("/")
 def index():
     transcripts = list_transcripts()[:5]
-    return render_template("index.html", transcripts=transcripts, bot_status=bot.status())
+    return render_template(
+        "index.html", transcripts=transcripts, bot_status=bot.status()
+    )
 
 
 @app.route("/transcripts")
@@ -46,6 +49,16 @@ def view_transcript(filename):
     if content is None:
         return "Not found", 404
     return render_template("transcript.html", filename=filename, content=content)
+
+
+@app.route("/live")
+def live():
+    return render_template("live.html")
+
+
+@app.route("/live/data")
+def live_data():
+    return jsonify(get_live_session())
 
 
 @app.route("/search")

@@ -73,6 +73,53 @@
     overflow-y: auto;
 }
 
+/* Live session */
+.live-badge {
+    display: inline-block;
+    padding: 0.2rem 0.7rem;
+    border-radius: 1rem;
+    font-size: 0.8rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+}
+
+.live-on {
+    background: #d4edda;
+    color: #155724;
+    animation: live-pulse 1.6s ease-in-out infinite;
+}
+
+.live-off {
+    background: var(--pico-secondary-background, #e9ecef);
+    color: var(--pico-muted-color, #6c757d);
+}
+
+@keyframes live-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.55; }
+}
+
+.entry {
+    padding: 0.35rem 0;
+    border-bottom: 1px solid var(--pico-muted-border-color, #e1e1e1);
+}
+
+.entry:last-child {
+    border-bottom: none;
+}
+
+.entry-meta {
+    font-size: 0.78rem;
+    color: var(--pico-muted-color);
+    margin-bottom: 0.1rem;
+}
+
+.entry-text {
+    font-size: 0.9rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
 /* Search results */
 .search-result {
     border-left: 3px solid var(--pico-primary);

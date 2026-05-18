@@ -56,6 +56,7 @@ def client(fake_bot):
 
 # ── CSRF gate ─────────────────────────────────────────────────────────
 
+
 def test_post_start_no_header_is_403(client):
     assert client.post("/bot/start").status_code == 403
 
@@ -106,6 +107,7 @@ def test_post_with_matching_origin_passes(client, fake_bot):
 
 # ── Status endpoint shape ─────────────────────────────────────────────
 
+
 def test_status_returns_stopped_initially(client):
     r = client.get("/bot/status")
     assert r.status_code == 200
@@ -124,6 +126,7 @@ def test_status_reflects_started_state(client, fake_bot):
 
 # ── Page renders (smoke) ──────────────────────────────────────────────
 
+
 def test_index_renders(client):
     r = client.get("/")
     assert r.status_code == 200
@@ -140,14 +143,76 @@ def test_search_renders(client):
     assert r.status_code == 200
 
 
+def test_live_page_renders(client):
+    r = client.get("/live")
+    assert r.status_code == 200
+    assert b"Live Session" in r.data
+
+
+def test_live_data_returns_expected_shape(client):
+    r = client.get("/live/data")
+    assert r.status_code == 200
+    data = r.get_json()
+    for key in ("filename", "entries", "modified", "age_seconds", "live"):
+        assert key in data
+    assert isinstance(data["entries"], list)
+    assert isinstance(data["live"], bool)
+
+
+# ── live transcript line parser ───────────────────────────────────────
+
+
+def test_parse_transcript_line_structured():
+    line = "[18:08:09] Jobby Jill (Jim) [371442040141119490]: Drain test one two."
+    e = transcript_service.parse_transcript_line(line)
+    assert e == {
+        "time": "18:08:09",
+        "player": "Jobby Jill",
+        "character": "Jim",
+        "user_id": "371442040141119490",
+        "text": "Drain test one two.",
+    }
+
+
+def test_parse_transcript_line_blank_is_none():
+    assert transcript_service.parse_transcript_line("") is None
+    assert transcript_service.parse_transcript_line("   \n") is None
+
+
+def test_parse_transcript_line_unmatched_kept_as_raw():
+    # Older format / manual edit must not be silently dropped.
+    e = transcript_service.parse_transcript_line("just some freeform text")
+    assert e["text"] == "just some freeform text"
+    assert e["player"] is None and e["time"] is None
+
+
+def test_parse_transcript_line_text_with_brackets_and_colons():
+    line = "[09:00:01] A B (C) [42]: see [note]: it's 3:00 sharp"
+    e = transcript_service.parse_transcript_line(line)
+    assert e["player"] == "A B"
+    assert e["character"] == "C"
+    assert e["user_id"] == "42"
+    assert e["text"] == "see [note]: it's 3:00 sharp"
+
+
+def test_get_live_session_shape():
+    data = transcript_service.get_live_session()
+    assert set(data) >= {"filename", "entries", "modified", "age_seconds", "live"}
+    assert isinstance(data["entries"], list)
+
+
 # ── Path traversal defense ────────────────────────────────────────────
 
-@pytest.mark.parametrize("evil", [
-    "../../../etc/passwd",
-    "..\\..\\Windows\\System32",
-    "a/b",
-    "x/../y",
-])
+
+@pytest.mark.parametrize(
+    "evil",
+    [
+        "../../../etc/passwd",
+        "..\\..\\Windows\\System32",
+        "a/b",
+        "x/../y",
+    ],
+)
 def test_get_transcript_rejects_traversal(evil):
     assert transcript_service.get_transcript(evil) is None
 
@@ -157,6 +222,7 @@ def test_get_transcript_unknown_file_returns_none():
 
 
 # ── transcript_service basics ─────────────────────────────────────────
+
 
 def test_list_transcripts_returns_list():
     result = transcript_service.list_transcripts()
