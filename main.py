@@ -31,52 +31,51 @@ logger = logging.getLogger()  # root logger
 
 
 def configure_logging():
-    logging.getLogger('discord').setLevel(logging.WARNING)
-    logging.getLogger('asyncio').setLevel(logging.WARNING)
-    logging.getLogger('faster_whisper').setLevel(logging.WARNING)
-    logging.getLogger('httpx').setLevel(logging.WARNING)
-    logging.getLogger('httpcore').setLevel(logging.WARNING)
+    logging.getLogger("discord").setLevel(logging.WARNING)
+    logging.getLogger("asyncio").setLevel(logging.WARNING)
+    logging.getLogger("faster_whisper").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     # Ensure the directory exists
-    log_directory = '.logs/transcripts'
-    pdf_directory = '.logs/pdfs'
+    log_directory = ".logs/transcripts"
+    pdf_directory = ".logs/pdfs"
     os.makedirs(log_directory, exist_ok=True)
     os.makedirs(pdf_directory, exist_ok=True)
 
     # Get the current date for the log file name
-    current_date = datetime.now().strftime('%Y-%m-%d')
+    current_date = datetime.now().strftime("%Y-%m-%d")
     log_filename = os.path.join(log_directory, f"{current_date}-transcription.log")
 
     # Custom logging format (date with milliseconds, message)
-    log_format = '%(asctime)s %(name)s: %(message)s'
-    date_format = '%Y-%m-%d %H:%M:%S.%f'[:-3]  # Trim to milliseconds
+    log_format = "%(asctime)s %(name)s: %(message)s"
+    date_format = "%Y-%m-%d %H:%M:%S.%f"[:-3]  # Trim to milliseconds
 
     if CLIArgs.verbose:
         logger.setLevel(logging.DEBUG)
-        logging.basicConfig(level=logging.DEBUG,
-                            format=log_format,
-                            datefmt=date_format)
+        logging.basicConfig(level=logging.DEBUG, format=log_format, datefmt=date_format)
     else:
         logger.setLevel(logging.INFO)
-        logging.basicConfig(level=logging.INFO,
-                            format=log_format,
-                            datefmt=date_format)
+        logging.basicConfig(level=logging.INFO, format=log_format, datefmt=date_format)
 
     # Set up the transcription logger
-    transcription_logger = logging.getLogger('transcription')
+    transcription_logger = logging.getLogger("transcription")
     transcription_logger.setLevel(logging.INFO)
 
     # File handler for transcription logs (append mode)
-    file_handler = logging.FileHandler(log_filename, mode='a')
+    file_handler = logging.FileHandler(log_filename, mode="a")
     file_handler.setLevel(logging.INFO)
 
     # Custom formatter WITHOUT the automatic timestamp
-    file_handler.setFormatter(logging.Formatter(
-        '%(message)s'  # Only log the custom message, no automatic timestamp
-    ))
+    file_handler.setFormatter(
+        logging.Formatter(
+            "%(message)s"  # Only log the custom message, no automatic timestamp
+        )
+    )
 
     # Add the handler to the transcription logger
     transcription_logger.addHandler(file_handler)
+
 
 if __name__ == "__main__":
     args = CommandLine.read_command_line()
@@ -105,25 +104,31 @@ if __name__ == "__main__":
     @bot.slash_command(name="connect", description="Join your voice channel.")
     async def connect(ctx: discord.context.ApplicationContext):
         if bot._is_ready is False:
-            await ctx.respond("System's still booting up, choom. Try again in a sec.", ephemeral=True)
+            await ctx.respond(
+                "System's still booting up, choom. Try again in a sec.", ephemeral=True
+            )
             return
         await ctx.defer()
         # Quick gateway sanity check — full health was verified at startup.
         # Avoid running heavy checks (whisper transcription) in a thread here
         # as GIL contention can starve the gateway heartbeat.
-        if not bot.is_ready() or bot.latency == float('inf') or bot.latency > 5.0:
+        if not bot.is_ready() or bot.latency == float("inf") or bot.latency > 5.0:
             await ctx.followup.send(
                 "Gateway connection is unstable. Try again in a moment, or run `/health` for details.",
             )
             return
         author_vc = ctx.author.voice
         if not author_vc:
-            await ctx.followup.send("You're not in a voice channel. Jack in first, then call me.")
+            await ctx.followup.send(
+                "You're not in a voice channel. Jack in first, then call me."
+            )
             return
         # check if we are already connected or mid-connection
         guild_id = ctx.guild_id
         if bot.guild_to_helper.get(guild_id, None):
-            await ctx.followup.send("Already connected on this server. One channel at a time.")
+            await ctx.followup.send(
+                "Already connected on this server. One channel at a time."
+            )
             return
         if guild_id in bot._connecting_guilds:
             await ctx.followup.send("Already connecting. Hold on.")
@@ -150,14 +155,20 @@ if __name__ == "__main__":
                     await ctx.guild.change_voice_state(channel=None)
                 except Exception:
                     pass
-                await ctx.followup.send("Voice connection failed — could not establish a stable connection. Try again.")
+                await ctx.followup.send(
+                    "Voice connection failed — could not establish a stable connection. Try again."
+                )
                 return
             helper = bot.guild_to_helper.get(guild_id, BotHelper(bot))
             helper.guild_id = guild_id
             helper.set_vc(vc)
             bot.guild_to_helper[guild_id] = helper
-            await ctx.followup.send("Jacked in. Connected to the voice channel and standing by.")
-            await ctx.guild.change_voice_state(channel=author_vc.channel, self_mute=True)
+            await ctx.followup.send(
+                "Jacked in. Connected to the voice channel and standing by."
+            )
+            await ctx.guild.change_voice_state(
+                channel=author_vc.channel, self_mute=True
+            )
         except Exception as e:
             # Force-leave at the gateway level. The bot appears in the
             # channel as soon as OP 4 is sent (before voice WS connects),
@@ -181,37 +192,52 @@ if __name__ == "__main__":
     @bot.slash_command(name="scribe", description="Start transcribing voice to text.")
     async def ink(ctx: discord.context.ApplicationContext):
         await ctx.trigger_typing()
-        connect_command = next((cmd for cmd in ctx.bot.application_commands if cmd.name == "connect"), None)
+        connect_command = next(
+            (cmd for cmd in ctx.bot.application_commands if cmd.name == "connect"), None
+        )
         if not connect_command:
             connect_text = "`/connect`"
         else:
             connect_text = f"</connect:{connect_command.id}>"
         if not bot.guild_to_helper.get(ctx.guild_id, None):
-            await ctx.respond(f"Not connected yet. Use {connect_text} first.", ephemeral=True)
+            await ctx.respond(
+                f"Not connected yet. Use {connect_text} first.", ephemeral=True
+            )
             return
         # check if we are already scribing
         if bot.guild_is_recording.get(ctx.guild_id, False):
-            await ctx.respond("Already recording. Can't run two taps at once.", ephemeral=True)
+            await ctx.respond(
+                "Already recording. Can't run two taps at once.", ephemeral=True
+            )
             return
         bot.start_recording(ctx)
-        await ctx.respond("Recording. Every word in this channel is being transcribed in realtime.", ephemeral=False)
+        await ctx.respond(
+            "Recording. Every word in this channel is being transcribed in realtime.",
+            ephemeral=False,
+        )
 
     @bot.slash_command(name="stop", description="Stop transcribing.")
     async def stop(ctx: discord.context.ApplicationContext):
         guild_id = ctx.guild_id
         helper = bot.guild_to_helper.get(guild_id, None)
         if not helper:
-            await ctx.respond("Not connected to a channel. Nothing to stop.", ephemeral=True)
+            await ctx.respond(
+                "Not connected to a channel. Nothing to stop.", ephemeral=True
+            )
             return
 
         bot_vc = helper.vc
 
         if not bot_vc:
-            await ctx.respond("Not connected to a channel. Nothing to stop.", ephemeral=True)
+            await ctx.respond(
+                "Not connected to a channel. Nothing to stop.", ephemeral=True
+            )
             return
 
         if not bot.guild_is_recording.get(guild_id, False):
-            await ctx.respond("Not recording right now. Nothing to kill.", ephemeral=True)
+            await ctx.respond(
+                "Not recording right now. Nothing to kill.", ephemeral=True
+            )
             return
 
         # Teardown (voice-thread join, sink close) can take >3s. Defer
@@ -230,11 +256,11 @@ if __name__ == "__main__":
             logger.error(f"/stop get_transcription error: {e}")
             teardown_ok = False
         try:
-            # end_recording_session joins the voice thread (blocking) —
-            # run it off the event loop so a concurrent interaction
-            # (e.g. an impatient second /stop) can still be ACKed and
-            # doesn't itself show "The application did not respond".
-            await asyncio.to_thread(bot.end_recording_session, ctx)
+            # end_recording_session keeps the loop-affecting
+            # vc.stop_recording() on the loop thread and offloads only
+            # its blocking voice-thread join, so a concurrent
+            # interaction can still be ACKed during teardown.
+            await bot.end_recording_session(ctx)
         except Exception as e:
             logger.error(f"/stop end_recording_session error: {e}")
             teardown_ok = False
@@ -242,25 +268,32 @@ if __name__ == "__main__":
         # /scribe can't see "Already recording".
         bot.guild_is_recording.pop(guild_id, None)
         if teardown_ok:
-            await ctx.followup.send("Recording stopped. Data saved. Standing by for the next run.")
+            await ctx.followup.send(
+                "Recording stopped. Data saved. Standing by for the next run."
+            )
         else:
             await ctx.followup.send(
                 "Recording stopped, but cleanup hit an error — check the logs. "
-                "If the bot seems stuck, try `/disconnect`.")
+                "If the bot seems stuck, try `/disconnect`."
+            )
 
     @bot.slash_command(name="disconnect", description="Leave the voice channel.")
     async def disconnect(ctx: discord.context.ApplicationContext):
         guild_id = ctx.guild_id
         id_exists = bot.guild_to_helper.get(guild_id, None)
         if not id_exists:
-            await ctx.respond("Not connected to anything on this server.", ephemeral=True)
+            await ctx.respond(
+                "Not connected to anything on this server.", ephemeral=True
+            )
             return
 
         helper = bot.guild_to_helper[guild_id]
         bot_vc = helper.vc
 
         if not bot_vc:
-            await ctx.respond("Lost the connection somehow. Try reconnecting.", ephemeral=True)
+            await ctx.respond(
+                "Lost the connection somehow. Try reconnecting.", ephemeral=True
+            )
             return
 
         # Teardown + voice disconnect can take >3s; defer so the
@@ -280,9 +313,10 @@ if __name__ == "__main__":
                 logger.error(f"/disconnect get_transcription error: {e}")
                 teardown_ok = False
             try:
-                # Blocking voice-thread join — off the event loop so the
-                # bot stays responsive to other interactions meanwhile.
-                await asyncio.to_thread(bot.end_recording_session, ctx)
+                # Keeps vc.stop_recording() on the loop thread (safe
+                # after-callback scheduling) and offloads only the
+                # blocking voice-thread join internally.
+                await bot.end_recording_session(ctx)
             except Exception as e:
                 logger.error(f"/disconnect end_recording_session error: {e}")
                 teardown_ok = False
@@ -310,12 +344,17 @@ if __name__ == "__main__":
         bot.guild_is_recording.pop(guild_id, None)
 
         if teardown_ok:
-            await ctx.followup.send("Disconnected. Session archived. Catch you on the next one, chooms.")
+            await ctx.followup.send(
+                "Disconnected. Session archived. Catch you on the next one, chooms."
+            )
         else:
             await ctx.followup.send(
-                "Disconnected, but session cleanup hit an error — check the logs.")
+                "Disconnected, but session cleanup hit an error — check the logs."
+            )
 
-    @bot.slash_command(name="generate_pdf", description="Export the transcript as a PDF.")
+    @bot.slash_command(
+        name="generate_pdf", description="Export the transcript as a PDF."
+    )
     async def generate_pdf(ctx: discord.context.ApplicationContext):
         guild_id = ctx.guild_id
         helper = bot.guild_to_helper.get(guild_id, None)
@@ -324,25 +363,36 @@ if __name__ == "__main__":
             return
         transcription = await bot.get_transcription(ctx)
         if not transcription:
-            await ctx.respond("No transcript data yet. Start a recording first.", ephemeral=True)
+            await ctx.respond(
+                "No transcript data yet. Start a recording first.", ephemeral=True
+            )
             return
         pdf_file_path = await pdf_generator(transcription)
         # Send the PDF as an attachment
         if os.path.exists(pdf_file_path):
             try:
                 with open(pdf_file_path, "rb") as f:
-                    discord_file = discord.File(f, filename=f"session_transcription.pdf")
-                    await ctx.respond("Dossier compiled. Here's your transcript.", file=discord_file)
+                    discord_file = discord.File(
+                        f, filename=f"session_transcription.pdf"
+                    )
+                    await ctx.respond(
+                        "Dossier compiled. Here's your transcript.", file=discord_file
+                    )
             finally:
                 os.remove(pdf_file_path)
         else:
             await ctx.respond("PDF generation failed. Check the logs.", ephemeral=True)
 
-
-    @bot.slash_command(name="update_player_map", description="Sync player names with the server roster.")
+    @bot.slash_command(
+        name="update_player_map",
+        description="Sync player names with the server roster.",
+    )
     async def update_player_map(ctx: discord.context.ApplicationContext):
         if bot.guild_is_recording.get(ctx.guild_id, False):
-            await ctx.respond("Can't update the roster while recording. Stop the session first.", ephemeral=True)
+            await ctx.respond(
+                "Can't update the roster while recording. Stop the session first.",
+                ephemeral=True,
+            )
             return
         try:
             await bot.update_player_map(ctx)
@@ -351,15 +401,24 @@ if __name__ == "__main__":
             await ctx.respond(f"Roster sync failed:\n{e}", ephemeral=True)
             raise e
 
-
     @bot.slash_command(
         name="ask",
         description="Ask a question about the current transcript.",
-        contexts={discord.InteractionContextType.guild, discord.InteractionContextType.bot_dm},
+        contexts={
+            discord.InteractionContextType.guild,
+            discord.InteractionContextType.bot_dm,
+        },
     )
-    async def ask(ctx: discord.context.ApplicationContext,
-                  question: discord.Option(str, description="Your question about the transcript"),
-                  server: discord.Option(str, description="Server name (only needed in DMs if you share multiple servers)", required=False, default=None)):
+    async def ask(
+        ctx: discord.context.ApplicationContext,
+        question: discord.Option(str, description="Your question about the transcript"),
+        server: discord.Option(
+            str,
+            description="Server name (only needed in DMs if you share multiple servers)",
+            required=False,
+            default=None,
+        ),
+    ):
 
         # Resolve the guild_id — either from the guild context or by finding shared guilds in DMs
         if ctx.guild_id:
@@ -368,7 +427,9 @@ if __name__ == "__main__":
             # DM context: find guilds with active transcripts where the user is a member
             active_guilds = []
             for gid, sink in bot.guild_whisper_sinks.items():
-                if not (hasattr(sink, 'session_file') and os.path.exists(sink.session_file)):
+                if not (
+                    hasattr(sink, "session_file") and os.path.exists(sink.session_file)
+                ):
                     continue
                 guild = bot.get_guild(gid)
                 if not guild:
@@ -381,7 +442,9 @@ if __name__ == "__main__":
 
             if not active_guilds:
                 await ctx.respond(
-                    "No active transcripts found in any of your shared servers.", ephemeral=True)
+                    "No active transcripts found in any of your shared servers.",
+                    ephemeral=True,
+                )
                 return
 
             if len(active_guilds) == 1:
@@ -389,35 +452,56 @@ if __name__ == "__main__":
             elif server:
                 # Match by server name (case-insensitive)
                 match = next(
-                    (gid for gid in active_guilds
-                     if bot.get_guild(gid) and bot.get_guild(gid).name.lower() == server.lower()),
+                    (
+                        gid
+                        for gid in active_guilds
+                        if bot.get_guild(gid)
+                        and bot.get_guild(gid).name.lower() == server.lower()
+                    ),
                     None,
                 )
                 if not match:
                     names = ", ".join(
-                        f"`{bot.get_guild(gid).name}`" for gid in active_guilds if bot.get_guild(gid))
+                        f"`{bot.get_guild(gid).name}`"
+                        for gid in active_guilds
+                        if bot.get_guild(gid)
+                    )
                     await ctx.respond(
-                        f"No matching server found. Active transcripts in: {names}", ephemeral=True)
+                        f"No matching server found. Active transcripts in: {names}",
+                        ephemeral=True,
+                    )
                     return
                 guild_id = match
             else:
                 names = ", ".join(
-                    f"`{bot.get_guild(gid).name}`" for gid in active_guilds if bot.get_guild(gid))
+                    f"`{bot.get_guild(gid).name}`"
+                    for gid in active_guilds
+                    if bot.get_guild(gid)
+                )
                 await ctx.respond(
                     f"Multiple servers have active transcripts: {names}\n"
-                    "Use the `server` option to pick one.", ephemeral=True)
+                    "Use the `server` option to pick one.",
+                    ephemeral=True,
+                )
                 return
 
         whisper_sink = bot.guild_whisper_sinks.get(guild_id, None)
 
         # Try to read the session transcript file
         transcript_text = None
-        if whisper_sink and hasattr(whisper_sink, 'session_file') and os.path.exists(whisper_sink.session_file):
+        if (
+            whisper_sink
+            and hasattr(whisper_sink, "session_file")
+            and os.path.exists(whisper_sink.session_file)
+        ):
             with open(whisper_sink.session_file, "r", encoding="utf-8") as f:
                 transcript_text = f.read()
 
         if not transcript_text or not transcript_text.strip():
-            await ctx.respond("No transcript data in the current session yet. Start recording first.", ephemeral=True)
+            await ctx.respond(
+                "No transcript data in the current session yet. Start recording first.",
+                ephemeral=True,
+            )
             return
 
         await ctx.defer()
@@ -428,12 +512,12 @@ if __name__ == "__main__":
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are an assistant that answers questions about a voice chat transcript. Be concise and direct. Only reference what's actually in the transcript. If the answer isn't in the transcript, say so."
+                        "content": "You are an assistant that answers questions about a voice chat transcript. Be concise and direct. Only reference what's actually in the transcript. If the answer isn't in the transcript, say so.",
                     },
                     {
                         "role": "user",
-                        "content": f"Here is the transcript:\n\n{transcript_text}\n\nQuestion: {question}"
-                    }
+                        "content": f"Here is the transcript:\n\n{transcript_text}\n\nQuestion: {question}",
+                    },
                 ],
                 # /ask wants a short grounded answer, not chain-of-thought.
                 # think=False disables native thinking (Gemma 4 defaults it
@@ -447,19 +531,22 @@ if __name__ == "__main__":
                 think=False,
                 options={"num_predict": 512, "temperature": 0},
             )
-            answer = clean_ollama_answer(response['message']['content'])
+            answer = clean_ollama_answer(response["message"]["content"])
 
             if not answer:
                 await ctx.followup.send(
                     "The model returned no answer (it may have produced only "
                     "internal reasoning). Try rephrasing, or set "
-                    "`ASK_OLLAMA_MODEL` to a non-reasoning model.")
+                    "`ASK_OLLAMA_MODEL` to a non-reasoning model."
+                )
                 return
 
             # clean_ollama_answer only caps the answer; a long /ask
             # question can still push the composed message past Discord's
             # hard limit. clamp_message is the unit-tested final guard.
-            message = clamp_message(f"**Q:** {question}\n\n{answer}", DISCORD_MESSAGE_LIMIT)
+            message = clamp_message(
+                f"**Q:** {question}\n\n{answer}", DISCORD_MESSAGE_LIMIT
+            )
             await ctx.followup.send(message)
         except Exception as e:
             # An ollama client older than 0.5.x rejects the think= kwarg
@@ -467,45 +554,58 @@ if __name__ == "__main__":
             # 'think'`. Special-case ONLY that exact message so an
             # unrelated TypeError elsewhere in the block isn't
             # misattributed to the client version.
-            if isinstance(e, TypeError) and "unexpected keyword argument 'think'" in str(e):
+            if isinstance(
+                e, TypeError
+            ) and "unexpected keyword argument 'think'" in str(e):
                 logger.error(f"Ollama client error: {e}")
                 await ctx.followup.send(
                     "The Ollama Python client is too old for `/ask` "
                     "(needs the `think` parameter). Upgrade it: "
                     "`pip install -U 'ollama>=0.5.1'`.\n"
-                    f"`{e}`")
+                    f"`{e}`"
+                )
             else:
                 logger.error(f"Ollama error: {e}")
                 await ctx.followup.send(
-                    f"Failed to query the model. Make sure Ollama is running.\n`{e}`")
+                    f"Failed to query the model. Make sure Ollama is running.\n`{e}`"
+                )
 
     @bot.slash_command(name="help", description="Show available commands.")
     async def help(ctx: discord.context.ApplicationContext):
         embed_fields = [
             discord.EmbedField(
-                name="/connect", value="Join your voice channel.", inline=True),
+                name="/connect", value="Join your voice channel.", inline=True
+            ),
             discord.EmbedField(
-                name="/disconnect", value="Leave the voice channel.", inline=True),
+                name="/disconnect", value="Leave the voice channel.", inline=True
+            ),
             discord.EmbedField(
-                name="/scribe", value="Start transcribing.", inline=True),
+                name="/scribe", value="Start transcribing.", inline=True
+            ),
+            discord.EmbedField(name="/stop", value="Stop transcribing.", inline=True),
             discord.EmbedField(
-                name="/stop", value="Stop transcribing.", inline=True),
+                name="/ask", value="Ask about the transcript.", inline=True
+            ),
             discord.EmbedField(
-                name="/ask", value="Ask about the transcript.", inline=True),
+                name="/generate_pdf", value="Export transcript as PDF.", inline=True
+            ),
             discord.EmbedField(
-                name="/generate_pdf", value="Export transcript as PDF.", inline=True),
+                name="/update_player_map",
+                value="Sync player names with roster.",
+                inline=True,
+            ),
             discord.EmbedField(
-                name="/update_player_map", value="Sync player names with roster.", inline=True),
-            discord.EmbedField(
-                name="/health", value="Show system health status.", inline=True),
-            discord.EmbedField(
-                name="/help", value="Show this menu.", inline=True),
+                name="/health", value="Show system health status.", inline=True
+            ),
+            discord.EmbedField(name="/help", value="Show this menu.", inline=True),
         ]
 
-        embed = discord.Embed(title="// TRANSCRIPT-BOT",
-                              description="""Realtime voice-to-text. All comms logged.""",
-                              color=discord.Color.from_rgb(0, 255, 136),
-                              fields=embed_fields)
+        embed = discord.Embed(
+            title="// TRANSCRIPT-BOT",
+            description="""Realtime voice-to-text. All comms logged.""",
+            color=discord.Color.from_rgb(0, 255, 136),
+            fields=embed_fields,
+        )
 
         await ctx.respond(embed=embed, ephemeral=True)
 
@@ -516,7 +616,11 @@ if __name__ == "__main__":
         # it spawned at startup stays tracked, and to avoid re-loading the
         # whisper model on every /health invocation.
         await asyncio.to_thread(bot.health.run_all, autofix=False, bot=bot)
-        status = "All systems operational." if bot.health.all_ok() else "Critical checks failing."
+        status = (
+            "All systems operational."
+            if bot.health.all_ok()
+            else "Critical checks failing."
+        )
         await ctx.followup.send(f"**{status}**\n```\n{bot.health.summary()}\n```")
 
     try:

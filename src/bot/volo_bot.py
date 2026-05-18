@@ -18,11 +18,15 @@ PLAYER_MAP_FILE_PATH = os.getenv("PLAYER_MAP_FILE_PATH")
 
 logger = logging.getLogger(__name__)
 
+
 class VoloBot(discord.Bot):
     def __init__(self, loop):
 
-        super().__init__(command_prefix="!", loop=loop,
-                         activity=discord.CustomActivity(name='Monitoring voice subnets'))
+        super().__init__(
+            command_prefix="!",
+            loop=loop,
+            activity=discord.CustomActivity(name="Monitoring voice subnets"),
+        )
         self.guild_to_helper = {}
         self.guild_is_recording = {}
         self.guild_whisper_sinks = {}
@@ -41,8 +45,6 @@ class VoloBot(discord.Bot):
             with open(PLAYER_MAP_FILE_PATH, "r", encoding="utf-8") as file:
                 self.player_map = yaml.safe_load(file) or {}
 
-    
-
     async def on_ready(self):
         logger.info(f"Logged in as {self.user} to Discord.")
 
@@ -60,14 +62,20 @@ class VoloBot(discord.Bot):
         # any ghost if we are. Run concurrently so N guilds don't serialize
         # the bot's readiness behind N×sleep.
         async def _ghost_cleanup(guild):
-            logger.debug(f"Sending voice-state disconnect for guild {guild.name} (ghost cleanup)")
+            logger.debug(
+                f"Sending voice-state disconnect for guild {guild.name} (ghost cleanup)"
+            )
             try:
                 await guild.change_voice_state(channel=None)
             except Exception as e:
-                logger.error(f"Failed to send voice-state disconnect for {guild.name}: {e}")
+                logger.error(
+                    f"Failed to send voice-state disconnect for {guild.name}: {e}"
+                )
 
         if self.guilds:
-            await asyncio.gather(*(_ghost_cleanup(g) for g in self.guilds), return_exceptions=True)
+            await asyncio.gather(
+                *(_ghost_cleanup(g) for g in self.guilds), return_exceptions=True
+            )
 
         # Run startup health checks in a thread so blocking autofix
         # (ollama serve poll, model pull) doesn't freeze the event loop.
@@ -75,7 +83,9 @@ class VoloBot(discord.Bot):
         for line in self.health.summary().splitlines():
             logger.info(f"Health: {line}")
         if not self.health.all_ok():
-            logger.error("Critical health checks failed — bot will not accept commands until resolved.")
+            logger.error(
+                "Critical health checks failed — bot will not accept commands until resolved."
+            )
             return
 
         self._gateway_latency = self.latency
@@ -97,12 +107,11 @@ class VoloBot(discord.Bot):
         await self.sync_commands()
         logger.info("Synced global commands.")
 
-
     async def on_application_command(self, ctx):
         self._last_interaction_time = time.time()
 
     async def close_consumers(self):
-        if hasattr(self, 'consumer_manager'):
+        if hasattr(self, "consumer_manager"):
             await self.consumer_manager.close()
 
     def _close_and_clean_sink_for_guild(self, guild_id: int):
@@ -111,8 +120,7 @@ class VoloBot(discord.Bot):
         # /scribe sees a stale entry. Each step is independently guarded
         # so one failure can't skip the next or propagate into the
         # /stop|/disconnect command.
-        whisper_sink: WhisperSink | None = self.guild_whisper_sinks.pop(
-            guild_id, None)
+        whisper_sink: WhisperSink | None = self.guild_whisper_sinks.pop(guild_id, None)
         if not whisper_sink:
             return
 
@@ -126,7 +134,6 @@ class VoloBot(discord.Bot):
         except Exception as e:
             logger.error(f"Error closing whisper sink for {guild_id}: {e}")
 
-    
     def start_recording(self, ctx: discord.context.ApplicationContext):
         """
         Start recording audio from the voice channel. Create a whisper sink
@@ -144,14 +151,16 @@ class VoloBot(discord.Bot):
     def start_whisper_sink(self, ctx: discord.context.ApplicationContext):
         guild_voice_sink = self.guild_whisper_sinks.get(ctx.guild_id, None)
         if guild_voice_sink:
-            logger.debug(
-                f"Sink is already active for guild {ctx.guild_id}.")
+            logger.debug(f"Sink is already active for guild {ctx.guild_id}.")
             return
 
         async def on_stop_record_callback(sink: WhisperSink, ctx):
-            logger.debug(
-                f"{ctx.channel.guild.id} -> on_stop_record_callback")
-            self._close_and_clean_sink_for_guild(ctx.guild_id)
+            logger.debug(f"{ctx.channel.guild.id} -> on_stop_record_callback")
+            # Pycord schedules this on the loop; _close_and_clean_sink
+            # does the blocking voice-thread join, so offload it or it
+            # freezes the event loop. Idempotent (pop-first) with the
+            # explicit cleanup_sink in end_recording_session.
+            await asyncio.to_thread(self._close_and_clean_sink_for_guild, ctx.guild_id)
 
         transcript_queue = asyncio.Queue()
 
@@ -165,11 +174,13 @@ class VoloBot(discord.Bot):
         )
 
         self.guild_to_helper[ctx.guild_id].vc.start_recording(
-            whisper_sink, on_stop_record_callback, ctx)
+            whisper_sink, on_stop_record_callback, ctx
+        )
 
         def on_thread_exception(e):
             logger.warning(
-                f"Whisper sink thread exception for guild {ctx.guild_id}. Retry in 5 seconds...\n{e}")
+                f"Whisper sink thread exception for guild {ctx.guild_id}. Retry in 5 seconds...\n{e}"
+            )
             self._close_and_clean_sink_for_guild(ctx.guild_id)
 
             # retry in 5 seconds
@@ -194,8 +205,7 @@ class VoloBot(discord.Bot):
             except RecordingException as e:
                 logger.debug(f"stop_recording: nothing to stop ({e}); continuing.")
         guild_id = ctx.guild_id
-        whisper_message_task = self.guild_whisper_message_tasks.get(
-            guild_id, None)
+        whisper_message_task = self.guild_whisper_message_tasks.get(guild_id, None)
         if whisper_message_task:
             logger.debug("Cancelling whisper message task.")
             whisper_message_task.cancel()
@@ -205,7 +215,7 @@ class VoloBot(discord.Bot):
         guild_id = ctx.guild_id
         self._close_and_clean_sink_for_guild(guild_id)
 
-    def end_recording_session(self, ctx: discord.context.ApplicationContext):
+    async def end_recording_session(self, ctx: discord.context.ApplicationContext):
         """Tear down an active recording for ctx's guild: stop the voice
         recording, clear the recording flag, and close/remove the sink.
 
@@ -214,6 +224,14 @@ class VoloBot(discord.Bot):
         guild_is_recording stuck True — a later /scribe (even after
         reconnecting) failed with "Already recording" — and leaked the
         sink's file handle + voice thread. No-op if not recording.
+
+        Must be awaited on the event loop. stop_recording() runs
+        vc.stop_recording(), which schedules the async stop callback via
+        loop.create_task() — that scheduling is NOT thread-safe off the
+        loop, so it stays on the loop thread. Only the blocking part
+        (cleanup_sink → voice-thread join, ~Whisper latency) is offloaded
+        via asyncio.to_thread so a concurrent interaction can still be
+        ACKed meanwhile.
         """
         guild_id = ctx.guild_id
         if not self.guild_is_recording.get(guild_id, False):
@@ -223,12 +241,12 @@ class VoloBot(discord.Bot):
         # "recording" or propagate into the /stop|/disconnect command
         # (which would 404 the interaction and look like the bot died).
         try:
-            self.stop_recording(ctx)
+            self.stop_recording(ctx)  # loop thread: schedules after-cb safely
         except Exception as e:
             logger.error(f"end_recording_session: stop_recording failed: {e}")
         self.guild_is_recording[guild_id] = False
         try:
-            self.cleanup_sink(ctx)
+            await asyncio.to_thread(self.cleanup_sink, ctx)
         except Exception as e:
             logger.error(f"end_recording_session: cleanup_sink failed: {e}")
 
@@ -240,7 +258,7 @@ class VoloBot(discord.Bot):
         transcriptions = []
         if whisper_sink is None:
             return
-    
+
         transcriptions_queue = whisper_sink.transcription_output_queue
         while not transcriptions_queue.empty():
             transcriptions.append(await transcriptions_queue.get())
@@ -261,14 +279,16 @@ class VoloBot(discord.Bot):
             if member.id not in existing_map:
                 existing_map[member.id] = {
                     "player": member.name,
-                    "character": member.display_name
+                    "character": member.display_name,
                 }
 
         self.player_map = existing_map
         logger.info(f"{str(self.player_map)}")
         if PLAYER_MAP_FILE_PATH:
             with open(PLAYER_MAP_FILE_PATH, "w", encoding="utf-8") as file:
-                yaml.dump(self.player_map, file, default_flow_style=False, allow_unicode=True)
+                yaml.dump(
+                    self.player_map, file, default_flow_style=False, allow_unicode=True
+                )
 
     async def stop_and_cleanup(self):
         try:
@@ -279,14 +299,23 @@ class VoloBot(discord.Bot):
                 except Exception:
                     pass
             for sink in self.guild_whisper_sinks.values():
-                sink.close()
+                # stop_voice_thread() BEFORE close(): the join drains an
+                # in-flight transcription while the file is still
+                # writable (running False, _closed False). close() then
+                # sets _closed and finalizes. Reversing this (the old
+                # order) drops the last transcription on the shutdown
+                # path — roborev #791.
                 sink.stop_voice_thread()
-                logger.debug(
-                    f"Stopped whisper sink for guild {sink.vc.channel.guild.id} in cleanup.")
+                sink.close()
+                gid = None
+                try:
+                    gid = sink.vc.channel.guild.id
+                except AttributeError:
+                    pass
+                logger.debug(f"Stopped whisper sink for guild {gid} in cleanup.")
             self.guild_whisper_sinks.clear()
             self.guild_to_helper.clear()
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
         finally:
             logger.info("Cleanup completed.")
-    

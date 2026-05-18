@@ -15,6 +15,7 @@ def disconnect_targets(live_vc, helper_vc, voice_clients, guild_id):
     bound to this guild. Order: live first, then helper, then the rest;
     duplicates (by identity/equality) are dropped.
     """
+
     def _seen(obj):
         # Dedup by identity, not equality: two distinct voice clients
         # must both be disconnected even if some __eq__ deems them equal.
@@ -26,7 +27,7 @@ def disconnect_targets(live_vc, helper_vc, voice_clients, guild_id):
             targets.append(cand)
     for vc in voice_clients or []:
         guild = getattr(vc, "guild", None)
-        if guild is not None and getattr(guild, "id", None) == guild_id \
-                and not _seen(vc):
+        same_guild = guild is not None and getattr(guild, "id", None) == guild_id
+        if same_guild and not _seen(vc):
             targets.append(vc)
     return targets

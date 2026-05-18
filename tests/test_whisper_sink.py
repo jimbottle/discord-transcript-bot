@@ -196,6 +196,31 @@ def test_stop_voice_thread_uses_bounded_join(tmp_path, monkeypatch):
     sink.close()
 
 
+def test_stop_voice_thread_warns_and_returns_when_thread_wont_die(
+        tmp_path, monkeypatch, caplog):
+    """roborev #788 (LOW): cover the is_alive()==True branch — a thread
+    that doesn't exit within the timeout must be abandoned (logged
+    warning) and stop_voice_thread() must still return promptly, not
+    hang. The thread is a daemon so abandoning it is safe."""
+    import logging
+
+    sink = _make_sink(tmp_path, monkeypatch)
+
+    class _StuckThread:
+        def join(self, timeout=None):
+            return  # returns immediately (timeout elapsed) but...
+
+        def is_alive(self):
+            return True  # ...still alive
+
+    sink.voice_thread = _StuckThread()
+    with caplog.at_level(logging.WARNING):
+        sink.stop_voice_thread()  # must return, not hang
+    assert any("did not exit" in r.message for r in caplog.records), \
+        "a non-exiting voice thread must log a warning"
+    sink.close()
+
+
 def test_concurrent_lazy_open_only_opens_once(tmp_path, monkeypatch):
     """Multiple executor workers may race to first-write. The lock must
     ensure exactly one file handle is opened."""
