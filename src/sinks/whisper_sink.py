@@ -130,13 +130,21 @@ class WhisperSink(Sink):
     def stop_voice_thread(self):
         self.running = False
         try:
-            self.voice_thread.join()
+            if getattr(self, "voice_thread", None) is not None:
+                self.voice_thread.join()
         except Exception as e:
             logger.error(f"Unexpected error during thread join: {e}")
         finally:
-            logger.debug(
-                f"A sink thread was stopped for guild {self.vc.channel.guild.id}."
-            )
+            # self.vc (and its .channel) can already be torn down after a
+            # /disconnect, so resolving the guild id here must never raise
+            # — this runs on the teardown path and an AttributeError would
+            # propagate up through cleanup_sink and crash /stop|/disconnect.
+            guild_id = None
+            try:
+                guild_id = self.vc.channel.guild.id
+            except AttributeError:
+                pass
+            logger.debug(f"A sink thread was stopped for guild {guild_id}.")
     def check_audio_length(self, temp_file):
         # Ensure the BytesIO is at the start
         temp_file.seek(0)

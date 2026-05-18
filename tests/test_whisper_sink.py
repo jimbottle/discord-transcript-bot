@@ -141,6 +141,17 @@ def test_transcribe_writes_discord_pcm_wav_header(tmp_path, monkeypatch):
     sink.close()
 
 
+def test_stop_voice_thread_safe_when_vc_none(tmp_path, monkeypatch):
+    """roborev #784 / live bug: stop_voice_thread's finally referenced
+    self.vc.channel.guild.id, which AttributeErrors after /disconnect
+    (self.vc is None, no voice_thread started) and crashed
+    /stop|/disconnect via cleanup_sink. Must be no-op-safe."""
+    sink = _make_sink(tmp_path, monkeypatch)
+    assert sink.vc is None  # _make_sink never starts recording
+    sink.stop_voice_thread()  # must not raise
+    sink.close()
+
+
 def test_concurrent_lazy_open_only_opens_once(tmp_path, monkeypatch):
     """Multiple executor workers may race to first-write. The lock must
     ensure exactly one file handle is opened."""

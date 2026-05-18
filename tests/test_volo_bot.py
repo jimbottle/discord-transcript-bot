@@ -12,7 +12,31 @@ failed with "Already recording" and the sink leaked.
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from discord.sinks.errors import RecordingException
+
 from src.bot.volo_bot import VoloBot
+
+
+class _FakeVC:
+    def __init__(self, recording=True, raise_on_stop=None):
+        self._recording = recording
+        self._raise = raise_on_stop
+        self.stopped = False
+
+    def is_recording(self):
+        return self._recording
+
+    def stop_recording(self):
+        if self._raise:
+            raise self._raise
+        self.stopped = True
+
+
+def _ctx_with_vc(guild_id, vc):
+    return SimpleNamespace(
+        guild_id=guild_id,
+        guild=SimpleNamespace(voice_client=vc),
+    )
 
 
 def _fake_self(recording_map):
@@ -54,3 +78,56 @@ def test_end_recording_session_noop_when_flag_explicitly_false():
 
     fake.stop_recording.assert_not_called()
     fake.cleanup_sink.assert_not_called()
+
+
+# ── teardown resilience (roborev #784 + live /stop|/disconnect bugs) ───
+
+def test_stop_recording_swallows_recording_exception():
+    """vc exists but isn't actually recording -> Pycord raises
+    RecordingException; stop_recording must swallow it and continue."""
+    vc = _FakeVC(recording=True,
+                 raise_on_stop=RecordingException("You are not recording"))
+    fake = SimpleNamespace(guild_is_recording={5: True},
+                           guild_whisper_message_tasks={})
+    VoloBot.stop_recording(fake, _ctx_with_vc(5, vc))
+    assert fake.guild_is_recording[5] is False
+
+
+def test_stop_recording_skips_when_not_recording():
+    vc = _FakeVC(recording=False)
+    fake = SimpleNamespace(guild_is_recording={5: True},
+                           guild_whisper_message_tasks={})
+    VoloBot.stop_recording(fake, _ctx_with_vc(5, vc))
+    assert vc.stopped is False  # stop_recording() not invoked
+    assert fake.guild_is_recording[5] is False
+
+
+def test_stop_recording_no_vc_is_safe():
+    fake = SimpleNamespace(guild_is_recording={},
+                           guild_whisper_message_tasks={})
+    VoloBot.stop_recording(fake, _ctx_with_vc(5, None))  # must not raise
+
+
+def test_end_recording_session_resilient_when_stop_raises():
+    """A failing stop_recording must not leave the guild stuck recording
+    or propagate into the /stop|/disconnect command (interaction 404)."""
+    fake = SimpleNamespace(
+        guild_is_recording={9: True},
+        stop_recording=MagicMock(side_effect=RuntimeError("boom")),
+        cleanup_sink=MagicMock(),
+    )
+    ctx = SimpleNamespace(guild_id=9)
+    VoloBot.end_recording_session(fake, ctx)  # must not raise
+    assert fake.guild_is_recording[9] is False
+    fake.cleanup_sink.assert_called_once_with(ctx)
+
+
+def test_close_and_clean_sink_robust_when_stop_thread_raises():
+    sink = SimpleNamespace(
+        stop_voice_thread=MagicMock(side_effect=RuntimeError("thread boom")),
+        close=MagicMock(),
+    )
+    fake = SimpleNamespace(guild_whisper_sinks={3: sink})
+    VoloBot._close_and_clean_sink_for_guild(fake, 3)  # must not raise
+    assert 3 not in fake.guild_whisper_sinks, "sink popped even on failure"
+    sink.close.assert_called_once()  # close still attempted

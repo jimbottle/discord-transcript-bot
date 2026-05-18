@@ -213,12 +213,17 @@ if __name__ == "__main__":
             await ctx.respond("Not recording right now. Nothing to kill.", ephemeral=True)
             return
 
-        await ctx.trigger_typing()
-
-        if bot.guild_is_recording.get(guild_id, False):
+        # Teardown (voice-thread join, sink close) can take >3s. Defer
+        # first so the interaction token stays valid (~15 min) instead
+        # of expiring mid-teardown and 404ing as "The application did
+        # not respond". Guard the teardown so we always confirm.
+        await ctx.defer()
+        try:
             await bot.get_transcription(ctx)
             bot.end_recording_session(ctx)
-            await ctx.respond("Recording stopped. Data saved. Standing by for the next run.", ephemeral=False)
+        except Exception as e:
+            logger.error(f"/stop teardown error: {e}")
+        await ctx.followup.send("Recording stopped. Data saved. Standing by for the next run.")
 
     @bot.slash_command(name="disconnect", description="Leave the voice channel.")
     async def disconnect(ctx: discord.context.ApplicationContext):
@@ -235,28 +240,48 @@ if __name__ == "__main__":
             await ctx.respond("Lost the connection somehow. Try reconnecting.", ephemeral=True)
             return
 
-        await ctx.trigger_typing()
+        # Teardown + voice disconnect can take >3s; defer so the
+        # interaction token stays valid instead of expiring and 404ing
+        # as "The application did not respond".
+        await ctx.defer()
 
-        # If we were recording, archive/teardown the session BEFORE
-        # disconnecting — drain queued transcriptions while the sink is
-        # still reachable, then stop+clear+close it. Without this,
-        # disconnecting mid-recording left guild_is_recording stuck True
-        # so a reconnect + /scribe hit "Already recording", and the sink
-        # leaked its file handle + voice thread.
-        if bot.guild_is_recording.get(guild_id, False):
-            await bot.get_transcription(ctx)
-            bot.end_recording_session(ctx)
+        # Archive/teardown any active recording BEFORE disconnecting so
+        # the transcript is flushed and guild_is_recording is cleared.
+        # Guarded so a teardown error can't skip the disconnect below.
+        try:
+            if bot.guild_is_recording.get(guild_id, False):
+                await bot.get_transcription(ctx)
+                bot.end_recording_session(ctx)
+        except Exception as e:
+            logger.error(f"/disconnect teardown error: {e}")
 
-        await bot_vc.disconnect()
+        # helper.vc can be a STALE voice client after a voice reconnect,
+        # so disconnecting it alone leaves the bot in the channel while
+        # still reporting success. Disconnect the LIVE client too
+        # (ctx.guild.voice_client) with force=True, and any others in
+        # voice_clients for this guild, so the bot actually leaves.
+        targets = []
+        live_vc = ctx.guild.voice_client if ctx.guild else None
+        for cand in (live_vc, bot_vc):
+            if cand is not None and cand not in targets:
+                targets.append(cand)
+        for vc in list(bot.voice_clients):
+            if getattr(vc, "guild", None) and vc.guild.id == guild_id and vc not in targets:
+                targets.append(vc)
+        for vc in targets:
+            try:
+                await vc.disconnect(force=True)
+            except Exception as e:
+                logger.error(f"/disconnect: error disconnecting a voice client: {e}")
+
         helper.guild_id = None
         helper.set_vc(None)
         bot.guild_to_helper.pop(guild_id, None)
-        # Belt-and-suspenders: clear the flag for this guild even if it
-        # was stale-True from a pre-fix disconnect, so any later /scribe
+        # Clear the flag even if it was stale-True, so a later /scribe
         # after reconnecting starts clean.
         bot.guild_is_recording.pop(guild_id, None)
 
-        await ctx.respond("Disconnected. Session archived. Catch you on the next one, chooms.", ephemeral=False)
+        await ctx.followup.send("Disconnected. Session archived. Catch you on the next one, chooms.")
 
     @bot.slash_command(name="generate_pdf", description="Export the transcript as a PDF.")
     async def generate_pdf(ctx: discord.context.ApplicationContext):

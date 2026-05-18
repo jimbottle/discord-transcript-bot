@@ -7,6 +7,7 @@ from collections import defaultdict
 
 import discord
 import yaml
+from discord.sinks.errors import RecordingException
 
 from src.bot.health import HealthCheck
 from src.sinks.whisper_sink import WhisperSink
@@ -105,14 +106,25 @@ class VoloBot(discord.Bot):
             await self.consumer_manager.close()
 
     def _close_and_clean_sink_for_guild(self, guild_id: int):
-        whisper_sink: WhisperSink | None = self.guild_whisper_sinks.get(
+        # Pop first so the sink is untracked even if a teardown step
+        # raises — otherwise a failure here leaks the sink AND a later
+        # /scribe sees a stale entry. Each step is independently guarded
+        # so one failure can't skip the next or propagate into the
+        # /stop|/disconnect command.
+        whisper_sink: WhisperSink | None = self.guild_whisper_sinks.pop(
             guild_id, None)
+        if not whisper_sink:
+            return
 
-        if whisper_sink:
-            logger.debug(f"Stopping whisper sink, requested by {guild_id}.")
+        logger.debug(f"Stopping whisper sink, requested by {guild_id}.")
+        try:
             whisper_sink.stop_voice_thread()
-            del self.guild_whisper_sinks[guild_id]
+        except Exception as e:
+            logger.error(f"Error stopping voice thread for {guild_id}: {e}")
+        try:
             whisper_sink.close()
+        except Exception as e:
+            logger.error(f"Error closing whisper sink for {guild_id}: {e}")
 
     
     def start_recording(self, ctx: discord.context.ApplicationContext):
@@ -171,7 +183,16 @@ class VoloBot(discord.Bot):
         vc = ctx.guild.voice_client
         if vc:
             self.guild_is_recording[ctx.guild_id] = False
-            vc.stop_recording()
+            # vc can exist without an active recorder: a stale-True flag,
+            # or Pycord recreated the reader after a voice reconnect.
+            # vc.stop_recording() raises RecordingException then; guard
+            # and swallow so teardown (and the /stop|/disconnect command)
+            # continues instead of aborting mid-cleanup.
+            try:
+                if vc.is_recording():
+                    vc.stop_recording()
+            except RecordingException as e:
+                logger.debug(f"stop_recording: nothing to stop ({e}); continuing.")
         guild_id = ctx.guild_id
         whisper_message_task = self.guild_whisper_message_tasks.get(
             guild_id, None)
@@ -197,9 +218,19 @@ class VoloBot(discord.Bot):
         guild_id = ctx.guild_id
         if not self.guild_is_recording.get(guild_id, False):
             return
-        self.stop_recording(ctx)
+        # Each step is independently guarded and the flag is always
+        # cleared, so a failure in one step can't leave the guild stuck
+        # "recording" or propagate into the /stop|/disconnect command
+        # (which would 404 the interaction and look like the bot died).
+        try:
+            self.stop_recording(ctx)
+        except Exception as e:
+            logger.error(f"end_recording_session: stop_recording failed: {e}")
         self.guild_is_recording[guild_id] = False
-        self.cleanup_sink(ctx)
+        try:
+            self.cleanup_sink(ctx)
+        except Exception as e:
+            logger.error(f"end_recording_session: cleanup_sink failed: {e}")
 
     async def get_transcription(self, ctx: discord.context.ApplicationContext):
         # Get the transcription queue
