@@ -80,13 +80,21 @@ class VoloBot(discord.Bot):
         self._gateway_latency = self.latency
         self._is_ready = True
 
-        # Sync slash commands globally (needed for DM-capable commands like /ask)
+        # Sync slash commands ONCE, globally. Command definitions only
+        # change when the code changes — not on every restart — and
+        # global commands persist on Discord's side between runs, so a
+        # restart does not require re-registering them.
+        #
+        # The previous per-guild sync loop re-registered commands for
+        # every guild on every startup. With frequent restarts that
+        # exhausts Discord's command-sync rate limit, and because
+        # interaction ACKs share the same REST client, the global 429
+        # backoff makes the bot miss the 3-second ACK deadline —
+        # surfacing to the user as "The application did not respond" on
+        # commands like /connect. One global sync is sufficient and
+        # cheap; guild-scoped re-sync is not worth that failure mode.
         await self.sync_commands()
         logger.info("Synced global commands.")
-        # Also sync to each guild for instant guild-level updates
-        for guild in self.guilds:
-            await self.sync_commands(guild_ids=[guild.id])
-            logger.info(f"Synced commands to guild {guild.name} ({guild.id})")
 
 
     async def on_application_command(self, ctx):
