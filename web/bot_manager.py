@@ -7,6 +7,7 @@ import sys
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VENV_PYTHON = os.path.join(PROJECT_ROOT, "venv", "bin", "python")
 HEALTH_STATUS_FILE = os.path.join(PROJECT_ROOT, ".logs", "health_status.json")
+BOT_STATE_FILE = os.path.join(PROJECT_ROOT, ".logs", "bot_state.json")
 
 
 class BotManager:
@@ -155,10 +156,11 @@ class BotManager:
         # Close any leftover stderr handle from a prior run
         self._close_stderr_fh()
         # Clear stale health file from any previous run
-        try:
-            os.remove(HEALTH_STATUS_FILE)
-        except FileNotFoundError:
-            pass
+        for _stale in (HEALTH_STATUS_FILE, BOT_STATE_FILE):
+            try:
+                os.remove(_stale)
+            except FileNotFoundError:
+                pass
         self._stderr_log = os.path.join(PROJECT_ROOT, ".logs", "bot_stderr.log")
         os.makedirs(os.path.dirname(self._stderr_log), exist_ok=True)
         self._stderr_fh = open(self._stderr_log, "a")
@@ -180,8 +182,9 @@ class BotManager:
             self._process.kill()
         self._process = None
         self._close_stderr_fh()
-        try:
-            os.remove(HEALTH_STATUS_FILE)
-        except FileNotFoundError:
-            pass
+        for _stale in (HEALTH_STATUS_FILE, BOT_STATE_FILE):
+            try:
+                os.remove(_stale)
+            except FileNotFoundError:
+                pass
         return True

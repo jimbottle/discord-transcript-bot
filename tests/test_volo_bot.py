@@ -219,3 +219,5 @@ def test_write_runtime_state_swallows_write_failure(tmp_path, monkeypatch):
     )
     VoloBot._write_runtime_state(_write_self())  # must not raise
     assert not (tmp_path / "bot_state.json").exists()
+    # roborev #812: a failed write must not leave an orphaned .tmp.
+    assert not (tmp_path / "bot_state.json.tmp").exists()

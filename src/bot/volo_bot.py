@@ -40,7 +40,10 @@ class VoloBot(discord.Bot):
         self._is_ready = False
         self._gateway_latency = None
         self._last_interaction_time = None
-        self._started_at = None
+        # Process start, set once at construction (NOT in on_ready —
+        # on_ready re-fires on every gateway reconnect, which would make
+        # the dashboard uptime jump). Accurate from the first snapshot.
+        self._started_at = time.time()
         self._connecting_guilds = set()
         self.health = HealthCheck()
         if TRANSCRIPTION_METHOD == "openai":
@@ -96,7 +99,6 @@ class VoloBot(discord.Bot):
 
         self._gateway_latency = self.latency
         self._is_ready = True
-        self._started_at = time.time()
         self._write_runtime_state()  # ready, not yet connected
 
         # Sync slash commands ONCE, globally. Command definitions only
@@ -160,9 +162,18 @@ class VoloBot(discord.Bot):
             }
             os.makedirs(os.path.dirname(BOT_STATE_FILE), exist_ok=True)
             tmp = BOT_STATE_FILE + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(state, f)
-            os.replace(tmp, BOT_STATE_FILE)
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(state, f)
+                os.replace(tmp, BOT_STATE_FILE)
+            except Exception:
+                # Don't leave an orphaned .tmp behind if json.dump or
+                # replace fails — re-raise to the outer guard after.
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                raise
         except Exception as e:  # noqa: BLE001 - dashboard nicety, never fatal
             logger.debug(f"runtime-state write failed (ignored): {e}")
 

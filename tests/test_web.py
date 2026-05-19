@@ -275,6 +275,50 @@ def test_get_bot_state_reads_valid_missing_and_corrupt(tmp_path, monkeypatch):
     assert transcript_service.get_bot_state() is None
 
 
+def test_get_bot_state_non_dict_json_is_none(tmp_path, monkeypatch):
+    """roborev #812: valid JSON that isn't an object must read as None
+    so the index route doesn't 500 on state.get(...)."""
+    f = tmp_path / "bot_state.json"
+    monkeypatch.setattr(transcript_service, "BOT_STATE_FILE", f)
+    f.write_text("[1, 2, 3]", encoding="utf-8")
+    assert transcript_service.get_bot_state() is None
+    f.write_text('"just a string"', encoding="utf-8")
+    assert transcript_service.get_bot_state() is None
+
+
+def test_index_shows_authoritative_card_when_alive(client, fake_bot, monkeypatch):
+    fake_bot._status = {"status": "ready", "pid": 1, "checks": {}}
+    monkeypatch.setattr(
+        web_app,
+        "get_bot_state",
+        lambda: {
+            "started_at": _time.time() - 90,
+            "guilds": [{"guild": "personal", "channel": "voice-1", "recording": True}],
+        },
+    )
+    body = client.get("/").data.decode()
+    assert "Connected:" in body and "personal" in body and "voice-1" in body
+    assert "Recording:" in body
+    assert "Uptime:" in body
+
+
+def test_index_no_authoritative_card_without_state(client, fake_bot, monkeypatch):
+    fake_bot._status = {"status": "ready", "pid": 1, "checks": {}}
+    monkeypatch.setattr(web_app, "get_bot_state", lambda: None)
+    assert b"Connected:" not in client.get("/").data
+
+
+def test_index_no_authoritative_card_when_bot_not_alive(client, fake_bot, monkeypatch):
+    fake_bot._status = {"status": "stopped", "pid": None}
+    monkeypatch.setattr(
+        web_app,
+        "get_bot_state",
+        lambda: {"started_at": _time.time(), "guilds": [{"guild": "x"}]},
+    )
+    # gated out when the bot isn't alive even if a (stale) state file exists
+    assert b"Connected:" not in client.get("/").data
+
+
 def test_format_uptime():
     fu = transcript_service.format_uptime
     assert fu(None) is None

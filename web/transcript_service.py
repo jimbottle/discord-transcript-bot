@@ -194,9 +194,13 @@ def get_bot_state():
     file-freshness heuristic'.
     """
     try:
-        return json.loads(BOT_STATE_FILE.read_text(encoding="utf-8"))
+        data = json.loads(BOT_STATE_FILE.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
         return None
+    # Valid JSON that isn't an object (truncated/hand-edited to a list
+    # or scalar) would later AttributeError on state.get(...) and 500
+    # the index page — treat anything non-dict as "no state".
+    return data if isinstance(data, dict) else None
 
 
 def format_uptime(started_at):

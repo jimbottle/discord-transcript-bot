@@ -87,6 +87,10 @@ if __name__ == "__main__":
     from src.bot.volo_bot import VoloBot
 
     bot = VoloBot(loop)
+    # Overwrite any previous run's bot_state.json immediately so the
+    # dashboard never shows the old run's guild / recording / (growing)
+    # uptime during the restart→on_ready window. Best-effort, never raises.
+    bot._write_runtime_state()
 
     @bot.event
     async def on_voice_state_update(member, before, after):
