@@ -15,6 +15,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import yaml
 from discord.sinks.errors import RecordingException
 
 from src.bot import volo_bot as vb_mod
@@ -221,3 +222,45 @@ def test_write_runtime_state_swallows_write_failure(tmp_path, monkeypatch):
     assert not (tmp_path / "bot_state.json").exists()
     # roborev #812: a failed write must not leave an orphaned .tmp.
     assert not (tmp_path / "bot_state.json.tmp").exists()
+
+
+# ── upsert_player_entry: name someone on the call (add/update mapping) ─
+
+
+def test_upsert_player_entry_in_memory_only_when_no_file(monkeypatch):
+    monkeypatch.setattr(vb_mod, "PLAYER_MAP_FILE_PATH", None)
+    shared = {}  # the dict a running WhisperSink would hold
+    fake = SimpleNamespace(player_map=shared)
+    persisted = VoloBot.upsert_player_entry(fake, 42, "Ed", "Volo")
+    assert persisted is False
+    # mutated IN PLACE (int key) so the live session sees it
+    assert shared is fake.player_map
+    assert shared[42] == {"player": "Ed", "character": "Volo"}
+
+
+def test_upsert_player_entry_persists_and_preserves_others(tmp_path, monkeypatch):
+    pm = tmp_path / "player_map.yml"
+    pm.write_text(
+        yaml.dump({999: {"player": "Existing", "character": "Keep"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(vb_mod, "PLAYER_MAP_FILE_PATH", str(pm))
+    fake = SimpleNamespace(player_map={})
+    persisted = VoloBot.upsert_player_entry(fake, 7, "Cody", "Jim")
+    assert persisted is True
+    on_disk = yaml.safe_load(pm.read_text())
+    assert on_disk[7] == {"player": "Cody", "character": "Jim"}
+    assert on_disk[999] == {"player": "Existing", "character": "Keep"}  # preserved
+    assert fake.player_map[7] == {"player": "Cody", "character": "Jim"}
+
+
+def test_upsert_player_entry_updates_existing(tmp_path, monkeypatch):
+    pm = tmp_path / "player_map.yml"
+    monkeypatch.setattr(vb_mod, "PLAYER_MAP_FILE_PATH", str(pm))
+    fake = SimpleNamespace(player_map={7: {"player": "old", "character": "old"}})
+    VoloBot.upsert_player_entry(fake, "7", "New", "NewChar")  # str id coerced
+    assert fake.player_map[7] == {"player": "New", "character": "NewChar"}
+    assert yaml.safe_load(pm.read_text())[7] == {
+        "player": "New",
+        "character": "NewChar",
+    }

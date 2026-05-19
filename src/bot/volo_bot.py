@@ -367,6 +367,36 @@ class VoloBot(discord.Bot):
                     self.player_map, file, default_flow_style=False, allow_unicode=True
                 )
 
+    def upsert_player_entry(self, user_id, player, character):
+        """Add or update one Discord-user → player/character mapping.
+
+        Mutates self.player_map IN PLACE — an already-running
+        WhisperSink holds that same dict, so a person added mid-call is
+        attributed correctly for the rest of the session immediately
+        (this is the whole point: name someone who's on the call now).
+        Persists by merging into the on-disk file so other guilds' and
+        hand-edited entries are preserved.
+
+        Returns True if saved to disk, False if no PLAYER_MAP_FILE_PATH
+        is configured (in-memory only — lost on restart). Raises only on
+        a real file IO/parse error so the caller can report it.
+        """
+        user_id = int(user_id)
+        entry = {"player": player, "character": character}
+        self.player_map[user_id] = entry  # live for the running session
+        if not PLAYER_MAP_FILE_PATH:
+            return False
+        file_map = {}
+        try:
+            with open(PLAYER_MAP_FILE_PATH, "r", encoding="utf-8") as f:
+                file_map = yaml.safe_load(f) or {}
+        except FileNotFoundError:
+            pass
+        file_map[user_id] = entry
+        with open(PLAYER_MAP_FILE_PATH, "w", encoding="utf-8") as f:
+            yaml.dump(file_map, f, default_flow_style=False, allow_unicode=True)
+        return True
+
     async def stop_and_cleanup(self):
         try:
             # Disconnect from all voice channels first so Discord knows we left
