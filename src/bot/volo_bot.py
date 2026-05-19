@@ -392,9 +392,32 @@ class VoloBot(discord.Bot):
                 file_map = yaml.safe_load(f) or {}
         except FileNotFoundError:
             pass
+        if not isinstance(file_map, dict):
+            # Valid YAML but not a mapping (hand-edited to a list/scalar).
+            # Refuse to overwrite — that would destroy whatever's there.
+            # The in-memory entry above still applies for this session;
+            # the caller surfaces this message to the user.
+            raise ValueError(
+                f"{PLAYER_MAP_FILE_PATH} is not a YAML mapping; refusing "
+                "to overwrite it. The change is applied for this session "
+                "only — fix the roster file to persist it."
+            )
         file_map[user_id] = entry
-        with open(PLAYER_MAP_FILE_PATH, "w", encoding="utf-8") as f:
-            yaml.dump(file_map, f, default_flow_style=False, allow_unicode=True)
+        # Atomic write (tmp + os.replace) so a kill mid-write can't
+        # truncate/corrupt the whole roster — mirrors
+        # _write_runtime_state. /add_player is used mid-call, so this
+        # write can race a live session; never leave a partial file.
+        tmp = PLAYER_MAP_FILE_PATH + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                yaml.dump(file_map, f, default_flow_style=False, allow_unicode=True)
+            os.replace(tmp, PLAYER_MAP_FILE_PATH)
+        except Exception:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
         return True
 
     async def stop_and_cleanup(self):

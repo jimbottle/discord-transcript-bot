@@ -15,6 +15,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 import yaml
 from discord.sinks.errors import RecordingException
 
@@ -264,3 +265,38 @@ def test_upsert_player_entry_updates_existing(tmp_path, monkeypatch):
         "player": "New",
         "character": "NewChar",
     }
+
+
+def test_upsert_player_entry_refuses_non_dict_yaml(tmp_path, monkeypatch):
+    """roborev #824: valid-but-non-mapping roster YAML must not be
+    clobbered; the in-memory change still applies for the session."""
+    pm = tmp_path / "player_map.yml"
+    pm.write_text(yaml.dump(["not", "a", "mapping"]), encoding="utf-8")
+    monkeypatch.setattr(vb_mod, "PLAYER_MAP_FILE_PATH", str(pm))
+    fake = SimpleNamespace(player_map={})
+    with pytest.raises(ValueError):
+        VoloBot.upsert_player_entry(fake, 7, "A", "B")
+    assert fake.player_map[7] == {"player": "A", "character": "B"}  # live
+    assert yaml.safe_load(pm.read_text()) == ["not", "a", "mapping"]  # untouched
+
+
+def test_upsert_player_entry_atomic_no_orphan_on_write_failure(tmp_path, monkeypatch):
+    """roborev #824: a mid-write failure must not corrupt the roster or
+    leave a .tmp orphan (atomic tmp + os.replace)."""
+    pm = tmp_path / "player_map.yml"
+    pm.write_text(
+        yaml.dump({1: {"player": "Keep", "character": "Keep"}}), encoding="utf-8"
+    )
+    monkeypatch.setattr(vb_mod, "PLAYER_MAP_FILE_PATH", str(pm))
+    monkeypatch.setattr(
+        vb_mod.yaml, "dump", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full"))
+    )
+    fake = SimpleNamespace(player_map={})
+    with pytest.raises(OSError):
+        VoloBot.upsert_player_entry(fake, 7, "X", "Y")
+    assert not (tmp_path / "player_map.yml.tmp").exists()  # no orphan
+    # original roster intact — os.replace never happened
+    assert yaml.safe_load(pm.read_text()) == {
+        1: {"player": "Keep", "character": "Keep"}
+    }
+    assert fake.player_map[7] == {"player": "X", "character": "Y"}  # in-memory applied
