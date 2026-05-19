@@ -4,6 +4,8 @@ from flask import Flask, abort, jsonify, render_template, request
 
 from bot_manager import BotManager
 from transcript_service import (
+    format_uptime,
+    get_bot_state,
     get_live_session,
     get_log_entries,
     get_transcript,
@@ -33,11 +35,14 @@ def _require_csrf_header():
 @app.route("/")
 def index():
     transcripts = list_transcripts()[:5]
+    state = get_bot_state()
     return render_template(
         "index.html",
         transcripts=transcripts,
         bot_status=bot.status(),
         live=get_live_session(),
+        bot_state=state,
+        uptime=format_uptime(state.get("started_at")) if state else None,
     )
 
 

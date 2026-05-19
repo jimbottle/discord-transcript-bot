@@ -262,6 +262,31 @@ def test_get_log_entries_parses_and_skips(tmp_path, monkeypatch):
     assert entries[0]["begin"] == "18:00:01"
 
 
+def test_get_bot_state_reads_valid_missing_and_corrupt(tmp_path, monkeypatch):
+    f = tmp_path / "bot_state.json"
+    monkeypatch.setattr(transcript_service, "BOT_STATE_FILE", f)
+    # missing
+    assert transcript_service.get_bot_state() is None
+    # valid
+    f.write_text(json.dumps({"guilds": [], "started_at": 1.0}), encoding="utf-8")
+    assert transcript_service.get_bot_state() == {"guilds": [], "started_at": 1.0}
+    # corrupt
+    f.write_text("{ not json", encoding="utf-8")
+    assert transcript_service.get_bot_state() is None
+
+
+def test_format_uptime():
+    fu = transcript_service.format_uptime
+    assert fu(None) is None
+    assert fu(0) is None  # falsy start -> no uptime
+    now = _time.time()
+    assert fu(now - 5).endswith("s")
+    assert fu(now - 125) == "2m 5s"
+    assert fu(now - 3 * 3600 - 4 * 60).startswith("3h 4m")
+    # clock skew: bot's start is "in the future" -> clamp, never negative
+    assert fu(now + 999) == "0s"
+
+
 def test_view_log_renders_known_file(tmp_path, monkeypatch, client):
     monkeypatch.setattr(transcript_service, "LOGS_DIR", tmp_path)
     (tmp_path / "ok.log").write_text(

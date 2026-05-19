@@ -163,6 +163,7 @@ if __name__ == "__main__":
             helper.guild_id = guild_id
             helper.set_vc(vc)
             bot.guild_to_helper[guild_id] = helper
+            bot._write_runtime_state()  # connected (best-effort, never raises)
             await ctx.followup.send(
                 "Jacked in. Connected to the voice channel and standing by."
             )
@@ -344,6 +345,7 @@ if __name__ == "__main__":
         # Clear the flag even if it was stale-True, so a later /scribe
         # after reconnecting starts clean.
         bot.guild_is_recording.pop(guild_id, None)
+        bot._write_runtime_state()  # disconnected (best-effort, never raises)
 
         if teardown_ok:
             await ctx.followup.send(

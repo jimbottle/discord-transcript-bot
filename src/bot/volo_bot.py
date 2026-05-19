@@ -15,6 +15,11 @@ from src.sinks.whisper_sink import WhisperSink
 TRANSCRIPTION_METHOD = os.getenv("TRANSCRIPTION_METHOD")
 PLAYER_MAP_FILE_PATH = os.getenv("PLAYER_MAP_FILE_PATH")
 
+# Runtime state the web dashboard reads for true connected-guild /
+# recording / uptime (vs. its file-freshness heuristic). Written
+# best-effort on lifecycle transitions; a write failure must never
+# affect the bot. Same .logs dir + cwd convention as health_status.json.
+BOT_STATE_FILE = os.path.join(os.getcwd(), ".logs", "bot_state.json")
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +40,7 @@ class VoloBot(discord.Bot):
         self._is_ready = False
         self._gateway_latency = None
         self._last_interaction_time = None
+        self._started_at = None
         self._connecting_guilds = set()
         self.health = HealthCheck()
         if TRANSCRIPTION_METHOD == "openai":
@@ -90,6 +96,8 @@ class VoloBot(discord.Bot):
 
         self._gateway_latency = self.latency
         self._is_ready = True
+        self._started_at = time.time()
+        self._write_runtime_state()  # ready, not yet connected
 
         # Sync slash commands ONCE, globally. Command definitions only
         # change when the code changes — not on every restart — and
@@ -113,6 +121,50 @@ class VoloBot(discord.Bot):
     async def close_consumers(self):
         if hasattr(self, "consumer_manager"):
             await self.consumer_manager.close()
+
+    def _write_runtime_state(self):
+        """Best-effort snapshot of connected guilds / recording / uptime
+        for the web dashboard. ENTIRELY guarded: this runs on lifecycle
+        transitions including the hardened /stop|/disconnect teardown
+        path, so a failure here must never propagate. Written atomically
+        (tmp + os.replace) so the 3s dashboard poll never sees a torn
+        file. Each guild is extracted independently — one bad guild
+        can't blank the whole file.
+        """
+        try:
+            guilds = []
+            for gid, helper in dict(self.guild_to_helper).items():
+                try:
+                    g = self.get_guild(gid)
+                    vc = getattr(helper, "vc", None)
+                    channel = getattr(getattr(vc, "channel", None), "name", None)
+                    sink = self.guild_whisper_sinks.get(gid)
+                    session = getattr(sink, "session_file", None)
+                    guilds.append(
+                        {
+                            "guild_id": gid,
+                            "guild": getattr(g, "name", None),
+                            "channel": channel,
+                            "recording": bool(self.guild_is_recording.get(gid, False)),
+                            "session_file": (
+                                os.path.basename(session) if session else None
+                            ),
+                        }
+                    )
+                except Exception as e:  # noqa: BLE001 - never fail a write
+                    logger.debug(f"runtime-state: skipped guild {gid}: {e}")
+            state = {
+                "updated_at": time.time(),
+                "started_at": self._started_at,
+                "guilds": guilds,
+            }
+            os.makedirs(os.path.dirname(BOT_STATE_FILE), exist_ok=True)
+            tmp = BOT_STATE_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(state, f)
+            os.replace(tmp, BOT_STATE_FILE)
+        except Exception as e:  # noqa: BLE001 - dashboard nicety, never fatal
+            logger.debug(f"runtime-state write failed (ignored): {e}")
 
     def _close_and_clean_sink_for_guild(self, guild_id: int):
         # Pop first so the sink is untracked even if a teardown step
@@ -147,6 +199,7 @@ class VoloBot(discord.Bot):
             self.guild_is_recording[ctx.guild_id] = True
         except Exception as e:
             logger.error(f"Error starting whisper sink: {e}")
+        self._write_runtime_state()  # recording state changed
 
     def start_whisper_sink(self, ctx: discord.context.ApplicationContext):
         guild_voice_sink = self.guild_whisper_sinks.get(ctx.guild_id, None)
@@ -261,6 +314,7 @@ class VoloBot(discord.Bot):
             await asyncio.to_thread(self.cleanup_sink, ctx)
         except Exception as e:
             logger.error(f"end_recording_session: cleanup_sink failed: {e}")
+        self._write_runtime_state()  # recording stopped (still connected)
 
     async def get_transcription(self, ctx: discord.context.ApplicationContext):
         # Get the transcription queue

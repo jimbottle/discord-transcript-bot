@@ -6,6 +6,9 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TRANSCRIPTS_DIR = PROJECT_ROOT / "transcripts"
 LOGS_DIR = PROJECT_ROOT / ".logs" / "transcripts"
+# Runtime state the bot writes (volo_bot.BOT_STATE_FILE) — true
+# connected-guild / recording / uptime, vs. the file-freshness guess.
+BOT_STATE_FILE = PROJECT_ROOT / ".logs" / "bot_state.json"
 
 # A session .txt modified within this many seconds is treated as "live"
 # (the bot writes a line per finished utterance, so a brief silence gap
@@ -182,6 +185,38 @@ def get_log_entries(filename):
             }
         )
     return entries
+
+
+def get_bot_state():
+    """Parsed bot runtime state (volo_bot writes it on lifecycle
+    transitions), or None if absent/unreadable/corrupt. The dashboard
+    treats None as 'no authoritative state — fall back to the
+    file-freshness heuristic'.
+    """
+    try:
+        return json.loads(BOT_STATE_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
+        return None
+
+
+def format_uptime(started_at):
+    """Human 'Xh Ym' / 'Ym Zs' / 'Zs' from an epoch start, or None.
+
+    None-safe and clamps negatives (a clock skew between the bot and
+    the dashboard process must not render a nonsense negative uptime).
+    """
+    if not started_at:
+        return None
+    secs = int(time.time() - started_at)
+    if secs < 0:
+        secs = 0
+    h, rem = divmod(secs, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h {m}m"
+    if m:
+        return f"{m}m {s}s"
+    return f"{s}s"
 
 
 def list_logs():

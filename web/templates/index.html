@@ -34,6 +34,20 @@
         {{ ok }}/{{ bot_status.checks | length }} checks OK
         {% endif %}
     </p>
+    {% if bot_state and bot_status.status not in ('stopped', 'crashed') %}
+    {# Authoritative runtime state the bot itself wrote — not the
+       file-freshness guess used by the Current Session card. #}
+    {% set g = bot_state.guilds[0] if bot_state.guilds else None %}
+    <p class="search-meta">
+        {% if g %}
+            Connected: <strong>{{ g.guild or 'unknown' }}</strong>{% if g.channel %} &middot; #{{ g.channel }}{% endif %}
+            &middot; Recording: {% if g.recording %}● yes{% else %}○ no{% endif %}
+        {% else %}
+            Not in a voice channel.
+        {% endif %}
+        {% if uptime %} &middot; Uptime: {{ uptime }}{% endif %}
+    </p>
+    {% endif %}
     <ul id="health-checks" class="health-check-list" style="{% if not bot_status.checks %}display:none{% endif %}">
         {% if bot_status.checks %}
         {% for name, check in bot_status.checks.items() %}
