@@ -12,6 +12,7 @@ failed with "Already recording" and the sink leaked.
 
 import asyncio
 import json
+import logging
 import os
 import time
 from types import SimpleNamespace
@@ -259,6 +260,72 @@ def test_write_runtime_state_not_recording_never_stalls(tmp_path, monkeypatch):
         guild_is_recording={5: False},
     )
     assert VoloBot._write_runtime_state(fake) == []
+
+
+# ── _heartbeat_loop: cadence, per-gid warning, error-swallow, clean cancel ──
+
+
+def test_heartbeat_loop_warns_per_stalled_guild_and_cancels_cleanly(
+    monkeypatch, caplog
+):
+    """One WARNING per stalled gid returned by _write_runtime_state, and a
+    task.cancel() (the stop_and_cleanup teardown path) stops it cleanly by
+    re-raising CancelledError."""
+    real_sleep = asyncio.sleep  # capture before patching the module's sleep
+
+    iterations = {"n": 0}
+
+    async def fast_sleep(_seconds):
+        iterations["n"] += 1
+        await real_sleep(0)  # yield so a cancel can land between iterations
+
+    monkeypatch.setattr(vb_mod.asyncio, "sleep", fast_sleep)
+    fake = SimpleNamespace(_write_runtime_state=lambda: [42, 99])
+
+    async def drive():
+        task = asyncio.ensure_future(VoloBot._heartbeat_loop(fake))
+        for _ in range(4):
+            await real_sleep(0)  # let a few iterations run
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    with caplog.at_level(logging.WARNING, logger="src.bot.volo_bot"):
+        asyncio.run(drive())
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("STALLED" in w and "42" in w for w in warnings)
+    assert any("STALLED" in w and "99" in w for w in warnings)
+    assert iterations["n"] >= 1
+
+
+def test_heartbeat_loop_swallows_write_errors_and_keeps_running(monkeypatch):
+    """A _write_runtime_state failure is swallowed (non-cancel) so one bad
+    write never kills the heartbeat; the loop keeps beating until cancelled."""
+    real_sleep = asyncio.sleep
+    iterations = {"n": 0}
+
+    async def fast_sleep(_seconds):
+        iterations["n"] += 1
+        await real_sleep(0)
+
+    def boom():
+        raise RuntimeError("state write blew up")
+
+    monkeypatch.setattr(vb_mod.asyncio, "sleep", fast_sleep)
+    fake = SimpleNamespace(_write_runtime_state=boom)
+
+    async def drive():
+        task = asyncio.ensure_future(VoloBot._heartbeat_loop(fake))
+        for _ in range(4):
+            await real_sleep(0)
+        assert not task.done()  # survived repeated write errors
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(drive())
+    assert iterations["n"] >= 2
 
 
 def test_write_runtime_state_includes_voice_members(tmp_path, monkeypatch):
