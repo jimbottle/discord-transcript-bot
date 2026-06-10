@@ -14,8 +14,10 @@ import time as _time
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
 
 import app as web_app
+import roster_service
 import transcript_service
 
 
@@ -399,3 +401,151 @@ def test_list_transcripts_returns_list():
 
 def test_search_logs_empty_query_returns_empty():
     assert transcript_service.search_logs("") == []
+
+
+# ── Roster editor (CRUD over player_map.yml) ──────────────────────────
+
+
+@pytest.fixture
+def roster_file(tmp_path, monkeypatch):
+    """Point the roster at an isolated tmp file so tests never touch the
+    real player_map.yml. conftest loads .env, which sets
+    PLAYER_MAP_FILE_PATH to the real ./player_map.yml — override it with an
+    absolute tmp path (roster_path resolves absolute paths as-is)."""
+    pm = tmp_path / "player_map.yml"
+    monkeypatch.setenv("PLAYER_MAP_FILE_PATH", str(pm))
+    return pm
+
+
+_XHR = {"X-Requested-With": "XMLHttpRequest"}
+
+
+def test_roster_page_renders(client, roster_file):
+    roster_file.write_text(
+        yaml.dump({371442040141119490: {"player": "Jobby Jill", "character": "Jim"}}),
+        encoding="utf-8",
+    )
+    r = client.get("/roster")
+    assert r.status_code == 200
+    assert b"371442040141119490" in r.data
+    assert b"Jobby Jill" in r.data
+
+
+def test_roster_upsert_no_csrf_is_403(client, roster_file):
+    r = client.post(
+        "/roster/entry", json={"user_id": 7, "player": "A", "character": "B"}
+    )
+    assert r.status_code == 403
+    assert not roster_file.exists()  # rejected before any write
+
+
+def test_roster_upsert_persists(client, roster_file):
+    r = client.post(
+        "/roster/entry",
+        json={"user_id": 7, "player": "Ed", "character": "Volo"},
+        headers=_XHR,
+    )
+    assert r.status_code == 200
+    assert r.get_json() == {"user_id": 7, "player": "Ed", "character": "Volo"}
+    assert yaml.safe_load(roster_file.read_text()) == {
+        7: {"player": "Ed", "character": "Volo"}
+    }
+
+
+def test_roster_upsert_invalid_user_id_400(client, roster_file):
+    r = client.post(
+        "/roster/entry",
+        json={"user_id": "abc", "player": "A", "character": "B"},
+        headers=_XHR,
+    )
+    assert r.status_code == 400
+    assert "error" in r.get_json()
+    assert not roster_file.exists()
+
+
+def test_roster_upsert_missing_names_400(client, roster_file):
+    r = client.post(
+        "/roster/entry",
+        json={"user_id": 7, "player": "", "character": "B"},
+        headers=_XHR,
+    )
+    assert r.status_code == 400
+
+
+def test_roster_upsert_non_dict_file_400_and_untouched(client, roster_file):
+    roster_file.write_text(yaml.dump(["not", "a", "map"]), encoding="utf-8")
+    r = client.post(
+        "/roster/entry",
+        json={"user_id": 7, "player": "A", "character": "B"},
+        headers=_XHR,
+    )
+    assert r.status_code == 400
+    assert "mapping" in r.get_json()["error"]
+    assert yaml.safe_load(roster_file.read_text()) == ["not", "a", "map"]
+
+
+def test_roster_delete_no_csrf_is_403(client, roster_file):
+    assert client.post("/roster/entry/delete", json={"user_id": 7}).status_code == 403
+
+
+def test_roster_delete_removes_entry(client, roster_file):
+    roster_file.write_text(
+        yaml.dump(
+            {
+                7: {"player": "Go", "character": "Go"},
+                9: {"player": "Stay", "character": "Stay"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    r = client.post("/roster/entry/delete", json={"user_id": 7}, headers=_XHR)
+    assert r.status_code == 200
+    assert r.get_json() == {"user_id": 7, "deleted": True}
+    assert yaml.safe_load(roster_file.read_text()) == {
+        9: {"player": "Stay", "character": "Stay"}
+    }
+
+
+def test_roster_delete_invalid_user_id_400(client, roster_file):
+    r = client.post("/roster/entry/delete", json={"user_id": "-3"}, headers=_XHR)
+    assert r.status_code == 400
+
+
+def test_get_unmapped_speakers_excludes_mapped_includes_members(
+    roster_file, monkeypatch
+):
+    roster_file.write_text(
+        yaml.dump({7: {"player": "Named", "character": "Char"}}), encoding="utf-8"
+    )
+    # 7 already mapped (excluded); 8 on the call; 9 spoke.
+    monkeypatch.setattr(
+        roster_service,
+        "get_bot_state",
+        lambda: {
+            "guilds": [
+                {
+                    "members": [
+                        {"id": 7, "name": "named", "display_name": "Named"},
+                        {"id": 8, "name": "alice", "display_name": "Alice"},
+                    ]
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        roster_service,
+        "get_live_session",
+        lambda: {
+            "entries": [
+                {"user_id": "9", "player": "Bob", "character": None, "text": "hello"},
+                {"user_id": "7", "player": "Named", "character": "Char", "text": "x"},
+            ]
+        },
+    )
+    result = roster_service.get_unmapped_speakers()
+    by_id = {r["user_id"]: r for r in result}
+    assert set(by_id) == {8, 9}  # 7 excluded (mapped)
+    assert by_id[8]["source"] == "on_call" and by_id[8]["suggested_name"] == "Alice"
+    assert by_id[9]["source"] == "spoke" and by_id[9]["suggested_name"] == "Bob"
+    assert by_id[9]["last_text"] == "hello"
+    assert result[0]["user_id"] == 8  # on-call sorted first

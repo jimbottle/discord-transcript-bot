@@ -148,8 +148,10 @@ def test_close_and_clean_sink_robust_when_stop_thread_raises():
 # hardened /stop|/disconnect teardown path — it must NEVER raise.
 
 
-def _vc(channel_name):
-    return SimpleNamespace(channel=SimpleNamespace(name=channel_name))
+def _vc(channel_name, members=None):
+    return SimpleNamespace(
+        channel=SimpleNamespace(name=channel_name, members=members or [])
+    )
 
 
 def _write_self(**kw):
@@ -182,7 +184,28 @@ def test_write_runtime_state_connected_and_recording(tmp_path, monkeypatch):
             "channel": "voice-1",
             "recording": True,
             "session_file": "2026-05-18_18.txt",
+            "members": [],
         }
+    ]
+
+
+def test_write_runtime_state_includes_voice_members(tmp_path, monkeypatch):
+    # The dashboard's roster editor reads `members` to offer naming people
+    # who are present on the call (even if they haven't spoken).
+    monkeypatch.setattr(vb_mod, "BOT_STATE_FILE", str(tmp_path / "bot_state.json"))
+    members = [
+        SimpleNamespace(id=7, name="ed", display_name="Ed"),
+        SimpleNamespace(id=8, name="cody", display_name="Cody B"),
+    ]
+    fake = _write_self(
+        guild_to_helper={123: SimpleNamespace(vc=_vc("voice-1", members=members))},
+        guild_is_recording={123: True},
+    )
+    VoloBot._write_runtime_state(fake)
+    state = json.loads((tmp_path / "bot_state.json").read_text())
+    assert state["guilds"][0]["members"] == [
+        {"id": 7, "name": "ed", "display_name": "Ed"},
+        {"id": 8, "name": "cody", "display_name": "Cody B"},
     ]
 
 

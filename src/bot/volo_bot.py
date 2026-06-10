@@ -9,6 +9,7 @@ import discord
 import yaml
 from discord.sinks.errors import RecordingException
 
+from src import player_map_store
 from src.bot.health import HealthCheck
 from src.sinks.whisper_sink import WhisperSink
 
@@ -120,6 +121,27 @@ class VoloBot(discord.Bot):
     async def on_application_command(self, ctx):
         self._last_interaction_time = time.time()
 
+    async def on_voice_state_update(self, member, before, after):
+        """Refresh the dashboard's live voice roster when someone joins or
+        leaves a channel the bot is connected to.
+
+        Best-effort and fully guarded — a failure here is a dashboard
+        nicety, never allowed to affect voice. Only rewrites the small
+        state JSON (same atomic path as every other transition) and only
+        when the change actually touches one of our connected channels, so
+        unrelated server-wide voice churn doesn't thrash the file.
+        """
+        try:
+            connected = {
+                getattr(getattr(h, "vc", None), "channel", None)
+                for h in dict(self.guild_to_helper).values()
+            }
+            connected.discard(None)
+            if before.channel in connected or after.channel in connected:
+                self._write_runtime_state()
+        except Exception as e:  # noqa: BLE001 - dashboard nicety, never fatal
+            logger.debug(f"on_voice_state_update state refresh skipped: {e}")
+
     async def close_consumers(self):
         if hasattr(self, "consumer_manager"):
             await self.consumer_manager.close()
@@ -139,7 +161,8 @@ class VoloBot(discord.Bot):
                 try:
                     g = self.get_guild(gid)
                     vc = getattr(helper, "vc", None)
-                    channel = getattr(getattr(vc, "channel", None), "name", None)
+                    channel_obj = getattr(vc, "channel", None)
+                    channel = getattr(channel_obj, "name", None)
                     sink = self.guild_whisper_sinks.get(gid)
                     session = getattr(sink, "session_file", None)
                     guilds.append(
@@ -151,6 +174,18 @@ class VoloBot(discord.Bot):
                             "session_file": (
                                 os.path.basename(session) if session else None
                             ),
+                            # Current voice-channel roster so the dashboard
+                            # can offer to name people who are present but
+                            # haven't spoken yet (read-only; bot is never
+                            # signalled by the resulting edit).
+                            "members": [
+                                {
+                                    "id": getattr(m, "id", None),
+                                    "name": getattr(m, "name", None),
+                                    "display_name": getattr(m, "display_name", None),
+                                }
+                                for m in (getattr(channel_obj, "members", None) or [])
+                            ],
                         }
                     )
                 except Exception as e:  # noqa: BLE001 - never fail a write
@@ -382,42 +417,19 @@ class VoloBot(discord.Bot):
         a real file IO/parse error so the caller can report it.
         """
         user_id = int(user_id)
-        entry = {"player": player, "character": character}
-        self.player_map[user_id] = entry  # live for the running session
+        self.player_map[user_id] = {
+            "player": player,
+            "character": character,
+        }  # live for the running session
         if not PLAYER_MAP_FILE_PATH:
             return False
-        file_map = {}
-        try:
-            with open(PLAYER_MAP_FILE_PATH, "r", encoding="utf-8") as f:
-                file_map = yaml.safe_load(f) or {}
-        except FileNotFoundError:
-            pass
-        if not isinstance(file_map, dict):
-            # Valid YAML but not a mapping (hand-edited to a list/scalar).
-            # Refuse to overwrite — that would destroy whatever's there.
-            # The in-memory entry above still applies for this session;
-            # the caller surfaces this message to the user.
-            raise ValueError(
-                f"{PLAYER_MAP_FILE_PATH} is not a YAML mapping; refusing "
-                "to overwrite it. The change is applied for this session "
-                "only — fix the roster file to persist it."
-            )
-        file_map[user_id] = entry
-        # Atomic write (tmp + os.replace) so a kill mid-write can't
-        # truncate/corrupt the whole roster — mirrors
-        # _write_runtime_state. /add_player is used mid-call, so this
-        # write can race a live session; never leave a partial file.
-        tmp = PLAYER_MAP_FILE_PATH + ".tmp"
-        try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                yaml.dump(file_map, f, default_flow_style=False, allow_unicode=True)
-            os.replace(tmp, PLAYER_MAP_FILE_PATH)
-        except Exception:
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
-            raise
+        # Disk read / non-dict guard / atomic merge-write lives in the
+        # shared player_map_store so the web dashboard's roster editor
+        # persists identically. A non-mapping file raises ValueError (the
+        # in-memory entry above still applies); the /add_player caller
+        # surfaces it. Mid-call writes can race a live session — the store
+        # writes atomically (tmp + os.replace) so the roster is never torn.
+        player_map_store.upsert(PLAYER_MAP_FILE_PATH, user_id, player, character)
         return True
 
     async def stop_and_cleanup(self):

@@ -1,0 +1,213 @@
+{% extends "base.html" %}
+{% block title %}Roster - Transcript Bot{% endblock %}
+{% block content %}
+<h1>Roster</h1>
+<p class="search-meta">
+    Map Discord IDs to player &amp; character names. Edits save to
+    <code>player_map.yml</code> and take effect the next time the bot
+    starts — the running session keeps its current names.
+</p>
+<p id="roster-msg" role="status" aria-live="polite" style="display:none"></p>
+
+{% if roster.invalid %}
+<article>
+    <p class="check-fail">
+        &#9888; The roster file is valid YAML but not a mapping (hand-edited
+        to a list/scalar). Fix it by hand before editing here — saving is
+        disabled so the file isn't overwritten.
+    </p>
+</article>
+{% endif %}
+
+<article>
+    <header><h3>On the call / recently spoke &mdash; not named yet</h3></header>
+    {% if unmapped %}
+    <table>
+        <thead><tr><th>Who</th><th>Player</th><th>Character</th><th></th></tr></thead>
+        <tbody>
+        {% for s in unmapped %}
+            <tr data-user-id="{{ s.user_id }}">
+                <td>
+                    <code>{{ s.user_id }}</code>
+                    <span class="live-badge {% if s.source == 'on_call' %}live-on{% else %}live-off{% endif %}">
+                        {%- if s.source == 'on_call' %}&#9679; on call{% else %}spoke{% endif -%}
+                    </span>
+                    {% if s.last_text %}<br><span class="search-meta">&ldquo;{{ s.last_text | truncate(60) }}&rdquo;</span>{% endif %}
+                </td>
+                <td><input type="text" class="ru-player" value="{{ s.suggested_name or '' }}" placeholder="real name"></td>
+                <td><input type="text" class="ru-character" value="{{ s.suggested_name or '' }}" placeholder="character"></td>
+                <td><button type="button" class="ru-add" {% if roster.invalid %}disabled{% endif %}>Add</button></td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="search-meta">
+        No unnamed speakers right now. People show up here when they're in
+        the bot's voice channel or have spoken in the current session.
+    </p>
+    {% endif %}
+</article>
+
+<article>
+    <header><h3>Roster (<span id="roster-count">{{ roster.entries | length }}</span>)</h3></header>
+    <table id="roster-table">
+        <thead><tr><th>Discord ID</th><th>Player</th><th>Character</th><th></th></tr></thead>
+        <tbody>
+        {% for e in roster.entries %}
+            <tr data-user-id="{{ e.user_id }}">
+                <td><code>{{ e.user_id }}</code></td>
+                <td><input type="text" class="re-player" value="{{ e.player or '' }}"></td>
+                <td><input type="text" class="re-character" value="{{ e.character or '' }}"></td>
+                <td>
+                    <button type="button" class="re-save" {% if roster.invalid %}disabled{% endif %}>Save</button>
+                    <button type="button" class="re-delete secondary" {% if roster.invalid %}disabled{% endif %}>Delete</button>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+
+    <h4>Add an entry by ID</h4>
+    <div class="bot-controls">
+        <input type="text" id="add-id" placeholder="Discord user ID" inputmode="numeric" style="width:14rem">
+        <input type="text" id="add-player" placeholder="real name">
+        <input type="text" id="add-character" placeholder="character">
+        <button type="button" id="add-entry" {% if roster.invalid %}disabled{% endif %}>Add</button>
+    </div>
+</article>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const UPSERT_URL = "{{ url_for('roster_upsert') }}";
+const DELETE_URL = "{{ url_for('roster_delete') }}";
+const msg = document.getElementById("roster-msg");
+
+function showMsg(text, ok) {
+    msg.textContent = text;
+    msg.style.display = "";
+    msg.className = ok ? "check-pass" : "check-fail";
+}
+
+async function csrfPost(url, payload) {
+    const res = await fetch(url, {
+        method: "POST",
+        headers: {
+            "X-Requested-With": "XMLHttpRequest",
+            "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+    });
+    let data = {};
+    try { data = await res.json(); } catch (e) { /* non-JSON error body */ }
+    return { ok: res.ok, data };
+}
+
+// Upsert one entry; returns the saved {user_id, player, character} or null.
+async function upsert(userId, player, character) {
+    if (!player || !character) {
+        showMsg("Player and character are both required.", false);
+        return null;
+    }
+    const { ok, data } = await csrfPost(UPSERT_URL, {
+        user_id: userId, player: player, character: character,
+    });
+    if (!ok) {
+        showMsg(data.error || "Save failed.", false);
+        return null;
+    }
+    showMsg("Saved " + data.player + " (" + data.character + ") for " + data.user_id + ".", true);
+    return data;
+}
+
+// Find-or-create the roster-table row for userId, set its values, return it.
+// Built with createElement/textContent so names never become HTML.
+function ensureRosterRow(userId, player, character) {
+    const tbody = document.querySelector("#roster-table tbody");
+    let row = tbody.querySelector('tr[data-user-id="' + userId + '"]');
+    if (!row) {
+        row = document.createElement("tr");
+        row.dataset.userId = userId;
+        const idTd = document.createElement("td");
+        const code = document.createElement("code");
+        code.textContent = userId;
+        idTd.appendChild(code);
+        const pTd = document.createElement("td");
+        const pIn = document.createElement("input");
+        pIn.type = "text"; pIn.className = "re-player";
+        pTd.appendChild(pIn);
+        const cTd = document.createElement("td");
+        const cIn = document.createElement("input");
+        cIn.type = "text"; cIn.className = "re-character";
+        cTd.appendChild(cIn);
+        const aTd = document.createElement("td");
+        const save = document.createElement("button");
+        save.type = "button"; save.className = "re-save"; save.textContent = "Save";
+        const del = document.createElement("button");
+        del.type = "button"; del.className = "re-delete secondary"; del.textContent = "Delete";
+        aTd.appendChild(save);
+        aTd.appendChild(document.createTextNode(" "));
+        aTd.appendChild(del);
+        row.append(idTd, pTd, cTd, aTd);
+        tbody.appendChild(row);
+        updateCount();
+    }
+    row.querySelector(".re-player").value = player;
+    row.querySelector(".re-character").value = character;
+    return row;
+}
+
+function updateCount() {
+    const n = document.querySelectorAll("#roster-table tbody tr").length;
+    document.getElementById("roster-count").textContent = n;
+}
+
+document.addEventListener("click", async (ev) => {
+    const t = ev.target;
+    if (t.classList.contains("ru-add")) {
+        // Name a detected speaker -> move them into the roster table.
+        const row = t.closest("tr");
+        const data = await upsert(
+            row.dataset.userId,
+            row.querySelector(".ru-player").value.trim(),
+            row.querySelector(".ru-character").value.trim(),
+        );
+        if (data) {
+            ensureRosterRow(data.user_id, data.player, data.character);
+            row.remove();
+        }
+    } else if (t.classList.contains("re-save")) {
+        const row = t.closest("tr");
+        await upsert(
+            row.dataset.userId,
+            row.querySelector(".re-player").value.trim(),
+            row.querySelector(".re-character").value.trim(),
+        );
+    } else if (t.classList.contains("re-delete")) {
+        const row = t.closest("tr");
+        const { ok, data } = await csrfPost(DELETE_URL, { user_id: row.dataset.userId });
+        if (!ok) { showMsg(data.error || "Delete failed.", false); return; }
+        showMsg("Deleted " + row.dataset.userId + ".", true);
+        row.remove();
+        updateCount();
+    }
+});
+
+document.getElementById("add-entry").addEventListener("click", async () => {
+    const uid = document.getElementById("add-id").value.trim();
+    if (!/^\d+$/.test(uid)) { showMsg("Discord ID must be numeric.", false); return; }
+    const data = await upsert(
+        uid,
+        document.getElementById("add-player").value.trim(),
+        document.getElementById("add-character").value.trim(),
+    );
+    if (data) {
+        ensureRosterRow(data.user_id, data.player, data.character);
+        document.getElementById("add-id").value = "";
+        document.getElementById("add-player").value = "";
+        document.getElementById("add-character").value = "";
+    }
+});
+</script>
+{% endblock %}
