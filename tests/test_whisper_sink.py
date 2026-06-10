@@ -6,10 +6,23 @@ no empty file created when a sink is constructed but never used.
 
 import os
 import threading
+import time
 import wave
+from concurrent.futures import Future
 from unittest.mock import MagicMock
 
 from src.sinks.whisper_sink import Speaker, WhisperSink
+
+
+def _done_future(value=None, exc=None):
+    """A pre-completed Future, as add_done_callback would hand to the
+    commit callback."""
+    f = Future()
+    if exc is not None:
+        f.set_exception(exc)
+    else:
+        f.set_result(value)
+    return f
 
 
 def _make_sink(tmp_path, monkeypatch):
@@ -28,8 +41,9 @@ def _make_sink(tmp_path, monkeypatch):
 
 def test_constructed_sink_does_not_create_file(tmp_path, monkeypatch):
     sink = _make_sink(tmp_path, monkeypatch)
-    assert not os.path.exists(sink.session_file), \
-        "session file should not exist until first write"
+    assert not os.path.exists(
+        sink.session_file
+    ), "session file should not exist until first write"
     sink.close()
 
 
@@ -47,8 +61,9 @@ def test_get_session_fh_returns_none_after_close(tmp_path, monkeypatch):
     sink = _make_sink(tmp_path, monkeypatch)
     sink._get_session_fh()  # open it
     sink.close()
-    assert sink._get_session_fh() is None, \
-        "after close, lazy-open must refuse to re-open the file"
+    assert (
+        sink._get_session_fh() is None
+    ), "after close, lazy-open must refuse to re-open the file"
 
 
 def test_session_fh_writable_during_stop_drain(tmp_path, monkeypatch):
@@ -66,8 +81,9 @@ def test_session_fh_writable_during_stop_drain(tmp_path, monkeypatch):
     fh.flush()
     assert os.path.exists(sink.session_file)
     sink.close()
-    assert sink._get_session_fh() is None, \
-        "once close() finalizes the file, further writes are refused"
+    assert (
+        sink._get_session_fh() is None
+    ), "once close() finalizes the file, further writes are refused"
 
 
 def test_close_is_idempotent(tmp_path, monkeypatch):
@@ -83,6 +99,7 @@ def test_close_is_idempotent(tmp_path, monkeypatch):
 # (decrypted+decoded) and passes the User/Member, not raw bytes + int.
 # Live test on 2026-05-18 hit `TypeError: object of type 'VoiceData'
 # has no len()`. These guard the normalization back to (bytes, int-id).
+
 
 class _FakeUser:
     def __init__(self, uid):
@@ -120,8 +137,7 @@ def test_write_drops_unattributed_or_empty(tmp_path, monkeypatch):
     sink = _make_sink(tmp_path, monkeypatch)
     sink.write(_FakeVoiceData(pcm=b"abc", source=None), None)
     sink.write(_FakeVoiceData(pcm=b"", source=_FakeUser(1)), _FakeUser(1))
-    assert sink.voice_queue.empty(), \
-        "frames with no source or no audio must be dropped"
+    assert sink.voice_queue.empty(), "frames with no source or no audio must be dropped"
     sink.close()
 
 
@@ -191,13 +207,15 @@ def test_stop_voice_thread_uses_bounded_join(tmp_path, monkeypatch):
     ft = _FakeThread()
     sink.voice_thread = ft
     sink.stop_voice_thread()  # must not raise / hang
-    assert ft.join_timeout == sink.JOIN_TIMEOUT_S, \
-        "join() must be called with a finite timeout, not unbounded"
+    assert (
+        ft.join_timeout == sink.JOIN_TIMEOUT_S
+    ), "join() must be called with a finite timeout, not unbounded"
     sink.close()
 
 
 def test_stop_voice_thread_warns_and_returns_when_thread_wont_die(
-        tmp_path, monkeypatch, caplog):
+    tmp_path, monkeypatch, caplog
+):
     """roborev #788 (LOW): cover the is_alive()==True branch — a thread
     that doesn't exit within the timeout must be abandoned (logged
     warning) and stop_voice_thread() must still return promptly, not
@@ -216,8 +234,9 @@ def test_stop_voice_thread_warns_and_returns_when_thread_wont_die(
     sink.voice_thread = _StuckThread()
     with caplog.at_level(logging.WARNING):
         sink.stop_voice_thread()  # must return, not hang
-    assert any("did not exit" in r.message for r in caplog.records), \
-        "a non-exiting voice thread must log a warning"
+    assert any(
+        "did not exit" in r.message for r in caplog.records
+    ), "a non-exiting voice thread must log a warning"
     sink.close()
 
 
@@ -239,4 +258,134 @@ def test_concurrent_lazy_open_only_opens_once(tmp_path, monkeypatch):
     # All threads got the same handle (the one stored on the sink).
     assert all(h is sink._session_fh for h in handles)
     assert len({id(h) for h in handles}) == 1
+    sink.close()
+
+
+# ── Parallel transcription with in-order commit (discord-transcript-bot-hin) ──
+# Transcriptions run concurrently on the executor, but results must be
+# WRITTEN in the order their segments were submitted: a chunk that finishes
+# early waits behind earlier, still-running chunks so the transcript never
+# posts out of chronological order.
+
+
+def _spk(uid):
+    return Speaker(user=uid, player=f"p{uid}", character=f"c{uid}", data=b"\x00")
+
+
+def test_results_commit_in_submission_order(tmp_path, monkeypatch):
+    sink = _make_sink(tmp_path, monkeypatch)
+    written = []
+    monkeypatch.setattr(
+        sink,
+        "write_transcription_log",
+        lambda spk, text: written.append((spk.user, text)),
+    )
+    s0, s1, s2 = _spk(0), _spk(1), _spk(2)
+
+    # seq 2 finishes FIRST — it must not post while 0 and 1 are outstanding.
+    sink._on_transcribed(2, s2, _done_future("two"))
+    assert written == [], "a later segment must wait for earlier ones"
+
+    # seq 0 arrives — commits, but seq 1 still blocks seq 2.
+    sink._on_transcribed(0, s0, _done_future("zero"))
+    assert written == [(0, "zero")]
+
+    # seq 1 arrives — now 1 then the buffered 2 flush in order.
+    sink._on_transcribed(1, s1, _done_future("one"))
+    assert written == [(0, "zero"), (1, "one"), (2, "two")]
+    sink.close()
+
+
+def test_failed_future_still_advances_commit_pointer(tmp_path, monkeypatch):
+    """A segment whose transcription raised must commit as empty text and
+    advance the pointer, so one bad chunk can't wedge every later result."""
+    sink = _make_sink(tmp_path, monkeypatch)
+    written = []
+    monkeypatch.setattr(
+        sink,
+        "write_transcription_log",
+        lambda spk, text: written.append((spk.user, text)),
+    )
+    sink._on_transcribed(0, _spk(0), _done_future(exc=RuntimeError("boom")))
+    assert written == [(0, "")], "failed future commits empty, doesn't wedge"
+    sink._on_transcribed(1, _spk(1), _done_future("one"))
+    assert written == [(0, ""), (1, "one")]
+    sink.close()
+
+
+def _run_insert_voice(sink, until, timeout=2.0):
+    """Run insert_voice in a thread until `until()` is true (or timeout),
+    then stop it and join."""
+    sink.running = True
+    th = threading.Thread(target=sink.insert_voice, daemon=True)
+    th.start()
+    deadline = time.time() + timeout
+    while not until() and time.time() < deadline:
+        time.sleep(0.02)
+    sink.running = False
+    th.join(timeout=2)
+    return th
+
+
+def test_buffer_force_flushed_past_duration_cap(tmp_path, monkeypatch):
+    """A speaker who never pauses (silence gap never fires) must still be
+    flushed once the buffer spans MAX_SEGMENT_S, bounding latency."""
+    sink = _make_sink(tmp_path, monkeypatch)
+    sink.SILENCE_GAP_S = 1000  # silence-based flush effectively disabled
+    sink.MAX_SEGMENT_S = 0.0  # any buffered speaker is immediately "too long"
+    submitted = []
+    monkeypatch.setattr(
+        sink, "transcribe", lambda spk: submitted.append(spk.user) or ""
+    )
+
+    t = time.time()
+    sink.voice_queue.put_nowait([5, b"aa", t])
+    sink.voice_queue.put_nowait([5, b"bb", t])  # new_bytes > 1
+
+    _run_insert_voice(sink, until=lambda: bool(submitted))
+    assert submitted == [
+        5
+    ], "buffer must be force-flushed by the duration cap, not only on silence"
+    sink.close()
+
+
+def test_drain_continues_while_a_transcription_is_in_flight(tmp_path, monkeypatch):
+    """The snowball fix: the drain loop must NOT block on future.result().
+    While one transcription is stuck running, freshly-arriving audio must
+    still be drained off voice_queue (bounded depth)."""
+    sink = _make_sink(tmp_path, monkeypatch)
+    sink.SILENCE_GAP_S = 1000
+    sink.MAX_SEGMENT_S = 0.0
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_transcribe(spk):
+        started.set()
+        release.wait(5)
+        return ""
+
+    monkeypatch.setattr(sink, "transcribe", slow_transcribe)
+
+    t = time.time()
+    sink.voice_queue.put_nowait([1, b"aa", t])
+    sink.voice_queue.put_nowait([1, b"bb", t])  # submitted, then blocks
+
+    sink.running = True
+    th = threading.Thread(target=sink.insert_voice, daemon=True)
+    th.start()
+    try:
+        assert started.wait(2), "first transcription should have started"
+        # Pour in more audio while that transcription is blocked.
+        for _ in range(50):
+            sink.voice_queue.put_nowait([2, b"xx", time.time()])
+        deadline = time.time() + 2
+        while not sink.voice_queue.empty() and time.time() < deadline:
+            time.sleep(0.02)
+        assert (
+            sink.voice_queue.empty()
+        ), "voice_queue must keep draining while a transcription is in flight"
+    finally:
+        release.set()
+        sink.running = False
+        th.join(timeout=2)
     sink.close()

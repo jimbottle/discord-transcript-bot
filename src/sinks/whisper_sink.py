@@ -20,7 +20,6 @@ from openai import OpenAI
 
 WHISPER_MODEL = "large-v3"
 WHISPER_LANGUAGE = "en"
-WHISPER__PRECISION = "float32"
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -28,13 +27,21 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 logger = logging.getLogger(__name__)
 
 if DEVICE == "cuda":
-    gpu_ram = torch.cuda.get_device_properties(0).total_memory/1024**3
+    gpu_ram = torch.cuda.get_device_properties(0).total_memory / 1024**3
     if gpu_ram < 5.0:
         logger.warning("GPU has less than 5GB of RAM. Switching to CPU.")
         DEVICE = "cpu"
 
-audio_model = WhisperModel(WHISPER_MODEL, device=DEVICE, compute_type=WHISPER__PRECISION)
+# Precision: int8 on CPU is ~3-4x faster and far lighter on RAM than the
+# old float32 default, with negligible accuracy loss for speech; float16 is
+# the GPU sweet spot. float32 on CPU could not keep up with a busy
+# multi-speaker session and ballooned RSS to ~9.6 GB — see
+# discord-transcript-bot-hin.
+WHISPER__PRECISION = "int8" if DEVICE == "cpu" else "float16"
 
+audio_model = WhisperModel(
+    WHISPER_MODEL, device=DEVICE, compute_type=WHISPER__PRECISION
+)
 
 
 class Speaker:
@@ -47,7 +54,7 @@ class Speaker:
         self.player = player
         self.character = character
         self.data = [data]
-        self.first_word =time
+        self.first_word = time
         self.last_word = time
         self.new_bytes = 1
 
@@ -96,13 +103,25 @@ class WhisperSink(Sink):
         self.executor = ThreadPoolExecutor(max_workers=8)  # TODO: Adjust this
         self.player_map = player_map
 
+        # Ordered-commit state. Transcriptions run in parallel on the
+        # executor, but their results must be written in the order the
+        # segments were *submitted* — a chunk that finishes early waits
+        # behind earlier, still-running chunks so the transcript never
+        # posts out of chronological order. `_submit_seq` is assigned only
+        # on the (single) insert_voice thread; `_next_commit` and
+        # `_pending_results` are touched only under `_commit_lock`.
+        self._submit_seq = 0
+        self._next_commit = 0
+        self._pending_results = {}
+        self._commit_lock = threading.Lock()
+
         # Per-session transcript file. Path is fixed at construction so all
         # utterances from this sink land in the same file, but the handle is
         # opened lazily on first write — so a sink that's constructed but
         # never used won't leave an empty file on disk.
         transcript_dir = os.path.join(os.getcwd(), "transcripts")
         os.makedirs(transcript_dir, exist_ok=True)
-        session_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        session_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         self.session_file = os.path.join(transcript_dir, f"{session_time}.txt")
         self._session_fh = None
         self._session_fh_lock = threading.Lock()
@@ -150,7 +169,8 @@ class WhisperSink(Sink):
                     logger.warning(
                         "Voice thread did not exit within "
                         f"{self.JOIN_TIMEOUT_S}s; abandoning it (daemon "
-                        "thread, will not block process exit).")
+                        "thread, will not block process exit)."
+                    )
         except Exception as e:
             logger.error(f"Unexpected error during thread join: {e}")
         finally:
@@ -164,22 +184,24 @@ class WhisperSink(Sink):
             except AttributeError:
                 pass
             logger.debug(f"A sink thread was stopped for guild {guild_id}.")
+
     def check_audio_length(self, temp_file):
         # Ensure the BytesIO is at the start
         temp_file.seek(0)
 
         # Open the BytesIO object as a WAV file
-        with wave.open(temp_file, 'rb') as wave_file:
+        with wave.open(temp_file, "rb") as wave_file:
             frames = wave_file.getnframes()
             frame_rate = wave_file.getframerate()
             duration = frames / float(frame_rate)
         return duration
+
     def transcribe_audio(self, temp_file):
         try:
             # Ensure that the audio is long enough to transcribe. If not, return an empty string
             if self.check_audio_length(temp_file) <= 0.1:
                 return ""
-            
+
             if self.transcriber_type == "openai":
                 temp_file.seek(0)
                 openai_transcription = self.client.audio.transcriptions.create(
@@ -189,7 +211,7 @@ class WhisperSink(Sink):
                 )
                 logger.info(f"OpenAI Transcription: {openai_transcription.text}")
                 return openai_transcription.text
-            else:               
+            else:
                 # The whisper model
                 temp_file.seek(0)
                 segments, info = audio_model.transcribe(
@@ -198,10 +220,7 @@ class WhisperSink(Sink):
                     beam_size=10,
                     best_of=3,
                     vad_filter=True,
-                    vad_parameters=dict(
-                        min_silence_duration_ms=150,
-                        threshold=0.8
-                    ),
+                    vad_parameters=dict(min_silence_duration_ms=150, threshold=0.8),
                     no_speech_threshold=0.6,
                     initial_prompt="You are writing the transcriptions for a D&D game.",
                 )
@@ -232,18 +251,17 @@ class WhisperSink(Sink):
         wav_io = io.BytesIO()
         with wave.open(wav_io, "wb") as wave_writer:
             wave_writer.setnchannels(Decoder.CHANNELS)
-            wave_writer.setsampwidth(
-                Decoder.SAMPLE_SIZE // Decoder.CHANNELS)
+            wave_writer.setsampwidth(Decoder.SAMPLE_SIZE // Decoder.CHANNELS)
             wave_writer.setframerate(Decoder.SAMPLING_RATE)
             wave_writer.writeframes(wav_data.getvalue())
 
         wav_io.seek(0)
         # Check if the audio is long enough to transcribe, else return empty string
-        
+
         transcription = self.transcribe_audio(wav_io)
 
         return transcription
-    
+
     def get_transcriptions(self):
         """Retrieve all transcriptions from the queue, format them to only include data, begin, and user_id."""
         transcriptions = []
@@ -252,7 +270,9 @@ class WhisperSink(Sink):
 
             # Assuming log_message is a dictionary (or string in JSON format)
             if isinstance(log_message, str):
-                log_message = json.loads(log_message)  # Convert from string to dictionary if needed
+                log_message = json.loads(
+                    log_message
+                )  # Convert from string to dictionary if needed
 
             # Extract only the desired fields from the log message
             begin = log_message.get("begin", "Unknown begin")
@@ -271,11 +291,26 @@ class WhisperSink(Sink):
             transcriptions.append(formatted_entry)
 
         return transcriptions
-    
+
+    # A speaker's buffer is submitted for transcription once they've gone
+    # quiet for this long...
+    SILENCE_GAP_S = 1.5
+    # ...or once it has spanned this long even without a gap, so a speaker
+    # who never pauses (a heavy combat scene) can't accumulate a
+    # multi-minute segment that takes minutes to transcribe and stalls the
+    # whole pipeline. Bounds worst-case latency. See
+    # discord-transcript-bot-hin.
+    MAX_SEGMENT_S = 30
+    # Idle nap for the insert_voice loop so it doesn't busy-spin a core
+    # when there's no audio to drain or flush.
+    IDLE_SLEEP_S = 0.1
+
     def insert_voice(self):
         while self.running:
             try:
-                # Process the voice_queue
+                # Drain ALL pending audio into per-speaker buffers. This must
+                # never block on a transcription — see the detached submit
+                # below — or the queue backs up and segments snowball.
                 while not self.voice_queue.empty():
                     item = self.voice_queue.get()
                     # Find or create a speaker
@@ -293,42 +328,70 @@ class WhisperSink(Sink):
                         user_map = self.player_map.get(user_id, {})
                         player = user_map.get("player")
                         character = user_map.get("character")
-                        self.speakers.append(Speaker(user_id, player, character, item[1], item[2]))
-                    
-                    
+                        self.speakers.append(
+                            Speaker(user_id, player, character, item[1], item[2])
+                        )
 
-
-                # Transcribe audio for each speaker
-                # so this is interesting, as we arent checking the size of the audio stream, we are just transcribing it
-                future_to_speaker = {}
-                for speaker in self.speakers:
-                    if (time.time() - speaker.last_word) < 1.5:
-                        # Lets make sure the user stopped talking.
+                # Submit every speaker that has gone quiet OR whose buffer has
+                # grown past MAX_SEGMENT_S. Each is handed to the executor and
+                # DETACHED: we never call future.result() here, so this loop
+                # keeps draining the voice_queue while transcriptions run in
+                # parallel. The speaker is removed from the active list on
+                # submit (so it isn't double-submitted); new audio from the
+                # same user starts a fresh segment. A done-callback commits
+                # the result in submission order (see _on_transcribed).
+                now = time.time()
+                for speaker in self.speakers[:]:
+                    silent = (now - speaker.last_word) >= self.SILENCE_GAP_S
+                    too_long = (
+                        speaker.last_word - speaker.first_word
+                    ) >= self.MAX_SEGMENT_S
+                    if not (silent or too_long):
                         continue
-                    if speaker.new_bytes > 1:
-                        speaker.new_bytes = 0
-                        future = self.executor.submit(self.transcribe, speaker)
-                        future_to_speaker[future] = speaker
-                    else:
+                    if speaker.new_bytes <= 1:
                         continue
-                
-                for future in future_to_speaker:
-                    speaker = future_to_speaker[future]
-                    try:
-                        transcription = future.result()
-                        current_time = time.time()
-                        speaker_new_bytes = speaker.new_bytes
-                        # Remove speaker once returned. 
-                        for s in self.speakers[:]:
-                            if speaker.user == s.user:
-                                self.write_transcription_log(s, transcription)
-                                self.speakers.remove(s)
+                    self.speakers.remove(speaker)
+                    seq = self._submit_seq
+                    self._submit_seq += 1
+                    future = self.executor.submit(self.transcribe, speaker)
+                    future.add_done_callback(
+                        lambda fut, s=seq, spk=speaker: self._on_transcribed(
+                            s, spk, fut
+                        )
+                    )
 
-                    except Exception as e:
-                        logger.warn(f"Error in insert_voice future: {e}")
-
+                # Idle nap so this loop doesn't busy-spin when idle.
+                time.sleep(self.IDLE_SLEEP_S)
             except Exception as e:
                 logger.error(f"Error in insert_voice: {e}")
+
+    def _on_transcribed(self, seq, speaker, future):
+        """Done-callback for a detached transcription future. Runs on an
+        executor thread. Stores the result under its submission sequence and
+        then commits every result whose turn has come, IN ORDER — so a
+        segment that finished early waits behind earlier, still-running
+        segments and the transcript never posts out of order. A failed
+        future still advances the sequence (committed as empty text) so one
+        bad segment can't wedge the commit pointer forever.
+
+        Must not touch self.speakers (owned by the insert_voice thread); it
+        only reads the speaker object handed to it and writes the result.
+        """
+        try:
+            transcription = future.result()
+        except Exception as e:
+            logger.warning(f"Error in transcription future for {speaker.user}: {e}")
+            transcription = ""
+
+        with self._commit_lock:
+            self._pending_results[seq] = (speaker, transcription)
+            while self._next_commit in self._pending_results:
+                spk, text = self._pending_results.pop(self._next_commit)
+                self._next_commit += 1
+                try:
+                    self.write_transcription_log(spk, text)
+                except Exception as e:
+                    logger.error(f"Error writing transcription log: {e}")
 
     def check_speaker_timeouts(self, current_speaker, transcription):
 
@@ -337,28 +400,32 @@ class WhisperSink(Sink):
             if current_speaker.user == speaker.user:
                 self.write_transcription_log(speaker, transcription)
                 self.speakers.remove(speaker)
-    
+
     def write_transcription_log(self, speaker, transcription):
         # Convert first_word and last_word Unix timestamps to datetime
-        first_word_time = datetime.fromtimestamp(speaker.first_word).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-        last_word_time = datetime.fromtimestamp(speaker.last_word).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        first_word_time = datetime.fromtimestamp(speaker.first_word).strftime(
+            "%Y-%m-%d %H:%M:%S.%f"
+        )[:-3]
+        last_word_time = datetime.fromtimestamp(speaker.last_word).strftime(
+            "%Y-%m-%d %H:%M:%S.%f"
+        )[:-3]
         # Prepare the log data as a dictionary
         log_data = {
-            "date": first_word_time[:10],                  # Date (from first_word)
-            "begin": first_word_time[11:],       # First word time (HH:MM:SS.ss)
-            "end": last_word_time[11:],         # Last word time (HH:MM:SS.ss)
-            "user_id": speaker.user,                       # User ID
+            "date": first_word_time[:10],  # Date (from first_word)
+            "begin": first_word_time[11:],  # First word time (HH:MM:SS.ss)
+            "end": last_word_time[11:],  # Last word time (HH:MM:SS.ss)
+            "user_id": speaker.user,  # User ID
             "player": speaker.player,
             "character": speaker.character,
-            "event_source": "Discord",                     # Event source
-            "data": transcription                          # Transcription text
+            "event_source": "Discord",  # Event source
+            "data": transcription,  # Transcription text
         }
 
         # Convert the log data to JSON
         log_message = json.dumps(log_data)
 
         # Get the transcription logger
-        transcription_logger = logging.getLogger('transcription')
+        transcription_logger = logging.getLogger("transcription")
         # Log the message
         transcription_logger.info(log_message)
         # Place into queue for processing
@@ -368,7 +435,7 @@ class WhisperSink(Sink):
         if transcription and transcription.strip():
             player = speaker.player or "Unknown"
             character = speaker.character or "Unknown"
-            timestamp = datetime.fromtimestamp(speaker.first_word).strftime('%H:%M:%S')
+            timestamp = datetime.fromtimestamp(speaker.first_word).strftime("%H:%M:%S")
             line = f"[{timestamp}] {player} ({character}) [{speaker.user}]: {transcription.strip()}\n"
             fh = self._get_session_fh()
             if fh is None:
@@ -399,7 +466,6 @@ class WhisperSink(Sink):
                     logger.warning(f"Failed to open per-session transcript file: {e}")
                     return None
             return self._session_fh
-    
 
     @Filters.container
     def write(self, data, user):
