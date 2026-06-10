@@ -333,6 +333,68 @@ def test_format_uptime():
     assert fu(now + 999) == "0s"
 
 
+def test_format_duration():
+    fd = transcript_service.format_duration
+    assert fd(None) is None
+    assert fd(-5) == "0s"  # clamp negatives
+    assert fd(5) == "5s"
+    assert fd(125) == "2m 5s"
+    assert fd(3 * 3600 + 4 * 60) == "3h 4m"
+
+
+def test_heartbeat_age():
+    ha = transcript_service.heartbeat_age
+    assert ha(None) is None
+    assert ha({}) is None
+    assert ha({"updated_at": 0}) is None  # falsy -> None
+    now = _time.time()
+    assert 49 <= ha({"updated_at": now - 50}) <= 61
+    assert ha({"updated_at": now + 999}) == 0.0  # clock skew clamped
+
+
+# ── Liveness: heartbeat-stale + stalled-recording warnings on the index ──
+
+
+def test_index_warns_when_heartbeat_stale(client, fake_bot, monkeypatch):
+    fake_bot._status = {"status": "ready", "pid": 1, "checks": {}}
+    monkeypatch.setattr(
+        web_app,
+        "get_bot_state",
+        lambda: {
+            "started_at": _time.time() - 600,
+            "updated_at": _time.time() - 300,  # well past STATE_STALE_SECONDS
+            "guilds": [{"guild": "x", "channel": "c", "recording": True}],
+        },
+    )
+    body = client.get("/").data.decode()
+    assert "not responding" in body.lower()
+
+
+def test_index_shows_stalled_recording_badge(client, fake_bot, monkeypatch):
+    fake_bot._status = {"status": "ready", "pid": 1, "checks": {}}
+    monkeypatch.setattr(
+        web_app,
+        "get_bot_state",
+        lambda: {
+            "started_at": _time.time() - 600,
+            "updated_at": _time.time(),  # fresh heartbeat -> not "not responding"
+            "guilds": [
+                {
+                    "guild": "x",
+                    "channel": "c",
+                    "recording": True,
+                    "stalled": True,
+                    "output_age": 300,
+                }
+            ],
+        },
+    )
+    body = client.get("/").data.decode()
+    assert "STALLED" in body
+    assert "5m 0s" in body  # output_age formatted via the duration filter
+    assert "not responding" not in body.lower()  # heartbeat is fresh
+
+
 def test_view_log_renders_known_file(tmp_path, monkeypatch, client):
     monkeypatch.setattr(transcript_service, "LOGS_DIR", tmp_path)
     (tmp_path / "ok.log").write_text(

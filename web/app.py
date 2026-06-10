@@ -5,11 +5,14 @@ from flask import Flask, abort, jsonify, render_template, request
 from bot_manager import BotManager
 from roster_service import get_roster, get_unmapped_speakers, roster_path
 from transcript_service import (
+    STATE_STALE_SECONDS,
+    format_duration,
     format_uptime,
     get_bot_state,
     get_live_session,
     get_log_entries,
     get_transcript,
+    heartbeat_age,
     list_logs,
     list_transcripts,
     parse_transcript_text,
@@ -34,6 +37,8 @@ except ImportError:
 
 app = Flask(__name__)
 bot = BotManager()
+# Format a raw seconds count in templates, e.g. a guild's stalled output age.
+app.jinja_env.filters["duration"] = format_duration
 
 
 def _require_csrf_header():
@@ -53,6 +58,7 @@ def _require_csrf_header():
 def index():
     transcripts = list_transcripts()[:5]
     state = get_bot_state()
+    hb = heartbeat_age(state)
     return render_template(
         "index.html",
         transcripts=transcripts,
@@ -60,6 +66,11 @@ def index():
         live=get_live_session(),
         bot_state=state,
         uptime=format_uptime(state.get("started_at")) if state else None,
+        heartbeat_label=format_duration(hb),
+        # True when the bot hasn't refreshed its state within the heartbeat
+        # window — the flags below may be stale (e.g. a dead-but-"recording"
+        # bot). The card warns instead of trusting them.
+        state_stale=(hb is not None and hb > STATE_STALE_SECONDS),
     )
 
 

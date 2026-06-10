@@ -32,11 +32,20 @@
     {# Authoritative runtime state the bot itself wrote — not the
        file-freshness guess used by the Current Session card. One line
        per connected guild (the bot is per-guild). #}
+    {% if state_stale %}
+    <p class="check-fail">
+        &#9888; Bot not responding &mdash; no heartbeat for {{ heartbeat_label }}.
+        The status below may be stale; the process may be wedged or gone.
+    </p>
+    {% endif %}
     <p class="search-meta">
         {% if bot_state.guilds %}
             {% for g in bot_state.guilds %}
             Connected: <strong>{{ g.guild or 'unknown' }}</strong>{% if g.channel %} &middot; #{{ g.channel }}{% endif %}
-            &middot; Recording: {% if g.recording %}● yes{% else %}○ no{% endif %}{% if not loop.last %}<br>{% endif %}
+            &middot; Recording:
+            {%- if g.stalled %} <span class="check-fail">&#9888; STALLED (no output for {{ g.output_age | duration }})</span>
+            {%- elif g.recording %} ● yes
+            {%- else %} ○ no{% endif %}{% if not loop.last %}<br>{% endif %}
             {% endfor %}
         {% else %}
             Not in a voice channel.

@@ -12,6 +12,8 @@ failed with "Already recording" and the sink leaked.
 
 import asyncio
 import json
+import os
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -184,9 +186,79 @@ def test_write_runtime_state_connected_and_recording(tmp_path, monkeypatch):
             "channel": "voice-1",
             "recording": True,
             "session_file": "2026-05-18_18.txt",
+            "output_age": None,  # session_file path doesn't exist on disk
+            "queue_depth": 0,  # fake sink has no voice_queue
+            "stalled": False,
             "members": [],
         }
     ]
+
+
+class _FakeQueue:
+    def __init__(self, depth):
+        self._depth = depth
+
+    def qsize(self):
+        return self._depth
+
+
+def _fake_sink(session_file, queue_depth):
+    return SimpleNamespace(
+        session_file=session_file, voice_queue=_FakeQueue(queue_depth)
+    )
+
+
+def _aged_session(tmp_path, age_seconds):
+    f = tmp_path / "session.txt"
+    f.write_text("x", encoding="utf-8")
+    t = time.time() - age_seconds
+    os.utime(f, (t, t))
+    return str(f)
+
+
+def test_write_runtime_state_detects_stall(tmp_path, monkeypatch):
+    # Recording + a backed-up queue + a session file that stopped growing =
+    # the wedged-pipeline case the heartbeat must flag (today's silent death).
+    monkeypatch.setattr(vb_mod, "BOT_STATE_FILE", str(tmp_path / "bot_state.json"))
+    sess = _aged_session(tmp_path, vb_mod.STALL_OUTPUT_AGE_S + 60)
+    fake = _write_self(
+        guild_to_helper={5: SimpleNamespace(vc=_vc("voice"))},
+        guild_whisper_sinks={5: _fake_sink(sess, vb_mod.STALL_QUEUE_DEPTH + 5)},
+        guild_is_recording={5: True},
+    )
+    stalled = VoloBot._write_runtime_state(fake)
+    assert stalled == [5]
+    g = json.loads((tmp_path / "bot_state.json").read_text())["guilds"][0]
+    assert g["stalled"] is True
+    assert g["queue_depth"] >= vb_mod.STALL_QUEUE_DEPTH
+    assert g["output_age"] > vb_mod.STALL_OUTPUT_AGE_S
+
+
+def test_write_runtime_state_quiet_room_not_stalled(tmp_path, monkeypatch):
+    # Old session file but a shallow queue = nobody's talking, not a stall.
+    monkeypatch.setattr(vb_mod, "BOT_STATE_FILE", str(tmp_path / "bot_state.json"))
+    sess = _aged_session(tmp_path, vb_mod.STALL_OUTPUT_AGE_S + 60)
+    fake = _write_self(
+        guild_to_helper={5: SimpleNamespace(vc=_vc("voice"))},
+        guild_whisper_sinks={5: _fake_sink(sess, 0)},
+        guild_is_recording={5: True},
+    )
+    assert VoloBot._write_runtime_state(fake) == []
+    g = json.loads((tmp_path / "bot_state.json").read_text())["guilds"][0]
+    assert g["stalled"] is False
+
+
+def test_write_runtime_state_not_recording_never_stalls(tmp_path, monkeypatch):
+    # A deep queue + old file but recording False (e.g. just /stopped) is
+    # not a stall — there's no active session to wedge.
+    monkeypatch.setattr(vb_mod, "BOT_STATE_FILE", str(tmp_path / "bot_state.json"))
+    sess = _aged_session(tmp_path, vb_mod.STALL_OUTPUT_AGE_S + 60)
+    fake = _write_self(
+        guild_to_helper={5: SimpleNamespace(vc=_vc("voice"))},
+        guild_whisper_sinks={5: _fake_sink(sess, vb_mod.STALL_QUEUE_DEPTH + 5)},
+        guild_is_recording={5: False},
+    )
+    assert VoloBot._write_runtime_state(fake) == []
 
 
 def test_write_runtime_state_includes_voice_members(tmp_path, monkeypatch):

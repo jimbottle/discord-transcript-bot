@@ -203,15 +203,22 @@ def get_bot_state():
     return data if isinstance(data, dict) else None
 
 
-def format_uptime(started_at):
-    """Human 'Xh Ym' / 'Ym Zs' / 'Zs' from an epoch start, or None.
+# The bot rewrites bot_state.json every ~30s (HEARTBEAT_INTERVAL_S). If the
+# newest write is older than this, the dashboard treats the bot as not
+# responding rather than trusting a possibly-stale "recording: true" — the
+# failure mode that once showed a dead bot as recording for ~2 hours.
+STATE_STALE_SECONDS = 90
 
-    None-safe and clamps negatives (a clock skew between the bot and
-    the dashboard process must not render a nonsense negative uptime).
+
+def format_duration(seconds):
+    """Human 'Xh Ym' / 'Ym Zs' / 'Zs' from a raw seconds count, or None.
+
+    None-safe and clamps negatives (clock skew between the bot and the
+    dashboard process must not render a nonsense negative duration).
     """
-    if not started_at:
+    if seconds is None:
         return None
-    secs = int(time.time() - started_at)
+    secs = int(seconds)
     if secs < 0:
         secs = 0
     h, rem = divmod(secs, 3600)
@@ -221,6 +228,26 @@ def format_uptime(started_at):
     if m:
         return f"{m}m {s}s"
     return f"{s}s"
+
+
+def format_uptime(started_at):
+    """Human uptime from an epoch start, or None (falsy start -> None)."""
+    if not started_at:
+        return None
+    return format_duration(time.time() - started_at)
+
+
+def heartbeat_age(state):
+    """Seconds since the bot last wrote runtime state, or None.
+
+    Lets the dashboard distinguish a live-but-quiet bot from a dead one:
+    the bot refreshes bot_state.json on a fixed heartbeat, so a large age
+    means the process is gone or wedged even if the last-written flags say
+    'recording'. Clamps negatives (clock skew)."""
+    if not state or not state.get("updated_at"):
+        return None
+    age = time.time() - state["updated_at"]
+    return age if age >= 0 else 0.0
 
 
 def list_logs():
