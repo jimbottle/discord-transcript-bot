@@ -3,6 +3,7 @@ import io
 import json
 import logging
 import os
+import re
 import threading
 import time
 import wave
@@ -128,7 +129,9 @@ class WhisperSink(Sink):
         self.player_map = player_map
         # Biased Whisper prompt built once from the roster's proper nouns;
         # player_map is fixed for this sink's lifetime. discord-transcript-bot-cul.
-        self.initial_prompt = self._build_initial_prompt()
+        # _prompt_names is the exact name list put in the prompt, used to
+        # detect when Whisper regurgitates one as a hallucination.
+        self.initial_prompt, self._prompt_names = self._build_initial_prompt()
 
         # Ordered-commit state. Transcriptions run in parallel on the
         # executor, but their results are written in the order the segments
@@ -254,7 +257,7 @@ class WhisperSink(Sink):
                     names.append(name)
 
         if not names:
-            return DEFAULT_INITIAL_PROMPT
+            return DEFAULT_INITIAL_PROMPT, []
 
         prefix = DEFAULT_INITIAL_PROMPT + " Names: "
         kept = []
@@ -266,8 +269,55 @@ class WhisperSink(Sink):
             kept.append(name)
 
         if not kept:
-            return DEFAULT_INITIAL_PROMPT
-        return prefix + ", ".join(kept) + "."
+            return DEFAULT_INITIAL_PROMPT, []
+        return prefix + ", ".join(kept) + ".", kept
+
+    # Trivial connectives Whisper tacks onto a regurgitated name
+    # ("Sovereign Lord GM says,"). A name plus only these is still an echo.
+    _ECHO_FILLERS = frozenset(
+        {"says", "said", "say", "speaking", "speaks", "and", "the", "a"}
+    )
+
+    @staticmethod
+    def _normalize_echo(text):
+        """Lowercase, strip punctuation, collapse whitespace — so prompt
+        names and transcribed text compare on the same footing."""
+        return " ".join(re.sub(r"[^\w\s]", " ", text.lower()).split())
+
+    def _is_prompt_echo(self, text):
+        """True when a transcription reduces to just a roster name from the
+        biasing prompt (optionally + a trivial filler like "says").
+
+        Whisper regurgitates its initial_prompt on near-silent/garbage audio,
+        leaking the biased roster names as fake speech (e.g. an 85ms clip
+        transcribed as "Sovereign Lord GM says,"). This drops those. It is
+        deliberately conservative: the WHOLE utterance must reduce to a name,
+        so a real line that merely *mentions* a name ("Noah, watch out") is
+        kept. Single-token names still match only when the utterance is
+        nothing but that token — rare for genuine speech, and the alternative
+        (leaking) is worse.
+        """
+        norm = self._normalize_echo(text)
+        if not norm:
+            return False
+        name_norms = {self._normalize_echo(n) for n in self._prompt_names}
+        name_norms.discard("")
+        if norm in name_norms:
+            return True
+        for n in name_norms:
+            if norm.startswith(n + " "):
+                rest = norm[len(n) :].split()
+                if rest and all(w in self._ECHO_FILLERS for w in rest):
+                    return True
+        return False
+
+    def _drop_if_prompt_echo(self, text):
+        """Return text, or "" (treated as silence downstream) when it's a
+        roster-name prompt-echo hallucination."""
+        if self._is_prompt_echo(text):
+            logger.info(f"Dropping prompt-echo hallucination: {text!r}")
+            return ""
+        return text
 
     def transcribe_audio(self, temp_file):
         try:
@@ -284,7 +334,7 @@ class WhisperSink(Sink):
                     prompt=self.initial_prompt,
                 )
                 logger.info(f"OpenAI Transcription: {openai_transcription.text}")
-                return openai_transcription.text
+                return self._drop_if_prompt_echo(openai_transcription.text)
             else:
                 # The whisper model (batched pipeline for CPU throughput;
                 # same model + precision, so no accuracy change).
@@ -299,6 +349,10 @@ class WhisperSink(Sink):
                     vad_parameters=dict(min_silence_duration_ms=150, threshold=0.8),
                     no_speech_threshold=0.6,
                     initial_prompt=self.initial_prompt,
+                    # Don't let one hallucinated segment seed the next; the
+                    # roster-biased initial_prompt makes prompt-echo loops
+                    # more likely without this.
+                    condition_on_previous_text=False,
                 )
 
                 segments = list(segments)
@@ -307,7 +361,7 @@ class WhisperSink(Sink):
                     result += segment.text
 
                 logger.info(f"Transcription: {result}")
-                return result
+                return self._drop_if_prompt_echo(result)
         except Exception as e:
             logger.error(f"Error transcribing audio: {e}")
             return ""

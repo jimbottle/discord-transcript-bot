@@ -10,6 +10,7 @@ import threading
 import time
 import wave
 from concurrent.futures import Future
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import src.sinks.whisper_sink as ws
@@ -341,6 +342,59 @@ def test_initial_prompt_respects_char_budget(tmp_path, monkeypatch):
     # Truncated whole-name: ends cleanly with a period, no dangling comma.
     assert sink.initial_prompt.endswith(".")
     assert not sink.initial_prompt.rstrip(".").endswith(",")
+
+
+# ── Prompt-echo hallucination guard ──────────────────────────────────────
+# Whisper regurgitates the roster names from initial_prompt on near-silent
+# audio (an 85ms clip transcribed as "Sovereign Lord GM says,"). These guard
+# the drop-the-echo filter that kills that leak while keeping real speech.
+
+
+def test_prompt_echo_drops_bare_and_filler_suffixed_name(tmp_path, monkeypatch):
+    pm = {1: {"player": "Sovereign Lord GM", "character": "Noah"}}
+    sink = _make_sink(tmp_path, monkeypatch, player_map=pm)
+    assert "Sovereign Lord GM" in sink._prompt_names
+    assert sink._drop_if_prompt_echo(" Sovereign Lord GM") == ""
+    assert sink._drop_if_prompt_echo("Sovereign Lord GM says,") == ""
+    assert sink._is_prompt_echo("sovereign lord gm SAID.") is True
+    sink.close()
+
+
+def test_prompt_echo_keeps_real_speech(tmp_path, monkeypatch):
+    pm = {1: {"player": "Sovereign Lord GM", "character": "Noah"}}
+    sink = _make_sink(tmp_path, monkeypatch, player_map=pm)
+    # A name embedded in a real sentence (or with real trailing content) is
+    # kept — only a whole-utterance echo is dropped.
+    for keep in (
+        "Noah, watch out!",
+        "I cast fireball",
+        "Sovereign Lord GM says we should go now",
+    ):
+        assert sink._drop_if_prompt_echo(keep) == keep
+    sink.close()
+
+
+def test_prompt_echo_noop_without_roster(tmp_path, monkeypatch):
+    sink = _make_sink(tmp_path, monkeypatch, player_map={})
+    assert sink._prompt_names == []
+    assert sink._is_prompt_echo("Sovereign Lord GM says,") is False
+    assert (
+        sink._drop_if_prompt_echo("Sovereign Lord GM says,")
+        == "Sovereign Lord GM says,"
+    )
+    sink.close()
+
+
+def test_transcribe_audio_drops_prompt_echo_end_to_end(tmp_path, monkeypatch):
+    pm = {1: {"player": "Sovereign Lord GM", "character": "Noah"}}
+    sink = _make_sink(tmp_path, monkeypatch, player_map=pm)
+    monkeypatch.setattr(sink, "check_audio_length", lambda _f: 1.0)  # pass length gate
+    seg = SimpleNamespace(text=" Sovereign Lord GM says,")
+    monkeypatch.setattr(
+        ws, "batched_model", SimpleNamespace(transcribe=lambda *a, **k: ([seg], None))
+    )
+    assert sink.transcribe_audio(io.BytesIO()) == ""
+    sink.close()
     sink.close()
 
 
