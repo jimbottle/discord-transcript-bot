@@ -35,6 +35,48 @@ WHISPER_BEST_OF = int(os.getenv("WHISPER_BEST_OF", "5"))
 # discord-transcript-bot-ob3.
 WHISPER_BATCH_SIZE = int(os.getenv("WHISPER_BATCH_SIZE", "8"))
 
+# Per-segment hallucination filter. On near-silent / noisy audio Whisper
+# emits high-confidence garbage (YouTube-caption ghosts like "Subtitles by
+# the Amara.org community", repeated tokens, and — with roster biasing — the
+# injected names). faster-whisper exposes per-segment quality metrics; drop a
+# segment that looks like a hallucination rather than concatenating it blindly.
+# Conservative defaults to avoid dropping real speech; every drop is logged
+# with its metrics so the thresholds can be calibrated on real audio
+# (discord-transcript-bot-61z). Env-overridable.
+WHISPER_DROP_NO_SPEECH_PROB = float(os.getenv("WHISPER_DROP_NO_SPEECH_PROB", "0.8"))
+WHISPER_DROP_AVG_LOGPROB = float(os.getenv("WHISPER_DROP_AVG_LOGPROB", "-1.0"))
+WHISPER_DROP_COMPRESSION_RATIO = float(
+    os.getenv("WHISPER_DROP_COMPRESSION_RATIO", "2.4")
+)
+
+# Roster proper-noun biasing of initial_prompt is an unvalidated accuracy
+# lever that also causes prompt-echo hallucinations; gate it so it can be
+# disabled (or scoped) without a code change. Truthy values enable it.
+BIAS_PROMPT_WITH_ROSTER = os.getenv(
+    "BIAS_PROMPT_WITH_ROSTER", "1"
+).strip().lower() not in (
+    "",
+    "0",
+    "false",
+    "no",
+)
+
+# Notorious Whisper silence-hallucination phrases (YouTube caption training
+# ghosts). Matched case-insensitively against the normalized segment text as a
+# precise backstop to the metric filter. Kept lowercase + punctuation-free.
+_HALLUCINATION_PHRASES = frozenset(
+    {
+        "thank you for watching",
+        "thanks for watching",
+        "thank you for watching this video",
+        "subtitles by the amara org community",
+        "transcription by the amara org community",
+        "please subscribe",
+        "like and subscribe",
+        "see you in the next video",
+    }
+)
+
 # Whisper's initial_prompt biases spelling/vocabulary. It is end-weighted and
 # capped near 224 tokens, so we keep this base hint short and append the
 # session's roster proper nouns (character/player names) AFTER it — see
@@ -241,6 +283,10 @@ class WhisperSink(Sink):
         prompt is end-weighted and ~224-token capped; names are appended
         after the base hint (the high-value position) and truncated whole.
         """
+        if not BIAS_PROMPT_WITH_ROSTER:
+            # Biasing disabled (BIAS_PROMPT_WITH_ROSTER=0): generic hint only,
+            # no names injected, so no names to echo.
+            return DEFAULT_INITIAL_PROMPT, []
         entries = [e for e in (self.player_map or {}).values() if isinstance(e, dict)]
         names = []
         seen = set()
@@ -285,39 +331,78 @@ class WhisperSink(Sink):
         return " ".join(re.sub(r"[^\w\s]", " ", text.lower()).split())
 
     def _is_prompt_echo(self, text):
-        """True when a transcription reduces to just a roster name from the
-        biasing prompt (optionally + a trivial filler like "says").
+        """True when a transcription reduces to NOTHING BUT roster names from
+        the biasing prompt (plus trivial fillers like "says").
 
         Whisper regurgitates its initial_prompt on near-silent/garbage audio,
-        leaking the biased roster names as fake speech (e.g. an 85ms clip
-        transcribed as "Sovereign Lord GM says,"). This drops those. It is
-        deliberately conservative: the WHOLE utterance must reduce to a name,
-        so a real line that merely *mentions* a name ("Noah, watch out") is
-        kept. Single-token names still match only when the utterance is
-        nothing but that token — rare for genuine speech, and the alternative
-        (leaking) is worse.
+        leaking the biased names as fake speech — a bare name ("Sovereign Lord
+        GM"), a name + filler ("Sovereign Lord GM says,"), OR several names run
+        together ("Sovereign Lord GM, Rahul Patch Sarker."). Strip every prompt
+        name and filler from the text; if nothing real is left and at least one
+        name was present, it's an echo.
+
+        Deliberately conservative: a line that merely *mentions* a name with
+        real content ("Noah, watch out") keeps that content, so it survives.
         """
         norm = self._normalize_echo(text)
         if not norm:
             return False
-        name_norms = {self._normalize_echo(n) for n in self._prompt_names}
-        name_norms.discard("")
-        if norm in name_norms:
-            return True
+        name_norms = sorted(
+            (n for n in (self._normalize_echo(n) for n in self._prompt_names) if n),
+            key=len,
+            reverse=True,  # strip longest names first so multi-word names go whole
+        )
+        if not name_norms:
+            return False
+        stripped = norm
+        matched_a_name = False
         for n in name_norms:
-            if norm.startswith(n + " "):
-                rest = norm[len(n) :].split()
-                if rest and all(w in self._ECHO_FILLERS for w in rest):
-                    return True
-        return False
+            new = re.sub(rf"\b{re.escape(n)}\b", " ", stripped)
+            if new != stripped:
+                matched_a_name = True
+                stripped = new
+        leftover = [w for w in stripped.split() if w not in self._ECHO_FILLERS]
+        return matched_a_name and not leftover
+
+    def _is_hallucination_phrase(self, text):
+        """True when the whole utterance is a known Whisper silence-artifact
+        (YouTube caption ghost like "Subtitles by the Amara.org community")."""
+        return self._normalize_echo(text) in _HALLUCINATION_PHRASES
 
     def _drop_if_prompt_echo(self, text):
-        """Return text, or "" (treated as silence downstream) when it's a
-        roster-name prompt-echo hallucination."""
+        """Return text, or "" (silence downstream) when the WHOLE utterance is
+        a roster-name prompt-echo or a known Whisper hallucination phrase."""
         if self._is_prompt_echo(text):
             logger.info(f"Dropping prompt-echo hallucination: {text!r}")
             return ""
+        if self._is_hallucination_phrase(text):
+            logger.info(f"Dropping known Whisper artifact: {text!r}")
+            return ""
         return text
+
+    def _accept_segment(self, seg):
+        """Whether to keep one faster-whisper segment, or drop it as a
+        hallucination based on its quality metrics. Drops are logged with the
+        metrics so the thresholds can be calibrated on real audio."""
+        text = (getattr(seg, "text", "") or "").strip()
+        if not text:
+            return False
+        nsp = getattr(seg, "no_speech_prob", 0.0) or 0.0
+        alp = getattr(seg, "avg_logprob", 0.0) or 0.0
+        cr = getattr(seg, "compression_ratio", 1.0) or 1.0
+        reason = None
+        if cr > WHISPER_DROP_COMPRESSION_RATIO:
+            reason = f"repetition (compression_ratio={cr:.2f})"
+        elif alp < WHISPER_DROP_AVG_LOGPROB:
+            reason = f"low-confidence (avg_logprob={alp:.2f})"
+        elif nsp > WHISPER_DROP_NO_SPEECH_PROB:
+            reason = f"silence (no_speech_prob={nsp:.2f})"
+        elif self._is_hallucination_phrase(text):
+            reason = "known-artifact"
+        if reason:
+            logger.info(f"Dropping hallucinated segment [{reason}]: {text!r}")
+            return False
+        return True
 
     def transcribe_audio(self, temp_file):
         try:
@@ -355,12 +440,16 @@ class WhisperSink(Sink):
                     condition_on_previous_text=False,
                 )
 
-                segments = list(segments)
-                result = ""
-                for segment in segments:
-                    result += segment.text
+                # Keep only segments that pass the per-segment hallucination
+                # filter (silence/low-confidence/repetition/known-artifact),
+                # instead of concatenating everything Whisper emitted.
+                result = "".join(
+                    seg.text for seg in segments if self._accept_segment(seg)
+                )
 
                 logger.info(f"Transcription: {result}")
+                # Final whole-utterance backstop for prompt-echo / artifacts
+                # that slipped through the per-segment metrics.
                 return self._drop_if_prompt_echo(result)
         except Exception as e:
             logger.error(f"Error transcribing audio: {e}")

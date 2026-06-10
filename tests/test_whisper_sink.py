@@ -395,6 +395,86 @@ def test_transcribe_audio_drops_prompt_echo_end_to_end(tmp_path, monkeypatch):
     )
     assert sink.transcribe_audio(io.BytesIO()) == ""
     sink.close()
+
+
+def test_prompt_echo_drops_multiple_concatenated_names(tmp_path, monkeypatch):
+    """The leak isn't only single names: "Sovereign Lord GM, Rahul Patch
+    Sarker." is several prompt names run together and must also drop."""
+    pm = {
+        1: {"player": "Sovereign Lord GM", "character": "Noah"},
+        2: {"player": "Rahul Patch Sarker", "character": "William"},
+    }
+    sink = _make_sink(tmp_path, monkeypatch, player_map=pm)
+    assert sink._drop_if_prompt_echo("Sovereign Lord GM, Rahul Patch Sarker.") == ""
+    assert sink._is_prompt_echo("Noah and William") is True
+    # still keeps a real sentence that happens to contain names
+    assert sink._drop_if_prompt_echo("Noah hands William the gun") != ""
+    sink.close()
+
+
+def test_known_whisper_artifact_dropped(tmp_path, monkeypatch):
+    sink = _make_sink(tmp_path, monkeypatch, player_map={})
+    assert sink._drop_if_prompt_echo("Subtitles by the Amara.org community") == ""
+    assert sink._drop_if_prompt_echo("Thank you for watching!") == ""
+    assert sink._is_hallucination_phrase("please subscribe") is True
+    # a real sentence that merely contains "thank you" is kept (exact-match only)
+    assert (
+        sink._drop_if_prompt_echo("thank you for the potion")
+        == "thank you for the potion"
+    )
+    sink.close()
+
+
+class _Seg:
+    """Minimal stand-in for a faster-whisper Segment with the quality
+    metrics the hallucination filter inspects."""
+
+    def __init__(
+        self, text, no_speech_prob=0.0, avg_logprob=0.0, compression_ratio=1.0
+    ):
+        self.text = text
+        self.no_speech_prob = no_speech_prob
+        self.avg_logprob = avg_logprob
+        self.compression_ratio = compression_ratio
+
+
+def test_accept_segment_filters_by_metrics(tmp_path, monkeypatch):
+    sink = _make_sink(tmp_path, monkeypatch, player_map={})
+    keep = _Seg("real speech here", no_speech_prob=0.1, avg_logprob=-0.3)
+    assert sink._accept_segment(keep) is True
+    assert sink._accept_segment(_Seg("   ")) is False  # empty
+    assert sink._accept_segment(_Seg("x", no_speech_prob=0.95)) is False  # silence
+    assert sink._accept_segment(_Seg("x", avg_logprob=-1.5)) is False  # low confidence
+    assert sink._accept_segment(_Seg("la la la", compression_ratio=3.0)) is False  # rep
+    assert (
+        sink._accept_segment(_Seg("Subtitles by the Amara.org community")) is False
+    )  # known artifact
+    sink.close()
+
+
+def test_transcribe_audio_keeps_only_good_segments(tmp_path, monkeypatch):
+    sink = _make_sink(tmp_path, monkeypatch, player_map={})
+    monkeypatch.setattr(sink, "check_audio_length", lambda _f: 1.0)
+    segs = [
+        _Seg(" Real line.", no_speech_prob=0.1, avg_logprob=-0.3),
+        _Seg(" Subtitles by the Amara.org community", avg_logprob=-0.3),
+        _Seg(" la la la la", compression_ratio=3.5),
+        _Seg(" Another real bit.", no_speech_prob=0.1, avg_logprob=-0.2),
+    ]
+    monkeypatch.setattr(
+        ws, "batched_model", SimpleNamespace(transcribe=lambda *a, **k: (segs, None))
+    )
+    assert sink.transcribe_audio(io.BytesIO()) == " Real line. Another real bit."
+    sink.close()
+
+
+def test_biasing_disabled_via_env(tmp_path, monkeypatch):
+    monkeypatch.setattr(ws, "BIAS_PROMPT_WITH_ROSTER", False)
+    pm = {1: {"player": "Sovereign Lord GM", "character": "Noah"}}
+    sink = _make_sink(tmp_path, monkeypatch, player_map=pm)
+    assert sink.initial_prompt == DEFAULT_INITIAL_PROMPT
+    assert sink._prompt_names == []
+    sink.close()
     sink.close()
 
 
