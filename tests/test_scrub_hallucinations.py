@@ -63,6 +63,19 @@ def test_scrub_txt_removes_only_garbage_and_backs_up(tmp_path):
     assert len(Path(str(f) + ".bak").read_text().splitlines()) == 3
 
 
+def test_scrub_txt_dry_run_reports_without_writing(tmp_path):
+    f = tmp_path / "session.txt"
+    original = (
+        "[22:18:42] Sovereign Lord GM (Noah) [42]: Sovereign Lord GM.\n"
+        "[22:18:50] Reiko Tanaka (Gus) [99]: I loot the body.\n"
+    )
+    f.write_text(original, encoding="utf-8")
+    removed = scrub.scrub_txt(str(f), _NAMES, apply=False)
+    assert len(removed) == 1  # still reports what it WOULD remove
+    assert f.read_text(encoding="utf-8") == original  # file untouched
+    assert not (tmp_path / "session.txt.bak").exists()  # no backup in dry-run
+
+
 def test_scrub_log_filters_json_rows(tmp_path):
     f = tmp_path / "day.log"
     f.write_text(

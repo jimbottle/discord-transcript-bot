@@ -10,8 +10,12 @@ text-detectable garbage (roster echoes + the YouTube-ghost denylist) — the
 per-segment metric filter can't be applied retroactively (the logs don't
 carry segment metrics), so genuine-looking short noise is left alone.
 
-The text heuristics intentionally mirror whisper_sink so the same lines are
-removed here as would be dropped live.
+The text heuristics mirror whisper_sink's phrases, fillers, and name-stripping.
+One deliberate difference: the live filter only strips names that fit in the
+budget-truncated initial_prompt (MAX_INITIAL_PROMPT_CHARS), whereas this tool
+strips the FULL roster — so on a large roster it can remove a bare-name line
+that was never actually a live echo source. That's safe here (dry-run default,
+.bak backup) and errs toward cleaning more, not less.
 
 USAGE
 -----
@@ -27,7 +31,6 @@ import argparse
 import json
 import os
 import re
-import sys
 from pathlib import Path
 
 import yaml
@@ -44,7 +47,9 @@ _HALLUCINATION_PHRASES = {
     "like and subscribe",
     "see you in the next video",
 }
-_ECHO_FILLERS = {"says", "said", "say", "speaking", "speaks", "and", "the", "a"}
+# Verb connectives only — see whisper_sink._ECHO_FILLERS for why articles/
+# conjunctions are excluded (they'd over-drop real clipped speech).
+_ECHO_FILLERS = {"says", "said", "say", "speaking", "speaks"}
 
 # Per-line transcript format: [HH:MM:SS] Player (Character) [user_id]: text
 _LINE_RE = re.compile(
@@ -161,4 +166,5 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(0 if main() is not None else 1)
+    # main() reports and returns the count; success is simply "it ran".
+    main()

@@ -342,6 +342,7 @@ def test_initial_prompt_respects_char_budget(tmp_path, monkeypatch):
     # Truncated whole-name: ends cleanly with a period, no dangling comma.
     assert sink.initial_prompt.endswith(".")
     assert not sink.initial_prompt.rstrip(".").endswith(",")
+    sink.close()
 
 
 # ── Prompt-echo hallucination guard ──────────────────────────────────────
@@ -406,8 +407,12 @@ def test_prompt_echo_drops_multiple_concatenated_names(tmp_path, monkeypatch):
     }
     sink = _make_sink(tmp_path, monkeypatch, player_map=pm)
     assert sink._drop_if_prompt_echo("Sovereign Lord GM, Rahul Patch Sarker.") == ""
-    assert sink._is_prompt_echo("Noah and William") is True
-    # still keeps a real sentence that happens to contain names
+    # comma-separated names (how the prompt lists them) drop via punctuation
+    # normalization — no article/conjunction filler needed
+    assert sink._is_prompt_echo("Noah, William.") is True
+    # a real sentence that happens to contain names (with an article between
+    # them) is kept — "and"/"the" are NOT fillers, so this survives
+    assert sink._drop_if_prompt_echo("Noah and William") != ""
     assert sink._drop_if_prompt_echo("Noah hands William the gun") != ""
     sink.close()
 
@@ -475,7 +480,17 @@ def test_biasing_disabled_via_env(tmp_path, monkeypatch):
     assert sink.initial_prompt == DEFAULT_INITIAL_PROMPT
     assert sink._prompt_names == []
     sink.close()
-    sink.close()
+
+
+def test_env_flag_parsing():
+    # unset -> default truthy; explicit falsy tokens (any case) -> False
+    assert ws._env_flag(None) is True
+    assert ws._env_flag("1") is True
+    assert ws._env_flag("true") is True
+    assert ws._env_flag("yes") is True
+    assert ws._env_flag("anything") is True
+    for falsy in ("", "0", "false", "FALSE", "No", " no "):
+        assert ws._env_flag(falsy) is False, falsy
 
 
 # ── Decode params + batched CPU inference reach the model

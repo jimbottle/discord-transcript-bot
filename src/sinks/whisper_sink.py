@@ -49,17 +49,22 @@ WHISPER_DROP_COMPRESSION_RATIO = float(
     os.getenv("WHISPER_DROP_COMPRESSION_RATIO", "2.4")
 )
 
+
+def _env_flag(raw, default="1"):
+    """Parse a truthy/falsy env string. Falsy: '', '0', 'false', 'no' (any
+    case); everything else (incl. unset -> default) is truthy."""
+    return (raw if raw is not None else default).strip().lower() not in (
+        "",
+        "0",
+        "false",
+        "no",
+    )
+
+
 # Roster proper-noun biasing of initial_prompt is an unvalidated accuracy
 # lever that also causes prompt-echo hallucinations; gate it so it can be
 # disabled (or scoped) without a code change. Truthy values enable it.
-BIAS_PROMPT_WITH_ROSTER = os.getenv(
-    "BIAS_PROMPT_WITH_ROSTER", "1"
-).strip().lower() not in (
-    "",
-    "0",
-    "false",
-    "no",
-)
+BIAS_PROMPT_WITH_ROSTER = _env_flag(os.getenv("BIAS_PROMPT_WITH_ROSTER"))
 
 # Notorious Whisper silence-hallucination phrases (YouTube caption training
 # ghosts). Matched case-insensitively against the normalized segment text as a
@@ -318,11 +323,13 @@ class WhisperSink(Sink):
             return DEFAULT_INITIAL_PROMPT, []
         return prefix + ", ".join(kept) + ".", kept
 
-    # Trivial connectives Whisper tacks onto a regurgitated name
-    # ("Sovereign Lord GM says,"). A name plus only these is still an echo.
-    _ECHO_FILLERS = frozenset(
-        {"says", "said", "say", "speaking", "speaks", "and", "the", "a"}
-    )
+    # Verb connectives Whisper tacks onto a regurgitated name ("Sovereign
+    # Lord GM says,"). A name plus only these is still an echo. Deliberately
+    # excludes articles/conjunctions (and/the/a): the prompt lists names
+    # comma-separated, so the echo pattern is "Name, Name" (handled by
+    # punctuation normalization), and including bare articles would over-drop
+    # real clipped speech beginning with a short name ("Will the...").
+    _ECHO_FILLERS = frozenset({"says", "said", "say", "speaking", "speaks"})
 
     @staticmethod
     def _normalize_echo(text):
