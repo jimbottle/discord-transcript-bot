@@ -21,6 +21,13 @@ from openai import OpenAI
 WHISPER_MODEL = "large-v3"
 WHISPER_LANGUAGE = "en"
 
+# Decode params. beam_size was 10 / best_of 3 — unusually high and a major
+# CPU cost for marginal accuracy; 5 is faster-whisper's own default. Made
+# configurable so the accuracy/speed knee can be A/B-tuned on real session
+# audio (discord-transcript-bot-61z). discord-transcript-bot-std.
+WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "5"))
+WHISPER_BEST_OF = int(os.getenv("WHISPER_BEST_OF", "5"))
+
 # Whisper's initial_prompt biases spelling/vocabulary. It is end-weighted and
 # capped near 224 tokens, so we keep this base hint short and append the
 # session's roster proper nouns (character/player names) AFTER it — see
@@ -220,14 +227,16 @@ class WhisperSink(Sink):
         prompt is end-weighted and ~224-token capped; names are appended
         after the base hint (the high-value position) and truncated whole.
         """
+        entries = [e for e in (self.player_map or {}).values() if isinstance(e, dict)]
         names = []
         seen = set()
-        for entry in (self.player_map or {}).values():
-            if not isinstance(entry, dict):
-                continue
-            # Character first (spoken most), then player name; both deduped
-            # case-insensitively.
-            for key in ("character", "player"):
+        # Two passes — ALL character names first, then ALL player names —
+        # not interleaved per entry. Characters are spoken most, so when the
+        # char budget truncates the list they must take priority globally: a
+        # later entry's character outranks an earlier entry's player. Both
+        # deduped case-insensitively.
+        for key in ("character", "player"):
+            for entry in entries:
                 name = (entry.get(key) or "").strip()
                 if name and name.lower() not in seen:
                     seen.add(name.lower())
@@ -271,8 +280,8 @@ class WhisperSink(Sink):
                 segments, info = audio_model.transcribe(
                     temp_file,
                     language=WHISPER_LANGUAGE,
-                    beam_size=10,
-                    best_of=3,
+                    beam_size=WHISPER_BEAM_SIZE,
+                    best_of=WHISPER_BEST_OF,
                     vad_filter=True,
                     vad_parameters=dict(min_silence_duration_ms=150, threshold=0.8),
                     no_speech_threshold=0.6,

@@ -4,6 +4,7 @@ These cover the roborev #514 fixes: lazy file open, race-safe close, and
 no empty file created when a sink is constructed but never used.
 """
 
+import io
 import os
 import threading
 import time
@@ -11,7 +12,21 @@ import wave
 from concurrent.futures import Future
 from unittest.mock import MagicMock
 
+import src.sinks.whisper_sink as ws
 from src.sinks.whisper_sink import DEFAULT_INITIAL_PROMPT, Speaker, WhisperSink
+
+
+def _wav_bytesio(seconds=0.5):
+    """A valid Discord-format (48kHz/16-bit/stereo) silent WAV in memory,
+    long enough to pass transcribe_audio's >0.1s length guard."""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(48000)
+        w.writeframes(b"\x00\x00\x00\x00" * int(48000 * seconds))
+    buf.seek(0)
+    return buf
 
 
 def _done_future(value=None, exc=None):
@@ -275,8 +290,12 @@ def test_initial_prompt_includes_roster_names(tmp_path, monkeypatch):
     assert p.startswith(DEFAULT_INITIAL_PROMPT)
     for name in ("Gus", "Johan", "Reiko Tanaka", "Steve Calderon"):
         assert name in p, f"{name} should be biased into the prompt"
-    # Character names come before player names (spoken most).
-    assert p.index("Gus") < p.index("Reiko Tanaka")
+    # ALL character names precede ALL player names (global, not per-entry):
+    # a later entry's character must outrank an earlier entry's player so
+    # the char-budget truncation keeps the higher-value (spoken-most) names.
+    assert max(p.index("Gus"), p.index("Johan")) < min(
+        p.index("Reiko Tanaka"), p.index("Steve Calderon")
+    )
     sink.close()
 
 
@@ -322,6 +341,37 @@ def test_initial_prompt_respects_char_budget(tmp_path, monkeypatch):
     # Truncated whole-name: ends cleanly with a period, no dangling comma.
     assert sink.initial_prompt.endswith(".")
     assert not sink.initial_prompt.rstrip(".").endswith(",")
+    sink.close()
+
+
+# ── Decode params reach the model (discord-transcript-bot-std) ──
+
+
+def test_transcribe_audio_passes_configured_decode_params(tmp_path, monkeypatch):
+    """beam_size/best_of are read from the module-level config (not
+    hardcoded) and the biased initial_prompt is forwarded to the model."""
+    sink = _make_sink(
+        tmp_path, monkeypatch, player_map={1: {"player": "Sam", "character": "Gus"}}
+    )
+    captured = {}
+
+    class _Seg:
+        text = "hello there"
+
+    class _FakeModel:
+        def transcribe(self, audio, **kwargs):
+            captured.update(kwargs)
+            return ([_Seg()], MagicMock())
+
+    monkeypatch.setattr(ws, "audio_model", _FakeModel())
+    monkeypatch.setattr(ws, "WHISPER_BEAM_SIZE", 7)
+    monkeypatch.setattr(ws, "WHISPER_BEST_OF", 9)
+
+    out = sink.transcribe_audio(_wav_bytesio(0.5))
+    assert out == "hello there"
+    assert captured["beam_size"] == 7
+    assert captured["best_of"] == 9
+    assert captured["initial_prompt"] == sink.initial_prompt
     sink.close()
 
 
