@@ -113,6 +113,12 @@ const STATUS_URL = "{{ url_for('bot_status') }}";
 const START_URL = "{{ url_for('bot_start') }}";
 const STOP_URL = "{{ url_for('bot_stop') }}";
 
+// Tracks whether the last poll saw a failing/warning check, so a fresh
+// failure can auto-open the collapsed health panel on its rising edge
+// without re-opening (and overriding a manual collapse) every poll while
+// the failure persists.
+let healthWasDegraded = false;
+
 function renderStatus(data) {
     const badge = document.getElementById("status-badge");
     const checkList = document.getElementById("health-checks");
@@ -161,10 +167,17 @@ function renderStatus(data) {
     // be parsed as HTML.
     const checks = data.checks || {};
     const names = Object.keys(checks);
-    // Show/hide the whole collapsible wrapper with the check data; the
-    // user's manual open/closed state is left untouched between polls.
+    // Show/hide the whole collapsible wrapper with the check data, and
+    // auto-open it when a failure first appears so the now-relevant detail
+    // surfaces without a reload. Only on the rising edge — a sustained
+    // failure the user has manually collapsed stays collapsed.
+    const anyNotOk = Object.values(checks).some((c) => !c.ok);
     const details = document.getElementById("health-details");
-    if (details) details.style.display = names.length ? "" : "none";
+    if (details) {
+        details.style.display = names.length ? "" : "none";
+        if (anyNotOk && !healthWasDegraded) details.open = true;
+    }
+    healthWasDegraded = anyNotOk;
     while (checkList.firstChild) checkList.removeChild(checkList.firstChild);
     if (names.length > 0) {
         for (const name of names) {

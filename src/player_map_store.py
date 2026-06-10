@@ -6,6 +6,16 @@ write logic lives in exactly one place. No Discord or Flask imports — pure
 file I/O — so the web process can import it without pulling in Pycord.
 
 The roster maps an integer Discord user id to ``{"player", "character"}``.
+
+Concurrency: each write is atomic (tmp + ``os.replace``), so a reader never
+sees a torn file and a crash mid-write can't corrupt the roster. The
+load -> merge -> write sequence is NOT locked across the read, though, so two
+writers racing the same file (the bot's in-process ``/add_player`` and the
+separate web editor) have a last-writer-wins lost-update window. This is
+accepted: both are infrequent, human-driven edits, and the merge preserves
+every entry except the one being changed, so the only loss is two people
+editing the *same* user at the same instant. If that ever needs closing, wrap
+the load+write in an ``fcntl.flock`` on ``path``.
 """
 
 import os

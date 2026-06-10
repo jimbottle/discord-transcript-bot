@@ -33,7 +33,10 @@
                     {% if s.last_text %}<br><span class="search-meta">&ldquo;{{ s.last_text | truncate(60) }}&rdquo;</span>{% endif %}
                 </td>
                 <td><input type="text" class="ru-player" value="{{ s.suggested_name or '' }}" placeholder="real name"></td>
-                <td><input type="text" class="ru-character" value="{{ s.suggested_name or '' }}" placeholder="character"></td>
+                {# Character is the in-game name, distinct from the real
+                   name we can guess — leave it blank so Add can't silently
+                   persist player == character. #}
+                <td><input type="text" class="ru-character" value="" placeholder="character"></td>
                 <td><button type="button" class="ru-add" {% if roster.invalid %}disabled{% endif %}>Add</button></td>
             </tr>
         {% endfor %}
@@ -53,7 +56,10 @@
         <thead><tr><th>Discord ID</th><th>Player</th><th>Character</th><th></th></tr></thead>
         <tbody>
         {% for e in roster.entries %}
-            <tr data-user-id="{{ e.user_id }}">
+            {# data-player/data-character hold the last *persisted* values
+               so Undo restores what was actually saved, not unsaved edits
+               sitting in the inputs. Kept in sync on Save / Add in JS. #}
+            <tr data-user-id="{{ e.user_id }}" data-player="{{ e.player or '' }}" data-character="{{ e.character or '' }}">
                 <td><code>{{ e.user_id }}</code></td>
                 <td><input type="text" class="re-player" value="{{ e.player or '' }}"></td>
                 <td><input type="text" class="re-character" value="{{ e.character or '' }}"></td>
@@ -85,12 +91,12 @@ const DELETE_URL = "{{ url_for('roster_delete') }}";
 
 // Toast feedback near the corner so a confirmation is visible wherever the
 // action happened on a long roster. `action` (optional) renders a button,
-// e.g. Undo after a delete. Built with textContent so names/errors can't
-// be parsed as HTML.
-let toastTimer = null;
+// e.g. Undo after a delete. Toasts STACK — each manages its own timeout —
+// so deleting two rows in quick succession doesn't withdraw the first row's
+// Undo before its window elapses; the stack is capped to avoid pile-up.
+// Built with textContent so names/errors can't be parsed as HTML.
 function toast(message, kind, action) {
     const root = document.getElementById("toast-root");
-    root.replaceChildren();
     const el = document.createElement("div");
     el.className = "roster-toast " + (kind === "ok" ? "ok" : "err");
     const dot = document.createElement("span");
@@ -108,9 +114,9 @@ function toast(message, kind, action) {
         el.appendChild(btn);
     }
     root.appendChild(el);
+    while (root.children.length > 4) root.firstChild.remove();
     requestAnimationFrame(() => el.classList.add("show"));
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => hideToast(el), action ? 6000 : 3500);
+    setTimeout(() => hideToast(el), action ? 6000 : 3500);
 }
 function hideToast(el) {
     el.classList.remove("show");
@@ -201,6 +207,9 @@ function ensureRosterRow(userId, player, character) {
     }
     row.querySelector(".re-player").value = player;
     row.querySelector(".re-character").value = character;
+    // Keep the persisted-value snapshot in sync for a later Undo.
+    row.dataset.player = player;
+    row.dataset.character = character;
     return row;
 }
 
@@ -225,19 +234,26 @@ document.addEventListener("click", async (ev) => {
         }
     } else if (t.classList.contains("re-save")) {
         const row = t.closest("tr");
-        await upsert(
+        const data = await upsert(
             row.dataset.userId,
             row.querySelector(".re-player").value.trim(),
             row.querySelector(".re-character").value.trim(),
         );
+        if (data) {
+            // Now persisted — refresh the Undo snapshot.
+            row.dataset.player = data.player;
+            row.dataset.character = data.character;
+        }
     } else if (t.classList.contains("re-delete")) {
         const row = t.closest("tr");
         if (!armDelete(t)) return;  // first click arms; wait for the second
         disarmDelete(t);
         const uid = row.dataset.userId;
-        // Capture current values so the delete can be undone (re-upserted).
-        const player = row.querySelector(".re-player").value.trim();
-        const character = row.querySelector(".re-character").value.trim();
+        // Undo restores the last *persisted* values (data-*), not unsaved
+        // edits sitting in the inputs — otherwise Undo would commit a change
+        // the user never saved and that differs from what was deleted.
+        const player = row.dataset.player || "";
+        const character = row.dataset.character || "";
         const { ok, data } = await csrfPost(DELETE_URL, { user_id: uid });
         if (!ok) { toast(data.error || "Delete failed.", "err"); return; }
         row.remove();
@@ -272,7 +288,7 @@ document.addEventListener("keydown", (ev) => {
 
 document.getElementById("add-entry").addEventListener("click", async () => {
     const uid = document.getElementById("add-id").value.trim();
-    if (!/^\d+$/.test(uid)) { showMsg("Discord ID must be numeric.", false); return; }
+    if (!/^\d+$/.test(uid)) { toast("Discord ID must be numeric.", "err"); return; }
     const data = await upsert(
         uid,
         document.getElementById("add-player").value.trim(),
