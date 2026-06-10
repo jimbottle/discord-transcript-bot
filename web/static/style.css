@@ -1,3 +1,30 @@
+/* Semantic status colors — readable on BOTH themes.
+   The base values are tuned for the light surface; the dark-theme block
+   lifts lightness and drops chroma so green/amber/red text stays legible
+   on the near-black panel (the prior fixed dark hex values failed WCAG AA
+   on dark, which is the default theme). The inline theme script always
+   sets data-theme, so these attribute selectors are authoritative; the
+   media query is a no-JS fallback. */
+:root {
+    --status-pass: oklch(0.52 0.13 150);
+    --status-warn: oklch(0.52 0.11 75);
+    --status-fail: oklch(0.52 0.17 27);
+}
+
+[data-theme="dark"] {
+    --status-pass: oklch(0.80 0.14 150);
+    --status-warn: oklch(0.83 0.13 85);
+    --status-fail: oklch(0.72 0.16 27);
+}
+
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+        --status-pass: oklch(0.80 0.14 150);
+        --status-warn: oklch(0.83 0.13 85);
+        --status-fail: oklch(0.72 0.16 27);
+    }
+}
+
 /* Status indicator */
 .status-badge {
     display: inline-block;
@@ -50,15 +77,15 @@
 }
 
 .check-pass {
-    color: #155724;
+    color: var(--status-pass);
 }
 
 .check-fail {
-    color: #721c24;
+    color: var(--status-fail);
 }
 
 .check-warn {
-    color: #856404;
+    color: var(--status-warn);
 }
 
 /* Transcript content */
@@ -151,4 +178,99 @@ nav ul {
     padding: 0;
     display: flex;
     gap: 1rem;
+}
+
+/* Roster: align the add-entry inputs to the table's column rhythm
+   instead of letting them flex to full width (id narrow, names flexible,
+   button hugs its content). Collapses to a single column on small screens. */
+.roster-add-row {
+    display: grid;
+    grid-template-columns: 12rem minmax(0, 1fr) minmax(0, 1fr) auto;
+    gap: 0.5rem;
+    align-items: center;
+}
+
+.roster-add-row input {
+    margin: 0;
+}
+
+@media (max-width: 640px) {
+    .roster-add-row {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* Armed (confirm) state for a destructive button — outline danger, no
+   colored side-stripe. The label swaps to "Confirm?" in the markup. */
+button.confirming {
+    background: transparent;
+    color: var(--status-fail);
+    border-color: var(--status-fail);
+}
+
+/* Toast feedback — fixed near the corner so a save/delete confirmation is
+   visible no matter where the action happened on a long roster, rather
+   than printed at the top of the page off-screen. */
+#toast-root {
+    position: fixed;
+    bottom: 1.25rem;
+    right: 1.25rem;
+    z-index: 50;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    pointer-events: none;
+}
+
+.roster-toast {
+    display: flex;
+    gap: 0.6rem;
+    align-items: center;
+    max-width: min(30rem, calc(100vw - 2.5rem));
+    padding: 0.65rem 0.9rem;
+    border-radius: var(--pico-border-radius);
+    border: 1px solid var(--pico-muted-border-color);
+    background: var(--pico-card-background-color);
+    box-shadow: 0 8px 28px oklch(0 0 0 / 0.3);
+    font-size: 0.9rem;
+    pointer-events: auto;
+    opacity: 0;
+    transform: translateY(0.5rem);
+    /* ease-out-quint: settle, no bounce; opacity+transform only */
+    transition: opacity 0.2s cubic-bezier(0.22, 1, 0.36, 1),
+        transform 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.roster-toast.show {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.roster-toast .dot {
+    flex: 0 0 auto;
+    width: 0.6rem;
+    height: 0.6rem;
+    border-radius: 50%;
+}
+
+.roster-toast.ok .dot {
+    background: var(--status-pass);
+}
+
+.roster-toast.err .dot {
+    background: var(--status-fail);
+}
+
+.roster-toast .undo {
+    margin: 0 0 0 auto;
+    padding: 0.15rem 0.6rem;
+    font-size: 0.8rem;
+    white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .roster-toast {
+        transition: opacity 0.2s linear;
+        transform: none;
+    }
 }

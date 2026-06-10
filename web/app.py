@@ -165,7 +165,10 @@ def roster_upsert():
     except ValueError as e:
         # File is valid YAML but not a mapping — refuse rather than clobber.
         return jsonify({"error": str(e)}), 400
-    return jsonify({"user_id": uid, "player": player, "character": character})
+    # user_id as a string: Discord snowflakes exceed JS's safe-integer range,
+    # so a JSON number would lose precision on the client (Discord's own API
+    # returns snowflakes as strings for the same reason).
+    return jsonify({"user_id": str(uid), "player": player, "character": character})
 
 
 @app.route("/roster/entry/delete", methods=["POST"])
@@ -179,7 +182,7 @@ def roster_delete():
         deleted = player_map_store.delete(roster_path(), uid)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
-    return jsonify({"user_id": uid, "deleted": deleted})
+    return jsonify({"user_id": str(uid), "deleted": deleted})
 
 
 if __name__ == "__main__":

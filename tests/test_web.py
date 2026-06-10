@@ -446,10 +446,25 @@ def test_roster_upsert_persists(client, roster_file):
         headers=_XHR,
     )
     assert r.status_code == 200
-    assert r.get_json() == {"user_id": 7, "player": "Ed", "character": "Volo"}
+    # user_id returned as a string (snowflakes exceed JS safe-int range)
+    assert r.get_json() == {"user_id": "7", "player": "Ed", "character": "Volo"}
     assert yaml.safe_load(roster_file.read_text()) == {
         7: {"player": "Ed", "character": "Volo"}
     }
+
+
+def test_roster_upsert_returns_snowflake_id_without_precision_loss(client, roster_file):
+    # A real 19-digit Discord id must survive the round trip exactly — it
+    # would lose precision as a JSON number, hence the string contract.
+    sid = "421900550829768715"
+    r = client.post(
+        "/roster/entry",
+        json={"user_id": sid, "player": "Ed", "character": "Cody"},
+        headers=_XHR,
+    )
+    assert r.status_code == 200
+    assert r.get_json()["user_id"] == sid
+    assert int(sid) in yaml.safe_load(roster_file.read_text())
 
 
 def test_roster_upsert_invalid_user_id_400(client, roster_file):
@@ -500,7 +515,7 @@ def test_roster_delete_removes_entry(client, roster_file):
     )
     r = client.post("/roster/entry/delete", json={"user_id": 7}, headers=_XHR)
     assert r.status_code == 200
-    assert r.get_json() == {"user_id": 7, "deleted": True}
+    assert r.get_json() == {"user_id": "7", "deleted": True}
     assert yaml.safe_load(roster_file.read_text()) == {
         9: {"player": "Stay", "character": "Stay"}
     }

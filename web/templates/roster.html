@@ -7,8 +7,6 @@
     <code>player_map.yml</code> and take effect the next time the bot
     starts — the running session keeps its current names.
 </p>
-<p id="roster-msg" role="status" aria-live="polite" style="display:none"></p>
-
 {% if roster.invalid %}
 <article>
     <p class="check-fail">
@@ -69,25 +67,54 @@
     </table>
 
     <h4>Add an entry by ID</h4>
-    <div class="bot-controls">
-        <input type="text" id="add-id" placeholder="Discord user ID" inputmode="numeric" style="width:14rem">
-        <input type="text" id="add-player" placeholder="real name">
-        <input type="text" id="add-character" placeholder="character">
+    <div class="roster-add-row">
+        <input type="text" id="add-id" placeholder="Discord user ID" inputmode="numeric" aria-label="Discord user ID">
+        <input type="text" id="add-player" placeholder="real name" aria-label="Player name">
+        <input type="text" id="add-character" placeholder="character" aria-label="Character name">
         <button type="button" id="add-entry" {% if roster.invalid %}disabled{% endif %}>Add</button>
     </div>
 </article>
+
+<div id="toast-root" role="status" aria-live="polite"></div>
 {% endblock %}
 
 {% block scripts %}
 <script>
 const UPSERT_URL = "{{ url_for('roster_upsert') }}";
 const DELETE_URL = "{{ url_for('roster_delete') }}";
-const msg = document.getElementById("roster-msg");
 
-function showMsg(text, ok) {
-    msg.textContent = text;
-    msg.style.display = "";
-    msg.className = ok ? "check-pass" : "check-fail";
+// Toast feedback near the corner so a confirmation is visible wherever the
+// action happened on a long roster. `action` (optional) renders a button,
+// e.g. Undo after a delete. Built with textContent so names/errors can't
+// be parsed as HTML.
+let toastTimer = null;
+function toast(message, kind, action) {
+    const root = document.getElementById("toast-root");
+    root.replaceChildren();
+    const el = document.createElement("div");
+    el.className = "roster-toast " + (kind === "ok" ? "ok" : "err");
+    const dot = document.createElement("span");
+    dot.className = "dot";
+    el.appendChild(dot);
+    const text = document.createElement("span");
+    text.textContent = message;
+    el.appendChild(text);
+    if (action) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "undo secondary outline";
+        btn.textContent = action.label;
+        btn.addEventListener("click", () => { hideToast(el); action.onClick(); });
+        el.appendChild(btn);
+    }
+    root.appendChild(el);
+    requestAnimationFrame(() => el.classList.add("show"));
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => hideToast(el), action ? 6000 : 3500);
+}
+function hideToast(el) {
+    el.classList.remove("show");
+    setTimeout(() => el.remove(), 200);
 }
 
 async function csrfPost(url, payload) {
@@ -107,18 +134,37 @@ async function csrfPost(url, payload) {
 // Upsert one entry; returns the saved {user_id, player, character} or null.
 async function upsert(userId, player, character) {
     if (!player || !character) {
-        showMsg("Player and character are both required.", false);
+        toast("Player and character are both required.", "err");
         return null;
     }
     const { ok, data } = await csrfPost(UPSERT_URL, {
         user_id: userId, player: player, character: character,
     });
     if (!ok) {
-        showMsg(data.error || "Save failed.", false);
+        toast(data.error || "Save failed.", "err");
         return null;
     }
-    showMsg("Saved " + data.player + " (" + data.character + ") for " + data.user_id + ".", true);
+    toast("Saved " + data.player + " (" + data.character + ").", "ok");
     return data;
+}
+
+// Two-step delete: first click arms the button (label -> "Confirm?") for a
+// few seconds; a second click within the window actually deletes. Guards a
+// one-click, irreversible drop from player_map.yml.
+function armDelete(btn) {
+    if (btn.dataset.armed === "1") return true;
+    btn.dataset.armed = "1";
+    btn._orig = btn.textContent;
+    btn.textContent = "Confirm?";
+    btn.classList.add("confirming");
+    btn._disarm = setTimeout(() => disarmDelete(btn), 3000);
+    return false;
+}
+function disarmDelete(btn) {
+    clearTimeout(btn._disarm);
+    btn.dataset.armed = "0";
+    btn.classList.remove("confirming");
+    if (btn._orig) btn.textContent = btn._orig;
 }
 
 // Find-or-create the roster-table row for userId, set its values, return it.
@@ -186,11 +232,41 @@ document.addEventListener("click", async (ev) => {
         );
     } else if (t.classList.contains("re-delete")) {
         const row = t.closest("tr");
-        const { ok, data } = await csrfPost(DELETE_URL, { user_id: row.dataset.userId });
-        if (!ok) { showMsg(data.error || "Delete failed.", false); return; }
-        showMsg("Deleted " + row.dataset.userId + ".", true);
+        if (!armDelete(t)) return;  // first click arms; wait for the second
+        disarmDelete(t);
+        const uid = row.dataset.userId;
+        // Capture current values so the delete can be undone (re-upserted).
+        const player = row.querySelector(".re-player").value.trim();
+        const character = row.querySelector(".re-character").value.trim();
+        const { ok, data } = await csrfPost(DELETE_URL, { user_id: uid });
+        if (!ok) { toast(data.error || "Delete failed.", "err"); return; }
         row.remove();
         updateCount();
+        toast("Deleted " + uid + ".", "ok", {
+            label: "Undo",
+            onClick: async () => {
+                const re = await upsert(uid, player || "Unknown", character || "Unknown");
+                if (re) ensureRosterRow(re.user_id, re.player, re.character);
+            },
+        });
+    }
+});
+
+// Enter-to-submit so repeated roster edits don't require a mouse trip to
+// the button. Routes to the right action for the row the input lives in.
+document.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Enter") return;
+    const el = ev.target;
+    if (el.tagName !== "INPUT") return;
+    if (el.classList.contains("re-player") || el.classList.contains("re-character")) {
+        ev.preventDefault();
+        el.closest("tr").querySelector(".re-save").click();
+    } else if (el.classList.contains("ru-player") || el.classList.contains("ru-character")) {
+        ev.preventDefault();
+        el.closest("tr").querySelector(".ru-add").click();
+    } else if (el.closest(".roster-add-row")) {
+        ev.preventDefault();
+        document.getElementById("add-entry").click();
     }
 });
 

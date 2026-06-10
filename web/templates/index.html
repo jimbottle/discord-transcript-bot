@@ -28,12 +28,6 @@
     <p id="external-note" class="search-meta" style="{% if not bot_status.external %}display:none{% endif %}">
         Launched outside the dashboard (e.g. <code>make start</code>) — start/stop are disabled here; manage it from where it was started.
     </p>
-    <p id="health-summary" class="search-meta" style="{% if not bot_status.checks %}display:none{% endif %}">
-        {% if bot_status.checks %}
-        {% set ok = bot_status.checks.values() | selectattr('ok') | list | length %}
-        {{ ok }}/{{ bot_status.checks | length }} checks OK
-        {% endif %}
-    </p>
     {% if bot_state and bot_status.status not in ('stopped', 'crashed') %}
     {# Authoritative runtime state the bot itself wrote — not the
        file-freshness guess used by the Current Session card. One line
@@ -50,16 +44,24 @@
         {% if uptime %} &middot; Uptime: {{ uptime }}{% endif %}
     </p>
     {% endif %}
-    <ul id="health-checks" class="health-check-list" style="{% if not bot_status.checks %}display:none{% endif %}">
-        {% if bot_status.checks %}
-        {% for name, check in bot_status.checks.items() %}
-        <li class="health-check {% if check.ok %}check-pass{% elif check.critical %}check-fail{% else %}check-warn{% endif %}">
-            {% if check.ok %}&#10003;{% elif check.critical %}&#10007;{% else %}&#9888;{% endif %}
-            <strong>{{ name }}</strong>: {{ check.message }}
-        </li>
-        {% endfor %}
-        {% endif %}
-    </ul>
+    {# Collapse the per-check list behind its summary so an all-green bot
+       doesn't push Current Session below the fold. Opens automatically
+       when something isn't OK (where the detail actually matters). #}
+    {% set okc = (bot_status.checks.values() | selectattr('ok') | list | length) if bot_status.checks else 0 %}
+    {% set total = bot_status.checks | length if bot_status.checks else 0 %}
+    <details id="health-details" {% if total and okc < total %}open{% endif %} style="{% if not bot_status.checks %}display:none{% endif %}">
+        <summary id="health-summary" class="search-meta">{% if bot_status.checks %}{{ okc }}/{{ total }} checks OK{% endif %}</summary>
+        <ul id="health-checks" class="health-check-list">
+            {% if bot_status.checks %}
+            {% for name, check in bot_status.checks.items() %}
+            <li class="health-check {% if check.ok %}check-pass{% elif check.critical %}check-fail{% else %}check-warn{% endif %}">
+                {% if check.ok %}&#10003;{% elif check.critical %}&#10007;{% else %}&#9888;{% endif %}
+                <strong>{{ name }}</strong>: {{ check.message }}
+            </li>
+            {% endfor %}
+            {% endif %}
+        </ul>
+    </details>
     {% if bot_status.error %}
     <details open>
         <summary>Error Output</summary>
@@ -159,6 +161,10 @@ function renderStatus(data) {
     // be parsed as HTML.
     const checks = data.checks || {};
     const names = Object.keys(checks);
+    // Show/hide the whole collapsible wrapper with the check data; the
+    // user's manual open/closed state is left untouched between polls.
+    const details = document.getElementById("health-details");
+    if (details) details.style.display = names.length ? "" : "none";
     while (checkList.firstChild) checkList.removeChild(checkList.firstChild);
     if (names.length > 0) {
         for (const name of names) {
