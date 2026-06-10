@@ -28,6 +28,17 @@ use DEFAULT_CONFIGS, which target the turbo-vs-large-v3 and
 beam/batched questions:
     python scripts/ab_transcribe.py --manifest clips.jsonl --configs cfg.json
 
+PROPER-NOUN BIASING CAVEAT
+--------------------------
+The bot biases ``initial_prompt`` per session by appending the roster's
+character/player names (``whisper_sink._build_initial_prompt``,
+discord-transcript-bot-cul) — a deliberate accuracy lever for names. This
+harness applies each Config's static ``initial_prompt`` (default: the base
+hint only), so default-config WER UNDER-represents the bot's real accuracy
+on proper nouns. To measure like-for-like, set a roster-augmented
+``initial_prompt`` on the config(s) you score (it's a per-Config field,
+overridable via --configs JSON).
+
 EXTENDING (discord-transcript-bot-1s7 / -mni)
 ---------------------------------------------
 Each Config has a ``backend`` field (default "faster-whisper"). Add an MLX or
@@ -63,6 +74,7 @@ class Config:
     vad_parameters: dict = field(
         default_factory=lambda: dict(min_silence_duration_ms=150, threshold=0.8)
     )
+    no_speech_threshold: float = 0.6
     language: str = "en"
     initial_prompt: str = "You are writing the transcriptions for a D&D game."
     backend: str = "faster-whisper"
@@ -85,20 +97,27 @@ def wav_duration_seconds(path):
 
 def load_manifest(args):
     """Return a list of (audio_path, reference_text) pairs from either the
-    --manifest JSONL or the single --audio/--reference pair."""
+    --manifest JSONL or the single --audio/--reference pair.
+
+    Relative ``audio`` / ``reference_file`` paths in a manifest resolve
+    against the MANIFEST's directory, not the cwd, so the harness runs from
+    anywhere (the docstring's "clips/gus_01.wav" works as written).
+    Absolute paths are used as-is.
+    """
     clips = []
     if args.manifest:
+        base = Path(args.manifest).resolve().parent
         for lineno, line in enumerate(Path(args.manifest).read_text().splitlines(), 1):
             line = line.strip()
             if not line:
                 continue
             obj = json.loads(line)
-            audio = obj["audio"]
+            audio = base / obj["audio"]
             if "reference_file" in obj:
-                ref = Path(obj["reference_file"]).read_text()
+                ref = (base / obj["reference_file"]).read_text()
             else:
                 ref = obj["reference"]
-            clips.append((audio, ref))
+            clips.append((str(audio), ref))
         if not clips:
             raise SystemExit(f"Manifest {args.manifest} had no clips")
     else:
@@ -139,7 +158,7 @@ def _transcribe_clip(cfg, audio_path):
             f"backend '{cfg.backend}' not implemented yet — add it here "
             "(discord-transcript-bot-1s7 / -mni)"
         )
-    batched = cfg.batch_size and cfg.batch_size > 0
+    batched = cfg.batch_size > 0
     model = _get_faster_whisper(cfg.model, cfg.compute_type, batched)
     kwargs = dict(
         language=cfg.language,
@@ -147,7 +166,7 @@ def _transcribe_clip(cfg, audio_path):
         best_of=cfg.best_of,
         vad_filter=cfg.vad_filter,
         vad_parameters=cfg.vad_parameters,
-        no_speech_threshold=0.6,
+        no_speech_threshold=cfg.no_speech_threshold,
         initial_prompt=cfg.initial_prompt,
     )
     if batched:

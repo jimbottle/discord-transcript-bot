@@ -54,7 +54,56 @@ def test_load_manifest_reads_jsonl_inline_and_file_refs(tmp_path):
 
     args = SimpleNamespace(manifest=str(manifest), audio=None, reference=None)
     clips = ab.load_manifest(args)
-    assert clips == [("a.wav", "inline ref"), ("b.wav", "from the file")]
+    base = manifest.resolve().parent
+    # audio paths resolve against the manifest dir; an absolute reference_file
+    # is honored as-is.
+    assert clips == [
+        (str(base / "a.wav"), "inline ref"),
+        (str(base / "b.wav"), "from the file"),
+    ]
+
+
+def test_load_manifest_resolves_relative_paths_against_manifest_dir(
+    tmp_path, monkeypatch
+):
+    """roborev #2011: relative audio/reference_file must resolve against the
+    manifest's directory, not the cwd, so the harness runs from anywhere."""
+    clipdir = tmp_path / "session"
+    clipdir.mkdir()
+    (clipdir / "gus.txt").write_text("hello there")
+    manifest = clipdir / "clips.jsonl"
+    manifest.write_text(
+        json.dumps({"audio": "gus.wav", "reference_file": "gus.txt"}) + "\n"
+    )
+
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    monkeypatch.chdir(other)  # run from a different cwd
+
+    clips = ab.load_manifest(
+        SimpleNamespace(manifest=str(manifest), audio=None, reference=None)
+    )
+    audio, ref = clips[0]
+    assert ref == "hello there"  # reference_file found despite the cwd
+    assert Path(audio) == clipdir.resolve() / "gus.wav"
+
+
+def test_no_speech_threshold_is_config_field_and_passed(monkeypatch):
+    """roborev #2011: no_speech_threshold is a swept Config field, not a
+    hardcoded transcribe kwarg."""
+    assert ab.Config(name="x").no_speech_threshold == 0.6
+
+    captured = {}
+
+    class _FakeModel:
+        def transcribe(self, audio, **kwargs):
+            captured.update(kwargs)
+            return ([], None)
+
+    monkeypatch.setattr(ab, "_get_faster_whisper", lambda *a, **k: _FakeModel())
+    cfg = ab.Config(name="x", no_speech_threshold=0.42, batch_size=0)
+    ab._transcribe_clip(cfg, "clip.wav")
+    assert captured["no_speech_threshold"] == 0.42
 
 
 def test_run_config_computes_corpus_wer_and_rtf(tmp_path, monkeypatch):
