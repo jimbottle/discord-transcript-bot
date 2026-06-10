@@ -15,7 +15,7 @@ import speech_recognition as sr
 import torch
 from discord.opus import Decoder
 from discord.sinks.core import Filters, Sink, default_filters
-from faster_whisper import WhisperModel
+from faster_whisper import BatchedInferencePipeline, WhisperModel
 from openai import OpenAI
 
 WHISPER_MODEL = "large-v3"
@@ -27,6 +27,12 @@ WHISPER_LANGUAGE = "en"
 # audio (discord-transcript-bot-61z). discord-transcript-bot-std.
 WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "5"))
 WHISPER_BEST_OF = int(os.getenv("WHISPER_BEST_OF", "5"))
+
+# BatchedInferencePipeline batches a single utterance's VAD-segmented chunks
+# for extra CPU throughput at no precision change; biggest win on the longer
+# (force-flushed) segments. Higher batch size = higher peak RAM.
+# discord-transcript-bot-ob3.
+WHISPER_BATCH_SIZE = int(os.getenv("WHISPER_BATCH_SIZE", "8"))
 
 # Whisper's initial_prompt biases spelling/vocabulary. It is end-weighted and
 # capped near 224 tokens, so we keep this base hint short and append the
@@ -55,6 +61,11 @@ WHISPER__PRECISION = "int8" if DEVICE == "cpu" else "float16"
 audio_model = WhisperModel(
     WHISPER_MODEL, device=DEVICE, compute_type=WHISPER__PRECISION
 )
+
+# CPU-fallback throughput wrapper around the same model (no accuracy change).
+# The Apple-Silicon MLX backend (discord-transcript-bot-d8g) will replace this
+# path with its own engine rather than batch through it.
+batched_model = BatchedInferencePipeline(audio_model)
 
 
 class Speaker:
@@ -275,13 +286,15 @@ class WhisperSink(Sink):
                 logger.info(f"OpenAI Transcription: {openai_transcription.text}")
                 return openai_transcription.text
             else:
-                # The whisper model
+                # The whisper model (batched pipeline for CPU throughput;
+                # same model + precision, so no accuracy change).
                 temp_file.seek(0)
-                segments, info = audio_model.transcribe(
+                segments, info = batched_model.transcribe(
                     temp_file,
                     language=WHISPER_LANGUAGE,
                     beam_size=WHISPER_BEAM_SIZE,
                     best_of=WHISPER_BEST_OF,
+                    batch_size=WHISPER_BATCH_SIZE,
                     vad_filter=True,
                     vad_parameters=dict(min_silence_duration_ms=150, threshold=0.8),
                     no_speech_threshold=0.6,

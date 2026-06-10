@@ -344,12 +344,16 @@ def test_initial_prompt_respects_char_budget(tmp_path, monkeypatch):
     sink.close()
 
 
-# ── Decode params reach the model (discord-transcript-bot-std) ──
+# ── Decode params + batched CPU inference reach the model
+#    (discord-transcript-bot-std / discord-transcript-bot-ob3) ──
 
 
-def test_transcribe_audio_passes_configured_decode_params(tmp_path, monkeypatch):
-    """beam_size/best_of are read from the module-level config (not
-    hardcoded) and the biased initial_prompt is forwarded to the model."""
+def test_transcribe_audio_passes_configured_params_via_batched_pipeline(
+    tmp_path, monkeypatch
+):
+    """beam_size/best_of/batch_size are read from module-level config (not
+    hardcoded), the local path goes through the BatchedInferencePipeline,
+    and the biased initial_prompt is forwarded."""
     sink = _make_sink(
         tmp_path, monkeypatch, player_map={1: {"player": "Sam", "character": "Gus"}}
     )
@@ -358,19 +362,21 @@ def test_transcribe_audio_passes_configured_decode_params(tmp_path, monkeypatch)
     class _Seg:
         text = "hello there"
 
-    class _FakeModel:
+    class _FakeBatched:
         def transcribe(self, audio, **kwargs):
             captured.update(kwargs)
             return ([_Seg()], MagicMock())
 
-    monkeypatch.setattr(ws, "audio_model", _FakeModel())
+    monkeypatch.setattr(ws, "batched_model", _FakeBatched())
     monkeypatch.setattr(ws, "WHISPER_BEAM_SIZE", 7)
     monkeypatch.setattr(ws, "WHISPER_BEST_OF", 9)
+    monkeypatch.setattr(ws, "WHISPER_BATCH_SIZE", 4)
 
     out = sink.transcribe_audio(_wav_bytesio(0.5))
     assert out == "hello there"
     assert captured["beam_size"] == 7
     assert captured["best_of"] == 9
+    assert captured["batch_size"] == 4
     assert captured["initial_prompt"] == sink.initial_prompt
     sink.close()
 
