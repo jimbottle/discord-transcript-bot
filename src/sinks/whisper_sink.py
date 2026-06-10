@@ -104,12 +104,13 @@ class WhisperSink(Sink):
         self.player_map = player_map
 
         # Ordered-commit state. Transcriptions run in parallel on the
-        # executor, but their results must be written in the order the
-        # segments were *submitted* — a chunk that finishes early waits
-        # behind earlier, still-running chunks so the transcript never
-        # posts out of chronological order. `_submit_seq` is assigned only
-        # on the (single) insert_voice thread; `_next_commit` and
-        # `_pending_results` are touched only under `_commit_lock`.
+        # executor, but their results are written in the order the segments
+        # were *submitted* — a chunk that finishes early waits behind
+        # earlier, still-running chunks. This is submission order, not
+        # strict cross-speaker chronology (see _record_result for the
+        # caveat). `_submit_seq` is assigned only on the (single)
+        # insert_voice thread; `_next_commit` and `_pending_results` are
+        # touched only under `_commit_lock`.
         self._submit_seq = 0
         self._next_commit = 0
         self._pending_results = {}
@@ -353,12 +354,23 @@ class WhisperSink(Sink):
                     self.speakers.remove(speaker)
                     seq = self._submit_seq
                     self._submit_seq += 1
-                    future = self.executor.submit(self.transcribe, speaker)
-                    future.add_done_callback(
-                        lambda fut, s=seq, spk=speaker: self._on_transcribed(
-                            s, spk, fut
+                    try:
+                        future = self.executor.submit(self.transcribe, speaker)
+                        future.add_done_callback(
+                            lambda fut, s=seq, spk=speaker: self._on_transcribed(
+                                s, spk, fut
+                            )
                         )
-                    )
+                    except Exception as e:
+                        # submit/callback registration failed after seq was
+                        # allocated (e.g. a shut-down executor). No future will
+                        # ever fire _on_transcribed(seq, …), so commit this seq
+                        # empty now — otherwise _next_commit wedges on it
+                        # permanently and every later result stops committing.
+                        logger.error(
+                            f"Failed to submit transcription for {speaker.user}: {e}"
+                        )
+                        self._record_result(seq, speaker, "")
 
                 # Idle nap so this loop doesn't busy-spin when idle.
                 time.sleep(self.IDLE_SLEEP_S)
@@ -367,11 +379,7 @@ class WhisperSink(Sink):
 
     def _on_transcribed(self, seq, speaker, future):
         """Done-callback for a detached transcription future. Runs on an
-        executor thread. Stores the result under its submission sequence and
-        then commits every result whose turn has come, IN ORDER — so a
-        segment that finished early waits behind earlier, still-running
-        segments and the transcript never posts out of order. A failed
-        future still advances the sequence (committed as empty text) so one
+        executor thread. A failed future is committed as empty text so one
         bad segment can't wedge the commit pointer forever.
 
         Must not touch self.speakers (owned by the insert_voice thread); it
@@ -382,7 +390,25 @@ class WhisperSink(Sink):
         except Exception as e:
             logger.warning(f"Error in transcription future for {speaker.user}: {e}")
             transcription = ""
+        self._record_result(seq, speaker, transcription)
 
+    def _record_result(self, seq, speaker, transcription):
+        """Store a result under its submission sequence, then commit every
+        result whose turn has come IN SUBMISSION ORDER — a segment that
+        finished early waits behind earlier, still-running segments.
+
+        Note: this is submission order, not strict cross-speaker
+        chronology. A long speaker force-flushed by MAX_SEGMENT_S can be
+        submitted after a shorter, later-but-already-silent speaker, so the
+        per-session .txt line order can differ slightly from true start
+        time. The embedded `begin`/`date` fields in each JSON record remain
+        authoritative — consumers needing exact chronology should sort by
+        those rather than relying on file line order.
+
+        Called by the done-callback and by the submit-failure path (so an
+        allocated seq that never produced a future is still committed-empty
+        and can't wedge the pointer).
+        """
         with self._commit_lock:
             self._pending_results[seq] = (speaker, transcription)
             while self._next_commit in self._pending_results:

@@ -313,6 +313,40 @@ def test_failed_future_still_advances_commit_pointer(tmp_path, monkeypatch):
     sink.close()
 
 
+def test_submit_failure_does_not_wedge_commit_pointer(tmp_path, monkeypatch):
+    """If executor.submit raises after a seq is allocated, that seq must be
+    committed empty so _next_commit doesn't wedge — otherwise every later
+    result silently stops posting (total commit loss)."""
+    sink = _make_sink(tmp_path, monkeypatch)
+    sink.SILENCE_GAP_S = 1000
+    sink.MAX_SEGMENT_S = 0.0
+    written = []
+    monkeypatch.setattr(
+        sink,
+        "write_transcription_log",
+        lambda spk, text: written.append((spk.user, text)),
+    )
+
+    class _BoomExecutor:
+        def submit(self, *a, **k):
+            raise RuntimeError("executor is shut down")
+
+    monkeypatch.setattr(sink, "executor", _BoomExecutor())
+
+    t = time.time()
+    sink.voice_queue.put_nowait([9, b"aa", t])
+    sink.voice_queue.put_nowait([9, b"bb", t])  # new_bytes > 1
+
+    _run_insert_voice(sink, until=lambda: bool(written))
+    assert written == [(9, "")], "a failed submit must commit its seq empty"
+    assert sink._next_commit == 1, "commit pointer must advance past the failed seq"
+
+    # A later normal result still commits — the pointer was not wedged.
+    sink._on_transcribed(1, _spk(1), _done_future("ok"))
+    assert written == [(9, ""), (1, "ok")]
+    sink.close()
+
+
 def _run_insert_voice(sink, until, timeout=2.0):
     """Run insert_voice in a thread until `until()` is true (or timeout),
     then stop it and join."""
