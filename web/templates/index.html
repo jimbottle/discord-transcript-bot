@@ -116,8 +116,10 @@ const STOP_URL = "{{ url_for('bot_stop') }}";
 // Tracks whether the last poll saw a failing/warning check, so a fresh
 // failure can auto-open the collapsed health panel on its rising edge
 // without re-opening (and overriding a manual collapse) every poll while
-// the failure persists.
-let healthWasDegraded = false;
+// the failure persists. Seeded from the server-rendered state: a failure
+// already present at page load is NOT a rising edge, so the first poll
+// must not re-open a panel the user collapsed in those first seconds.
+let healthWasDegraded = {{ 'true' if (bot_status.checks and (bot_status.checks.values() | selectattr('ok') | list | length) < (bot_status.checks | length)) else 'false' }};
 
 function renderStatus(data) {
     const badge = document.getElementById("status-badge");
