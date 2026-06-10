@@ -11,7 +11,7 @@ import wave
 from concurrent.futures import Future
 from unittest.mock import MagicMock
 
-from src.sinks.whisper_sink import Speaker, WhisperSink
+from src.sinks.whisper_sink import DEFAULT_INITIAL_PROMPT, Speaker, WhisperSink
 
 
 def _done_future(value=None, exc=None):
@@ -25,7 +25,7 @@ def _done_future(value=None, exc=None):
     return f
 
 
-def _make_sink(tmp_path, monkeypatch):
+def _make_sink(tmp_path, monkeypatch, player_map=None):
     """Construct a WhisperSink with cwd pointed at a temp dir so the
     transcripts/ side effect lands there."""
     monkeypatch.chdir(tmp_path)
@@ -35,6 +35,7 @@ def _make_sink(tmp_path, monkeypatch):
         data_length=50000,
         max_speakers=10,
         transcriber_type="local",
+        player_map=player_map or {},
     )
     return sink
 
@@ -258,6 +259,69 @@ def test_concurrent_lazy_open_only_opens_once(tmp_path, monkeypatch):
     # All threads got the same handle (the one stored on the sink).
     assert all(h is sink._session_fh for h in handles)
     assert len({id(h) for h in handles}) == 1
+    sink.close()
+
+
+# ── Roster -> initial_prompt proper-noun biasing (discord-transcript-bot-cul) ──
+
+
+def test_initial_prompt_includes_roster_names(tmp_path, monkeypatch):
+    pm = {
+        1: {"player": "Reiko Tanaka", "character": "Gus"},
+        2: {"player": "Steve Calderon", "character": "Johan"},
+    }
+    sink = _make_sink(tmp_path, monkeypatch, player_map=pm)
+    p = sink.initial_prompt
+    assert p.startswith(DEFAULT_INITIAL_PROMPT)
+    for name in ("Gus", "Johan", "Reiko Tanaka", "Steve Calderon"):
+        assert name in p, f"{name} should be biased into the prompt"
+    # Character names come before player names (spoken most).
+    assert p.index("Gus") < p.index("Reiko Tanaka")
+    sink.close()
+
+
+def test_initial_prompt_defaults_without_roster(tmp_path, monkeypatch):
+    sink = _make_sink(tmp_path, monkeypatch, player_map={})
+    assert sink.initial_prompt == DEFAULT_INITIAL_PROMPT
+    sink.close()
+
+
+def test_initial_prompt_dedupes_case_insensitively(tmp_path, monkeypatch):
+    pm = {
+        1: {"player": "Sam", "character": "Gus"},
+        2: {"player": "sam", "character": "Gus"},  # both dup of entry 1
+    }
+    sink = _make_sink(tmp_path, monkeypatch, player_map=pm)
+    assert sink.initial_prompt.count("Gus") == 1
+    assert sink.initial_prompt.lower().count("sam") == 1
+    sink.close()
+
+
+def test_initial_prompt_skips_malformed_and_empty_entries(tmp_path, monkeypatch):
+    pm = {
+        1: "not-a-dict",
+        2: {"player": "", "character": None},
+        3: {"character": "Noah"},
+    }
+    sink = _make_sink(tmp_path, monkeypatch, player_map=pm)
+    assert "Noah" in sink.initial_prompt
+    sink.close()
+
+
+def test_initial_prompt_respects_char_budget(tmp_path, monkeypatch):
+    pm = {
+        i: {
+            "player": f"PlayerNameNumber{i:03d}",
+            "character": f"CharacterNameNumber{i:03d}",
+        }
+        for i in range(200)
+    }
+    sink = _make_sink(tmp_path, monkeypatch, player_map=pm)
+    assert len(sink.initial_prompt) <= sink.MAX_INITIAL_PROMPT_CHARS
+    assert sink.initial_prompt.startswith(DEFAULT_INITIAL_PROMPT)
+    # Truncated whole-name: ends cleanly with a period, no dangling comma.
+    assert sink.initial_prompt.endswith(".")
+    assert not sink.initial_prompt.rstrip(".").endswith(",")
     sink.close()
 
 

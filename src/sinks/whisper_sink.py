@@ -21,6 +21,12 @@ from openai import OpenAI
 WHISPER_MODEL = "large-v3"
 WHISPER_LANGUAGE = "en"
 
+# Whisper's initial_prompt biases spelling/vocabulary. It is end-weighted and
+# capped near 224 tokens, so we keep this base hint short and append the
+# session's roster proper nouns (character/player names) AFTER it — see
+# WhisperSink._build_initial_prompt. discord-transcript-bot-cul.
+DEFAULT_INITIAL_PROMPT = "You are writing the transcriptions for a D&D game."
+
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Set the model to evaluation mode (important for inference)
@@ -102,6 +108,9 @@ class WhisperSink(Sink):
         self.voice_queue = Queue()
         self.executor = ThreadPoolExecutor(max_workers=8)  # TODO: Adjust this
         self.player_map = player_map
+        # Biased Whisper prompt built once from the roster's proper nouns;
+        # player_map is fixed for this sink's lifetime. discord-transcript-bot-cul.
+        self.initial_prompt = self._build_initial_prompt()
 
         # Ordered-commit state. Transcriptions run in parallel on the
         # executor, but their results are written in the order the segments
@@ -197,6 +206,49 @@ class WhisperSink(Sink):
             duration = frames / float(frame_rate)
         return duration
 
+    # Conservative character budget for initial_prompt. Whisper's prompt is
+    # ~224-token capped; at ~4 chars/token that's ~900 chars, so this leaves
+    # generous headroom for the base hint plus as many roster names as fit.
+    MAX_INITIAL_PROMPT_CHARS = 600
+
+    def _build_initial_prompt(self):
+        """Build a Whisper initial_prompt that biases spelling toward this
+        session's proper nouns — the character and player names from the
+        roster — so names like 'Arasaka' or a character 'Johan' transcribe
+        correctly instead of as common-word homophones. Falls back to the
+        generic D&D hint when there's no roster. Length-bounded because the
+        prompt is end-weighted and ~224-token capped; names are appended
+        after the base hint (the high-value position) and truncated whole.
+        """
+        names = []
+        seen = set()
+        for entry in (self.player_map or {}).values():
+            if not isinstance(entry, dict):
+                continue
+            # Character first (spoken most), then player name; both deduped
+            # case-insensitively.
+            for key in ("character", "player"):
+                name = (entry.get(key) or "").strip()
+                if name and name.lower() not in seen:
+                    seen.add(name.lower())
+                    names.append(name)
+
+        if not names:
+            return DEFAULT_INITIAL_PROMPT
+
+        prefix = DEFAULT_INITIAL_PROMPT + " Names: "
+        kept = []
+        for name in names:
+            candidate = ", ".join(kept + [name])
+            # +1 for the trailing period.
+            if len(prefix) + len(candidate) + 1 > self.MAX_INITIAL_PROMPT_CHARS:
+                break
+            kept.append(name)
+
+        if not kept:
+            return DEFAULT_INITIAL_PROMPT
+        return prefix + ", ".join(kept) + "."
+
     def transcribe_audio(self, temp_file):
         try:
             # Ensure that the audio is long enough to transcribe. If not, return an empty string
@@ -209,6 +261,7 @@ class WhisperSink(Sink):
                     file=("foobar.wav", temp_file),
                     model="whisper-1",
                     language=WHISPER_LANGUAGE,
+                    prompt=self.initial_prompt,
                 )
                 logger.info(f"OpenAI Transcription: {openai_transcription.text}")
                 return openai_transcription.text
@@ -223,7 +276,7 @@ class WhisperSink(Sink):
                     vad_filter=True,
                     vad_parameters=dict(min_silence_duration_ms=150, threshold=0.8),
                     no_speech_threshold=0.6,
-                    initial_prompt="You are writing the transcriptions for a D&D game.",
+                    initial_prompt=self.initial_prompt,
                 )
 
                 segments = list(segments)
