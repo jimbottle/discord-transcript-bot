@@ -142,6 +142,57 @@ def test_mlx_backend_raises_when_mlx_not_installed(monkeypatch):
         pass
 
 
+def test_mlx_backend_forwards_params_and_normalizes():
+    """MLX transcribe forwards the decode params (incl.
+    condition_on_previous_text=False) + the repo + converted float32 samples to
+    mlx_whisper.transcribe, and wraps the result via _normalize_mlx. Built via
+    __new__ with a fake _mlx so no model loads — guards the MLX call signature,
+    the likeliest place an upstream API change would silently break."""
+    captured = {}
+
+    def fake_mlx_transcribe(samples, **kwargs):
+        captured["samples"] = samples
+        captured.update(kwargs)
+        return {
+            "segments": [
+                {
+                    "text": "hi",
+                    "no_speech_prob": 0.1,
+                    "avg_logprob": -0.2,
+                    "compression_ratio": 1.1,
+                }
+            ]
+        }
+
+    be = object.__new__(mlx_backend.MlxWhisperBackend)
+    be.model_id = "mlx-community/whisper-large-v3-mlx"
+    be._mlx = SimpleNamespace(transcribe=fake_mlx_transcribe)
+
+    result = be.transcribe(
+        _wav_bytesio(0.2),
+        language="en",
+        beam_size=7,
+        best_of=9,
+        initial_prompt="prompt here",
+        vad_filter=False,  # MLX ignores VAD; must not be forwarded / must not error
+        vad_parameters=None,
+        no_speech_threshold=0.6,
+    )
+
+    assert captured["path_or_hf_repo"] == "mlx-community/whisper-large-v3-mlx"
+    assert captured["language"] == "en"
+    assert captured["beam_size"] == 7
+    assert captured["best_of"] == 9
+    assert captured["initial_prompt"] == "prompt here"
+    assert captured["no_speech_threshold"] == 0.6
+    assert captured["condition_on_previous_text"] is False
+    assert isinstance(captured["samples"], np.ndarray)
+    assert captured["samples"].dtype == np.float32
+    assert isinstance(result, TranscribeResult)
+    assert result.segments[0].text == "hi"
+    assert result.segments[0].no_speech_prob == 0.1
+
+
 # ── faster-whisper backend forwards decode params (incl. batch_size) ───────
 
 

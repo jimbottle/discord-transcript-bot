@@ -17,6 +17,7 @@ faster-whisper-CPU, the bot's original behavior.
 import logging
 import os
 import platform
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -35,13 +36,20 @@ _MLX_REPO_BY_MODEL = {
 }
 
 _backend = None
+_backend_lock = threading.Lock()
 
 
 def get_backend():
-    """Return the memoized live backend, building it on first call."""
+    """Return the memoized live backend, building it on first call.
+
+    Double-checked locking so concurrent first callers (e.g. the startup
+    HealthCheck thread racing a /scribe-triggered WhisperSink.__init__) build
+    the backend — and load the large model — exactly once."""
     global _backend
     if _backend is None:
-        _backend = _build_backend()
+        with _backend_lock:
+            if _backend is None:
+                _backend = _build_backend()
     return _backend
 
 
