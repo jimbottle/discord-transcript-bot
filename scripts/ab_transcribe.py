@@ -80,13 +80,24 @@ class Config:
     backend: str = "faster-whisper"
 
 
-# Targets the deep-research open questions: current bot baseline vs turbo,
-# and the beam_size=10/unbatched prior behavior.
+# Targets the deep-research open questions: current CPU baseline vs turbo and
+# the beam10 prior behavior on faster-whisper, PLUS the GPU path the MLX backend
+# unlocks — MLX large-v3 vs turbo. NOTE: mlx_whisper has no beam-search decoder
+# (greedy + temperature fallback only), so beam_size is a no-op for MLX configs;
+# the beam5-vs-beam10 question lives on the faster-whisper rows.
+# discord-transcript-bot-d6j. MLX configs are scored only when mlx_whisper is
+# installed (Apple Silicon).
 DEFAULT_CONFIGS = [
     Config(name="large-v3 int8 beam5 batched", model="large-v3"),
     Config(name="turbo int8 beam5 batched", model="large-v3-turbo"),
     Config(name="large-v3 int8 beam10 unbatched", beam_size=10, batch_size=0),
     Config(name="turbo int8 beam5 unbatched", model="large-v3-turbo", batch_size=0),
+    Config(name="mlx large-v3 fp16 greedy", model="large-v3", backend="mlx-whisper"),
+    Config(
+        name="mlx large-v3-turbo fp16 greedy",
+        model="large-v3-turbo",
+        backend="mlx-whisper",
+    ),
 ]
 
 
@@ -151,13 +162,20 @@ def _get_faster_whisper(model, compute_type, batched):
     return BatchedInferencePipeline(base) if batched else base
 
 
-def _transcribe_clip(cfg, audio_path):
-    """Transcribe one clip with one config; return (text, proc_seconds)."""
-    if cfg.backend != "faster-whisper":
-        raise NotImplementedError(
-            f"backend '{cfg.backend}' not implemented yet — add it here "
-            "(discord-transcript-bot-1s7 / -mni)"
-        )
+def _get_mlx(model):
+    """Lazily load (and cache) the production MLX-Whisper backend for a model
+    id, so the bake-off measures the SAME engine + 16k-mono conversion the bot
+    actually runs (src/asr/mlx_backend). discord-transcript-bot-d6j."""
+    from src.asr.mlx_backend import MlxWhisperBackend
+    from src.asr.selection import _mlx_repo_for
+
+    key = ("mlx", model)
+    if key not in _MODEL_CACHE:
+        _MODEL_CACHE[key] = MlxWhisperBackend(_mlx_repo_for(model))
+    return _MODEL_CACHE[key]
+
+
+def _transcribe_faster_whisper(cfg, audio_path):
     batched = cfg.batch_size > 0
     model = _get_faster_whisper(cfg.model, cfg.compute_type, batched)
     kwargs = dict(
@@ -176,6 +194,42 @@ def _transcribe_clip(cfg, audio_path):
     segments, _ = model.transcribe(str(audio_path), **kwargs)
     text = "".join(seg.text for seg in segments)
     return text, time.monotonic() - start
+
+
+def _transcribe_mlx(cfg, audio_path):
+    import io
+
+    backend = _get_mlx(cfg.model)
+    with open(audio_path, "rb") as f:
+        wav = io.BytesIO(f.read())
+
+    start = time.monotonic()
+    result = backend.transcribe(
+        wav,
+        language=cfg.language,
+        beam_size=cfg.beam_size,
+        best_of=cfg.best_of,
+        initial_prompt=cfg.initial_prompt,
+        vad_filter=cfg.vad_filter,
+        vad_parameters=cfg.vad_parameters,
+        no_speech_threshold=cfg.no_speech_threshold,
+    )
+    # Raw engine output (no _accept_segment filter) so WER reflects the model
+    # itself, matching the faster-whisper branch.
+    text = "".join(seg.text for seg in result.segments)
+    return text, time.monotonic() - start
+
+
+def _transcribe_clip(cfg, audio_path):
+    """Transcribe one clip with one config; return (text, proc_seconds)."""
+    if cfg.backend == "faster-whisper":
+        return _transcribe_faster_whisper(cfg, audio_path)
+    if cfg.backend == "mlx-whisper":
+        return _transcribe_mlx(cfg, audio_path)
+    raise NotImplementedError(
+        f"backend '{cfg.backend}' not implemented yet — add it here "
+        "(Parakeet: discord-transcript-bot-mni)"
+    )
 
 
 def run_config(cfg, clips):

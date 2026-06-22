@@ -150,9 +150,36 @@ def test_format_table_sorts_by_wer():
 
 
 def test_unknown_backend_raises(tmp_path):
-    cfg = ab.Config(name="mlx", backend="mlx-whisper")
+    cfg = ab.Config(name="parakeet", backend="parakeet")
     try:
         ab._transcribe_clip(cfg, "x.wav")
         assert False, "should have raised for unimplemented backend"
     except NotImplementedError as e:
-        assert "mlx-whisper" in str(e)
+        assert "parakeet" in str(e)
+
+
+def test_mlx_backend_dispatches(tmp_path, monkeypatch):
+    """A mlx-whisper config routes to _transcribe_mlx, reusing the production
+    MlxWhisperBackend (mocked here so no model loads). discord-transcript-bot-d6j."""
+    from src.asr.base import NormalizedSegment, TranscribeResult
+
+    clip = tmp_path / "c.wav"
+    clip.write_bytes(b"RIFFfake")  # _transcribe_mlx only reads bytes into BytesIO
+
+    captured = {}
+
+    class _FakeBackend:
+        def transcribe(self, audio, **kwargs):
+            captured.update(kwargs)
+            captured["read_bytes"] = audio.read()
+            return TranscribeResult(
+                segments=[NormalizedSegment(text="hello world")], info={}
+            )
+
+    monkeypatch.setattr(ab, "_get_mlx", lambda model: _FakeBackend())
+    cfg = ab.Config(name="mlx", backend="mlx-whisper", model="large-v3")
+    text, secs = ab._transcribe_clip(cfg, str(clip))
+    assert text == "hello world"
+    assert isinstance(secs, float)
+    assert captured["read_bytes"] == b"RIFFfake"
+    assert captured["initial_prompt"] == cfg.initial_prompt
