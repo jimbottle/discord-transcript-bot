@@ -140,20 +140,23 @@ class MlxWhisperBackend(TranscriptionBackend):
         audio,
         *,
         language,
-        beam_size,
-        best_of,
+        beam_size,  # mlx_whisper has no beam search; accepted and NOT forwarded.
+        best_of,  # only used by Whisper's sampling path (temperature>0); skipped.
         initial_prompt,
         vad_filter,  # MLX has no Silero VAD; accepted and ignored.
         vad_parameters,
         no_speech_threshold,
     ) -> TranscribeResult:
+        # NOTE: mlx_whisper decodes greedily with temperature fallback — its
+        # beam-search decoder raises NotImplementedError, so beam_size/best_of
+        # must NOT be passed. The GPU "raise beam for accuracy" lever therefore
+        # applies only to the faster-whisper backend; MLX's accuracy levers are
+        # the model id and temperature fallback.
         samples = _wav_bytesio_to_float32_mono16k(audio)
         result = self._mlx.transcribe(
             samples,
             path_or_hf_repo=self.model_id,
             language=language,
-            beam_size=beam_size,
-            best_of=best_of,
             initial_prompt=initial_prompt,
             no_speech_threshold=no_speech_threshold,
             condition_on_previous_text=False,

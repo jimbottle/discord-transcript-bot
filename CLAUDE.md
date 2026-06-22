@@ -59,7 +59,7 @@ These tune the local transcription backend (no effect when `TRANSCRIPTION_METHOD
 - `WHISPER_MODEL` — model id. Default `large-v3` (accuracy-first). `large-v3-turbo` is selectable for speed-constrained hosts.
 - `ASR_BACKEND` — `auto` (default), `mlx`, or `faster-whisper`. `auto` picks MLX-Whisper (Metal GPU) on Apple Silicon and falls back to faster-whisper-CPU everywhere else (or if MLX can't load). Selection never raises.
 - `MLX_WHISPER_MODEL` — optional; override the MLX HF repo (otherwise mapped from `WHISPER_MODEL`, e.g. `large-v3` → `mlx-community/whisper-large-v3-mlx`).
-- `WHISPER_BEAM_SIZE` (default 5), `WHISPER_BEST_OF` (default 5), `WHISPER_BATCH_SIZE` (faster-whisper only, default 8) — decode params. With the MLX GPU backend the beam can be raised toward 10 for accuracy; the final value is set by the A/B bake-off (discord-transcript-bot-d6j).
+- `WHISPER_BEAM_SIZE` (default 5), `WHISPER_BEST_OF` (default 5), `WHISPER_BATCH_SIZE` (default 8) — faster-whisper decode params. The MLX backend ignores all three: `mlx_whisper` has no beam-search decoder (greedy + temperature fallback only) and no batched pipeline. So the beam5-vs-beam10 accuracy question applies only to the faster-whisper path; the final value is set by the A/B bake-off (discord-transcript-bot-d6j).
 
 ## Code Style
 
