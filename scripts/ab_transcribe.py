@@ -59,6 +59,7 @@ from pathlib import Path
 # Keep the bot's package importable when run from the repo root.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from src.asr.base import BackendUnavailable  # noqa: E402
 from src.wer import aggregate_wer, word_error_rate  # noqa: E402
 
 
@@ -85,8 +86,9 @@ class Config:
 # unlocks — MLX large-v3 vs turbo. NOTE: mlx_whisper has no beam-search decoder
 # (greedy + temperature fallback only), so beam_size is a no-op for MLX configs;
 # the beam5-vs-beam10 question lives on the faster-whisper rows.
-# discord-transcript-bot-d6j. MLX configs are scored only when mlx_whisper is
-# installed (Apple Silicon).
+# discord-transcript-bot-d6j. On a host without mlx_whisper the MLX configs
+# raise BackendUnavailable; main() catches that and skips them with a notice
+# (printing a warning), so the default set still runs on non-Apple-Silicon hosts.
 DEFAULT_CONFIGS = [
     Config(name="large-v3 int8 beam5 batched", model="large-v3"),
     Config(name="turbo int8 beam5 batched", model="large-v3-turbo"),
@@ -292,11 +294,28 @@ def main(argv=None):
 
     print(f"Scoring {len(configs)} config(s) over {len(clips)} clip(s)...\n")
     results = []
+    skipped = []
     for cfg in configs:
         print(f"  running: {cfg.name} ...", flush=True)
-        results.append(run_config(cfg, clips))
+        try:
+            results.append(run_config(cfg, clips))
+        except BackendUnavailable as e:
+            # e.g. an mlx-whisper config on a host without mlx_whisper. Skip it
+            # with a notice rather than aborting the whole run (which would
+            # discard every already-completed config's results), so the default
+            # set still works on non-Apple-Silicon hosts.
+            print(f"  SKIPPED {cfg.name}: backend unavailable ({e})", flush=True)
+            skipped.append(cfg.name)
+
+    if not results:
+        raise SystemExit(
+            "No configs ran — all backends were unavailable. "
+            f"Skipped: {', '.join(skipped)}"
+        )
 
     print("\n" + format_table(results))
+    if skipped:
+        print(f"\nSkipped {len(skipped)} config(s): {', '.join(skipped)}")
 
     if args.json_out:
         Path(args.json_out).write_text(

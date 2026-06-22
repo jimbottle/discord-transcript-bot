@@ -183,3 +183,65 @@ def test_mlx_backend_dispatches(tmp_path, monkeypatch):
     assert isinstance(secs, float)
     assert captured["read_bytes"] == b"RIFFfake"
     assert captured["initial_prompt"] == cfg.initial_prompt
+
+
+def test_main_skips_unavailable_backend_and_still_prints(tmp_path, monkeypatch, capsys):
+    """A config whose backend is unavailable (e.g. mlx-whisper on a non-Apple
+    host) must be SKIPPED with a notice, not abort the run — the completed
+    configs' results must still print. Regression: roborev #2279."""
+    from src.asr.base import BackendUnavailable
+
+    wav = tmp_path / "clip.wav"
+    _write_wav(wav, seconds=1.0)
+    manifest = tmp_path / "clips.jsonl"
+    manifest.write_text(json.dumps({"audio": str(wav), "reference": "hi"}) + "\n")
+    configs = tmp_path / "cfg.json"
+    configs.write_text(
+        json.dumps(
+            [
+                {"name": "fw", "backend": "faster-whisper"},
+                {"name": "mlx", "backend": "mlx-whisper"},
+            ]
+        )
+    )
+
+    def fake_run_config(cfg, clips):
+        if cfg.backend == "mlx-whisper":
+            raise BackendUnavailable("mlx_whisper not installed")
+        return {
+            "config": cfg.name,
+            "wer": 0.0,
+            "edits": 0,
+            "ref_words": 1,
+            "audio_s": 1.0,
+            "proc_s": 0.1,
+            "rtf": 0.1,
+        }
+
+    monkeypatch.setattr(ab, "run_config", fake_run_config)
+    ab.main(["--manifest", str(manifest), "--configs", str(configs)])
+
+    out = capsys.readouterr().out
+    assert "SKIPPED mlx" in out, "unavailable backend must be skipped with a notice"
+    assert "fw" in out, "the completed config's results must still print"
+
+
+def test_main_raises_when_all_backends_unavailable(tmp_path, monkeypatch):
+    wav = tmp_path / "clip.wav"
+    _write_wav(wav, seconds=1.0)
+    manifest = tmp_path / "clips.jsonl"
+    manifest.write_text(json.dumps({"audio": str(wav), "reference": "hi"}) + "\n")
+    configs = tmp_path / "cfg.json"
+    configs.write_text(json.dumps([{"name": "mlx", "backend": "mlx-whisper"}]))
+
+    from src.asr.base import BackendUnavailable
+
+    def always_unavailable(cfg, clips):
+        raise BackendUnavailable("nope")
+
+    monkeypatch.setattr(ab, "run_config", always_unavailable)
+    try:
+        ab.main(["--manifest", str(manifest), "--configs", str(configs)])
+        assert False, "should SystemExit when no config could run"
+    except SystemExit:
+        pass
