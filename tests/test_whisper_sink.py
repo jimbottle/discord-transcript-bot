@@ -14,7 +14,17 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import src.sinks.whisper_sink as ws
+from src.asr.base import NormalizedSegment, TranscribeResult
 from src.sinks.whisper_sink import DEFAULT_INITIAL_PROMPT, Speaker, WhisperSink
+
+
+def _fake_backend(segments):
+    """A stand-in transcription backend whose transcribe() returns the given
+    segments wrapped in a TranscribeResult — replaces sink._backend so the
+    sink's accuracy filters can be exercised without loading a model."""
+    return SimpleNamespace(
+        transcribe=lambda *a, **k: TranscribeResult(segments=list(segments), info=None)
+    )
 
 
 def _wav_bytesio(seconds=0.5):
@@ -391,9 +401,7 @@ def test_transcribe_audio_drops_prompt_echo_end_to_end(tmp_path, monkeypatch):
     sink = _make_sink(tmp_path, monkeypatch, player_map=pm)
     monkeypatch.setattr(sink, "check_audio_length", lambda _f: 1.0)  # pass length gate
     seg = SimpleNamespace(text=" Sovereign Lord GM says,")
-    monkeypatch.setattr(
-        ws, "batched_model", SimpleNamespace(transcribe=lambda *a, **k: ([seg], None))
-    )
+    sink._backend = _fake_backend([seg])
     assert sink.transcribe_audio(io.BytesIO()) == ""
     sink.close()
 
@@ -466,9 +474,7 @@ def test_transcribe_audio_keeps_only_good_segments(tmp_path, monkeypatch):
         _Seg(" la la la la", compression_ratio=3.5),
         _Seg(" Another real bit.", no_speech_prob=0.1, avg_logprob=-0.2),
     ]
-    monkeypatch.setattr(
-        ws, "batched_model", SimpleNamespace(transcribe=lambda *a, **k: (segs, None))
-    )
+    sink._backend = _fake_backend(segs)
     assert sink.transcribe_audio(io.BytesIO()) == " Real line. Another real bit."
     sink.close()
 
@@ -497,36 +503,33 @@ def test_env_flag_parsing():
 #    (discord-transcript-bot-std / discord-transcript-bot-ob3) ──
 
 
-def test_transcribe_audio_passes_configured_params_via_batched_pipeline(
-    tmp_path, monkeypatch
-):
-    """beam_size/best_of/batch_size are read from module-level config (not
-    hardcoded), the local path goes through the BatchedInferencePipeline,
-    and the biased initial_prompt is forwarded."""
+def test_transcribe_audio_forwards_configured_params_to_backend(tmp_path, monkeypatch):
+    """beam_size/best_of are read from module-level config (not hardcoded) and,
+    with the biased initial_prompt and VAD settings, forwarded to the selected
+    backend. (batch_size is a faster-whisper-only knob and is covered in the
+    backend's own test.)"""
     sink = _make_sink(
         tmp_path, monkeypatch, player_map={1: {"player": "Sam", "character": "Gus"}}
     )
     captured = {}
 
-    class _Seg:
-        text = "hello there"
+    def fake_transcribe(audio, **kwargs):
+        captured.update(kwargs)
+        return TranscribeResult(
+            segments=[NormalizedSegment(text="hello there")], info=None
+        )
 
-    class _FakeBatched:
-        def transcribe(self, audio, **kwargs):
-            captured.update(kwargs)
-            return ([_Seg()], MagicMock())
-
-    monkeypatch.setattr(ws, "batched_model", _FakeBatched())
+    sink._backend = SimpleNamespace(transcribe=fake_transcribe)
     monkeypatch.setattr(ws, "WHISPER_BEAM_SIZE", 7)
     monkeypatch.setattr(ws, "WHISPER_BEST_OF", 9)
-    monkeypatch.setattr(ws, "WHISPER_BATCH_SIZE", 4)
 
     out = sink.transcribe_audio(_wav_bytesio(0.5))
     assert out == "hello there"
     assert captured["beam_size"] == 7
     assert captured["best_of"] == 9
-    assert captured["batch_size"] == 4
     assert captured["initial_prompt"] == sink.initial_prompt
+    assert captured["vad_filter"] is True
+    assert captured["no_speech_threshold"] == 0.6
     sink.close()
 
 

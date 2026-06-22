@@ -13,13 +13,14 @@ from queue import Queue
 from typing import List
 
 import speech_recognition as sr
-import torch
 from discord.opus import Decoder
 from discord.sinks.core import Filters, Sink, default_filters
-from faster_whisper import BatchedInferencePipeline, WhisperModel
 from openai import OpenAI
 
-WHISPER_MODEL = "large-v3"
+from src.asr import selection
+
+# Model id + device/precision + engine selection now live in src/asr/selection.py
+# (configurable via WHISPER_MODEL / ASR_BACKEND; default large-v3, accuracy-first).
 WHISPER_LANGUAGE = "en"
 
 # Decode params. beam_size was 10 / best_of 3 — unusually high and a major
@@ -29,11 +30,9 @@ WHISPER_LANGUAGE = "en"
 WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "5"))
 WHISPER_BEST_OF = int(os.getenv("WHISPER_BEST_OF", "5"))
 
-# BatchedInferencePipeline batches a single utterance's VAD-segmented chunks
-# for extra CPU throughput at no precision change; biggest win on the longer
-# (force-flushed) segments. Higher batch size = higher peak RAM.
-# discord-transcript-bot-ob3.
-WHISPER_BATCH_SIZE = int(os.getenv("WHISPER_BATCH_SIZE", "8"))
+# WHISPER_BATCH_SIZE (BatchedInferencePipeline throughput, discord-transcript-bot-ob3)
+# is a faster-whisper-only knob and is read in src/asr/selection.py where that
+# backend is constructed.
 
 # Per-segment hallucination filter. On near-silent / noisy audio Whisper
 # emits high-confidence garbage (YouTube-caption ghosts like "Subtitles by
@@ -88,32 +87,14 @@ _HALLUCINATION_PHRASES = frozenset(
 # WhisperSink._build_initial_prompt. discord-transcript-bot-cul.
 DEFAULT_INITIAL_PROMPT = "You are writing the transcriptions for a D&D game."
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-# Set the model to evaluation mode (important for inference)
 logger = logging.getLogger(__name__)
 
-if DEVICE == "cuda":
-    gpu_ram = torch.cuda.get_device_properties(0).total_memory / 1024**3
-    if gpu_ram < 5.0:
-        logger.warning("GPU has less than 5GB of RAM. Switching to CPU.")
-        DEVICE = "cpu"
-
-# Precision: int8 on CPU is ~3-4x faster and far lighter on RAM than the
-# old float32 default, with negligible accuracy loss for speech; float16 is
-# the GPU sweet spot. float32 on CPU could not keep up with a busy
-# multi-speaker session and ballooned RSS to ~9.6 GB — see
-# discord-transcript-bot-hin.
-WHISPER__PRECISION = "int8" if DEVICE == "cpu" else "float16"
-
-audio_model = WhisperModel(
-    WHISPER_MODEL, device=DEVICE, compute_type=WHISPER__PRECISION
-)
-
-# CPU-fallback throughput wrapper around the same model (no accuracy change).
-# The Apple-Silicon MLX backend (discord-transcript-bot-d8g) will replace this
-# path with its own engine rather than batch through it.
-batched_model = BatchedInferencePipeline(audio_model)
+# The transcription engine (faster-whisper CPU/CUDA, or MLX-Whisper on Apple
+# Silicon) is selected at runtime and memoized in src/asr/selection.py. It is
+# resolved lazily on first use — NOT at import — so importing this module is
+# cheap and tests don't load a real model. The chosen backend normalizes its
+# output to NormalizedSegment so _accept_segment + the prompt-echo filter below
+# work regardless of engine. discord-transcript-bot-d8g.
 
 
 class Speaker:
@@ -167,6 +148,10 @@ class WhisperSink(Sink):
         self.transcriber_type = transcriber_type
         if transcriber_type == "openai":
             self.client = OpenAI()
+        else:
+            # Resolve the local transcription backend once (memoized across
+            # sinks + the health check so the model loads a single time).
+            self._backend = selection.get_backend()
         self.vc = None
         self.audio_data = {}
         self.running = True
@@ -428,30 +413,27 @@ class WhisperSink(Sink):
                 logger.info(f"OpenAI Transcription: {openai_transcription.text}")
                 return self._drop_if_prompt_echo(openai_transcription.text)
             else:
-                # The whisper model (batched pipeline for CPU throughput;
-                # same model + precision, so no accuracy change).
+                # The selected local engine (faster-whisper CPU/CUDA, or
+                # MLX-Whisper on Apple Silicon). It returns NormalizedSegments
+                # carrying the quality metrics _accept_segment inspects, so the
+                # accuracy pipeline below is identical regardless of backend.
                 temp_file.seek(0)
-                segments, info = batched_model.transcribe(
+                result_obj = self._backend.transcribe(
                     temp_file,
                     language=WHISPER_LANGUAGE,
                     beam_size=WHISPER_BEAM_SIZE,
                     best_of=WHISPER_BEST_OF,
-                    batch_size=WHISPER_BATCH_SIZE,
                     vad_filter=True,
                     vad_parameters=dict(min_silence_duration_ms=150, threshold=0.8),
                     no_speech_threshold=0.6,
                     initial_prompt=self.initial_prompt,
-                    # Don't let one hallucinated segment seed the next; the
-                    # roster-biased initial_prompt makes prompt-echo loops
-                    # more likely without this.
-                    condition_on_previous_text=False,
                 )
 
                 # Keep only segments that pass the per-segment hallucination
                 # filter (silence/low-confidence/repetition/known-artifact),
-                # instead of concatenating everything Whisper emitted.
+                # instead of concatenating everything the engine emitted.
                 result = "".join(
-                    seg.text for seg in segments if self._accept_segment(seg)
+                    seg.text for seg in result_obj.segments if self._accept_segment(seg)
                 )
 
                 logger.info(f"Transcription: {result}")

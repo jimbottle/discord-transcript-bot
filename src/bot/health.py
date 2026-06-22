@@ -1,11 +1,9 @@
-import io
 import json
 import logging
 import os
 import shutil
 import subprocess
 import time
-import wave
 
 import yaml
 
@@ -193,22 +191,20 @@ class HealthCheck:
 
     def _check_whisper_model(self):
         try:
-            from src.sinks.whisper_sink import audio_model
+            from src.asr.selection import get_backend
 
-            # Generate a tiny silent WAV clip and attempt transcription
-            buf = io.BytesIO()
-            with wave.open(buf, "wb") as w:
-                w.setnchannels(1)
-                w.setsampwidth(2)
-                w.setframerate(16000)
-                w.writeframes(b"\x00" * 3200)  # 0.1s of silence
-            buf.seek(0)
-            # transcribe() returns (segments_generator, info). Iterate the
-            # generator to actually exercise decoding — otherwise this check
-            # passes without verifying the model can decode at all.
-            segments, _info = audio_model.transcribe(buf)
-            list(segments)
-            self._record("whisper_model", True, "Model loaded and responding")
+            # Resolves + loads the actually-selected backend (MLX on Apple
+            # Silicon, else faster-whisper) and decodes a tiny silent clip to
+            # prove it can run — better coverage than the old audio_model-only
+            # check. healthcheck() iterates the decode so a broken model is
+            # caught (roborev #512).
+            backend = get_backend()
+            backend.healthcheck()
+            self._record(
+                "whisper_model",
+                True,
+                f"{backend.name}/{backend.model_id} loaded and responding",
+            )
         except Exception as e:
             self._record("whisper_model", False, f"Whisper model failed: {e}")
 
