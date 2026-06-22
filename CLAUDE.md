@@ -53,6 +53,14 @@ Required in `.env`:
 - `PLAYER_MAP_FILE_PATH` — optional path to `player_map.yml` mapping Discord user IDs to player/character names
 - `ASK_OLLAMA_MODEL` — optional; model for `/ask`. Defaults to `ai/mistral:latest` (prior behavior). Used in both `main.py` and `src/bot/health.py:_check_ollama_model` (keep the two defaults in sync). Model choice is benchmarked in the sibling `local-models` repo (`prompts/discord_ask.json`)
 
+### Transcription engine selection (`src/asr/selection.py`)
+
+These tune the local transcription backend (no effect when `TRANSCRIPTION_METHOD=openai`):
+- `WHISPER_MODEL` — model id. Default `large-v3` (accuracy-first). `large-v3-turbo` is selectable for speed-constrained hosts.
+- `ASR_BACKEND` — `auto` (default), `mlx`, or `faster-whisper`. `auto` picks MLX-Whisper (Metal GPU) on Apple Silicon and falls back to faster-whisper-CPU everywhere else (or if MLX can't load). Selection never raises.
+- `MLX_WHISPER_MODEL` — optional; override the MLX HF repo (otherwise mapped from `WHISPER_MODEL`, e.g. `large-v3` → `mlx-community/whisper-large-v3-mlx`).
+- `WHISPER_BEAM_SIZE` (default 5), `WHISPER_BEST_OF` (default 5), `WHISPER_BATCH_SIZE` (faster-whisper only, default 8) — decode params. With the MLX GPU backend the beam can be raised toward 10 for accuracy; the final value is set by the A/B bake-off (discord-transcript-bot-d6j).
+
 ## Code Style
 
 - Formatter: `black`
@@ -126,3 +134,35 @@ bd close <id>         # Complete work
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
 <!-- END BEADS INTEGRATION -->
+
+<!-- BEGIN WYK CONVENTIONS v:1 -->
+## wyk — planning & handoff over bd
+
+This repo uses **wyk**, a view + handoff layer over **bd (beads)**. "Plan
+it in wyk" = **file the plan as bd issues** (deps via `bd dep add`), not
+markdown/TodoWrite. File with **`wyk create`** (same flags as `bd create`,
+forwarded verbatim) — it also stamps the Claude session so the TUI's
+Session column traces work back to a conversation. A PreToolUse hook
+blocks raw `bd create` and tells you to switch; that's expected — just
+re-run as `wyk create`.
+
+**Owner column** — whose move it is, label-driven (NOT bd's owner/assignee):
+- `human` → **HUMAN** (a human must act).
+- `agent-handoff` → **AGENT-HANDOFF**: another agent owns it; don't touch,
+  a human coordinates. Excluded from `wyk inbox`.
+- agent task blocked by a `human`-flagged dep → **HUMAN-BLOCK** (skip it).
+- else → **AGENT** (the default; a null owner is never blank — so a task
+  that needs a human MUST be handed off, or the human never sees it).
+
+**Hand off to a human**: `wyk handoff <id>` (or `wyk handoff -create "<title>"`)
+sets `human` + writes the runbook. Never hand-roll labels; `-a`/`--claim`
+are bd's status, not the badge.
+
+**Pick up work**: `wyk inbox` FIRST (items bounced back to you — WORK them),
+then `wyk` / `bd ready`. `wyk conventions` prints the full contract.
+
+**Something wrong? Act — don't shrug.** If a wyk/bd command errors, a
+convention looks broken, or the workflow rubs wrong, file a bd issue (with
+an owner) and fix or hand it off — don't route around it silently.
+Friction with wyk is product data; surfacing it is the job.
+<!-- END WYK CONVENTIONS -->
