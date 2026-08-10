@@ -6,6 +6,9 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TRANSCRIPTS_DIR = PROJECT_ROOT / "transcripts"
 LOGS_DIR = PROJECT_ROOT / ".logs" / "transcripts"
+# Runtime state the bot writes (volo_bot.BOT_STATE_FILE) — true
+# connected-guild / recording / uptime, vs. the file-freshness guess.
+BOT_STATE_FILE = PROJECT_ROOT / ".logs" / "bot_state.json"
 
 # A session .txt modified within this many seconds is treated as "live"
 # (the bot writes a line per finished utterance, so a brief silence gap
@@ -182,6 +185,69 @@ def get_log_entries(filename):
             }
         )
     return entries
+
+
+def get_bot_state():
+    """Parsed bot runtime state (volo_bot writes it on lifecycle
+    transitions), or None if absent/unreadable/corrupt. The dashboard
+    treats None as 'no authoritative state — fall back to the
+    file-freshness heuristic'.
+    """
+    try:
+        data = json.loads(BOT_STATE_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
+        return None
+    # Valid JSON that isn't an object (truncated/hand-edited to a list
+    # or scalar) would later AttributeError on state.get(...) and 500
+    # the index page — treat anything non-dict as "no state".
+    return data if isinstance(data, dict) else None
+
+
+# The bot rewrites bot_state.json every ~30s (HEARTBEAT_INTERVAL_S). If the
+# newest write is older than this, the dashboard treats the bot as not
+# responding rather than trusting a possibly-stale "recording: true" — the
+# failure mode that once showed a dead bot as recording for ~2 hours.
+STATE_STALE_SECONDS = 90
+
+
+def format_duration(seconds):
+    """Human 'Xh Ym' / 'Ym Zs' / 'Zs' from a raw seconds count, or None.
+
+    None-safe and clamps negatives (clock skew between the bot and the
+    dashboard process must not render a nonsense negative duration).
+    """
+    if seconds is None:
+        return None
+    secs = int(seconds)
+    if secs < 0:
+        secs = 0
+    h, rem = divmod(secs, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h {m}m"
+    if m:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
+def format_uptime(started_at):
+    """Human uptime from an epoch start, or None (falsy start -> None)."""
+    if not started_at:
+        return None
+    return format_duration(time.time() - started_at)
+
+
+def heartbeat_age(state):
+    """Seconds since the bot last wrote runtime state, or None.
+
+    Lets the dashboard distinguish a live-but-quiet bot from a dead one:
+    the bot refreshes bot_state.json on a fixed heartbeat, so a large age
+    means the process is gone or wedged even if the last-written flags say
+    'recording'. Clamps negatives (clock skew)."""
+    if not state or not state.get("updated_at"):
+        return None
+    age = time.time() - state["updated_at"]
+    return age if age >= 0 else 0.0
 
 
 def list_logs():

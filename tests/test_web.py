@@ -14,8 +14,10 @@ import time as _time
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
 
 import app as web_app
+import roster_service
 import transcript_service
 
 
@@ -262,6 +264,137 @@ def test_get_log_entries_parses_and_skips(tmp_path, monkeypatch):
     assert entries[0]["begin"] == "18:00:01"
 
 
+def test_get_bot_state_reads_valid_missing_and_corrupt(tmp_path, monkeypatch):
+    f = tmp_path / "bot_state.json"
+    monkeypatch.setattr(transcript_service, "BOT_STATE_FILE", f)
+    # missing
+    assert transcript_service.get_bot_state() is None
+    # valid
+    f.write_text(json.dumps({"guilds": [], "started_at": 1.0}), encoding="utf-8")
+    assert transcript_service.get_bot_state() == {"guilds": [], "started_at": 1.0}
+    # corrupt
+    f.write_text("{ not json", encoding="utf-8")
+    assert transcript_service.get_bot_state() is None
+
+
+def test_get_bot_state_non_dict_json_is_none(tmp_path, monkeypatch):
+    """roborev #812: valid JSON that isn't an object must read as None
+    so the index route doesn't 500 on state.get(...)."""
+    f = tmp_path / "bot_state.json"
+    monkeypatch.setattr(transcript_service, "BOT_STATE_FILE", f)
+    f.write_text("[1, 2, 3]", encoding="utf-8")
+    assert transcript_service.get_bot_state() is None
+    f.write_text('"just a string"', encoding="utf-8")
+    assert transcript_service.get_bot_state() is None
+
+
+def test_index_shows_authoritative_card_when_alive(client, fake_bot, monkeypatch):
+    fake_bot._status = {"status": "ready", "pid": 1, "checks": {}}
+    monkeypatch.setattr(
+        web_app,
+        "get_bot_state",
+        lambda: {
+            "started_at": _time.time() - 90,
+            "guilds": [{"guild": "personal", "channel": "voice-1", "recording": True}],
+        },
+    )
+    body = client.get("/").data.decode()
+    assert "Connected:" in body and "personal" in body and "voice-1" in body
+    assert "Recording:" in body
+    assert "Uptime:" in body
+
+
+def test_index_no_authoritative_card_without_state(client, fake_bot, monkeypatch):
+    fake_bot._status = {"status": "ready", "pid": 1, "checks": {}}
+    monkeypatch.setattr(web_app, "get_bot_state", lambda: None)
+    assert b"Connected:" not in client.get("/").data
+
+
+def test_index_no_authoritative_card_when_bot_not_alive(client, fake_bot, monkeypatch):
+    fake_bot._status = {"status": "stopped", "pid": None}
+    monkeypatch.setattr(
+        web_app,
+        "get_bot_state",
+        lambda: {"started_at": _time.time(), "guilds": [{"guild": "x"}]},
+    )
+    # gated out when the bot isn't alive even if a (stale) state file exists
+    assert b"Connected:" not in client.get("/").data
+
+
+def test_format_uptime():
+    fu = transcript_service.format_uptime
+    assert fu(None) is None
+    assert fu(0) is None  # falsy start -> no uptime
+    now = _time.time()
+    assert fu(now - 5).endswith("s")
+    assert fu(now - 125) == "2m 5s"
+    assert fu(now - 3 * 3600 - 4 * 60).startswith("3h 4m")
+    # clock skew: bot's start is "in the future" -> clamp, never negative
+    assert fu(now + 999) == "0s"
+
+
+def test_format_duration():
+    fd = transcript_service.format_duration
+    assert fd(None) is None
+    assert fd(-5) == "0s"  # clamp negatives
+    assert fd(5) == "5s"
+    assert fd(125) == "2m 5s"
+    assert fd(3 * 3600 + 4 * 60) == "3h 4m"
+
+
+def test_heartbeat_age():
+    ha = transcript_service.heartbeat_age
+    assert ha(None) is None
+    assert ha({}) is None
+    assert ha({"updated_at": 0}) is None  # falsy -> None
+    now = _time.time()
+    assert 49 <= ha({"updated_at": now - 50}) <= 61
+    assert ha({"updated_at": now + 999}) == 0.0  # clock skew clamped
+
+
+# ── Liveness: heartbeat-stale + stalled-recording warnings on the index ──
+
+
+def test_index_warns_when_heartbeat_stale(client, fake_bot, monkeypatch):
+    fake_bot._status = {"status": "ready", "pid": 1, "checks": {}}
+    monkeypatch.setattr(
+        web_app,
+        "get_bot_state",
+        lambda: {
+            "started_at": _time.time() - 600,
+            "updated_at": _time.time() - 300,  # well past STATE_STALE_SECONDS
+            "guilds": [{"guild": "x", "channel": "c", "recording": True}],
+        },
+    )
+    body = client.get("/").data.decode()
+    assert "not responding" in body.lower()
+
+
+def test_index_shows_stalled_recording_badge(client, fake_bot, monkeypatch):
+    fake_bot._status = {"status": "ready", "pid": 1, "checks": {}}
+    monkeypatch.setattr(
+        web_app,
+        "get_bot_state",
+        lambda: {
+            "started_at": _time.time() - 600,
+            "updated_at": _time.time(),  # fresh heartbeat -> not "not responding"
+            "guilds": [
+                {
+                    "guild": "x",
+                    "channel": "c",
+                    "recording": True,
+                    "stalled": True,
+                    "output_age": 300,
+                }
+            ],
+        },
+    )
+    body = client.get("/").data.decode()
+    assert "STALLED" in body
+    assert "5m 0s" in body  # output_age formatted via the duration filter
+    assert "not responding" not in body.lower()  # heartbeat is fresh
+
+
 def test_view_log_renders_known_file(tmp_path, monkeypatch, client):
     monkeypatch.setattr(transcript_service, "LOGS_DIR", tmp_path)
     (tmp_path / "ok.log").write_text(
@@ -330,3 +463,166 @@ def test_list_transcripts_returns_list():
 
 def test_search_logs_empty_query_returns_empty():
     assert transcript_service.search_logs("") == []
+
+
+# ── Roster editor (CRUD over player_map.yml) ──────────────────────────
+
+
+@pytest.fixture
+def roster_file(tmp_path, monkeypatch):
+    """Point the roster at an isolated tmp file so tests never touch the
+    real player_map.yml. conftest loads .env, which sets
+    PLAYER_MAP_FILE_PATH to the real ./player_map.yml — override it with an
+    absolute tmp path (roster_path resolves absolute paths as-is)."""
+    pm = tmp_path / "player_map.yml"
+    monkeypatch.setenv("PLAYER_MAP_FILE_PATH", str(pm))
+    return pm
+
+
+_XHR = {"X-Requested-With": "XMLHttpRequest"}
+
+
+def test_roster_page_renders(client, roster_file):
+    roster_file.write_text(
+        yaml.dump({371442040141119490: {"player": "Jobby Jill", "character": "Jim"}}),
+        encoding="utf-8",
+    )
+    r = client.get("/roster")
+    assert r.status_code == 200
+    assert b"371442040141119490" in r.data
+    assert b"Jobby Jill" in r.data
+
+
+def test_roster_upsert_no_csrf_is_403(client, roster_file):
+    r = client.post(
+        "/roster/entry", json={"user_id": 7, "player": "A", "character": "B"}
+    )
+    assert r.status_code == 403
+    assert not roster_file.exists()  # rejected before any write
+
+
+def test_roster_upsert_persists(client, roster_file):
+    r = client.post(
+        "/roster/entry",
+        json={"user_id": 7, "player": "Ed", "character": "Volo"},
+        headers=_XHR,
+    )
+    assert r.status_code == 200
+    # user_id returned as a string (snowflakes exceed JS safe-int range)
+    assert r.get_json() == {"user_id": "7", "player": "Ed", "character": "Volo"}
+    assert yaml.safe_load(roster_file.read_text()) == {
+        7: {"player": "Ed", "character": "Volo"}
+    }
+
+
+def test_roster_upsert_returns_snowflake_id_without_precision_loss(client, roster_file):
+    # A real 19-digit Discord id must survive the round trip exactly — it
+    # would lose precision as a JSON number, hence the string contract.
+    sid = "421900550829768715"
+    r = client.post(
+        "/roster/entry",
+        json={"user_id": sid, "player": "Ed", "character": "Cody"},
+        headers=_XHR,
+    )
+    assert r.status_code == 200
+    assert r.get_json()["user_id"] == sid
+    assert int(sid) in yaml.safe_load(roster_file.read_text())
+
+
+def test_roster_upsert_invalid_user_id_400(client, roster_file):
+    r = client.post(
+        "/roster/entry",
+        json={"user_id": "abc", "player": "A", "character": "B"},
+        headers=_XHR,
+    )
+    assert r.status_code == 400
+    assert "error" in r.get_json()
+    assert not roster_file.exists()
+
+
+def test_roster_upsert_missing_names_400(client, roster_file):
+    r = client.post(
+        "/roster/entry",
+        json={"user_id": 7, "player": "", "character": "B"},
+        headers=_XHR,
+    )
+    assert r.status_code == 400
+
+
+def test_roster_upsert_non_dict_file_400_and_untouched(client, roster_file):
+    roster_file.write_text(yaml.dump(["not", "a", "map"]), encoding="utf-8")
+    r = client.post(
+        "/roster/entry",
+        json={"user_id": 7, "player": "A", "character": "B"},
+        headers=_XHR,
+    )
+    assert r.status_code == 400
+    assert "mapping" in r.get_json()["error"]
+    assert yaml.safe_load(roster_file.read_text()) == ["not", "a", "map"]
+
+
+def test_roster_delete_no_csrf_is_403(client, roster_file):
+    assert client.post("/roster/entry/delete", json={"user_id": 7}).status_code == 403
+
+
+def test_roster_delete_removes_entry(client, roster_file):
+    roster_file.write_text(
+        yaml.dump(
+            {
+                7: {"player": "Go", "character": "Go"},
+                9: {"player": "Stay", "character": "Stay"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    r = client.post("/roster/entry/delete", json={"user_id": 7}, headers=_XHR)
+    assert r.status_code == 200
+    assert r.get_json() == {"user_id": "7", "deleted": True}
+    assert yaml.safe_load(roster_file.read_text()) == {
+        9: {"player": "Stay", "character": "Stay"}
+    }
+
+
+def test_roster_delete_invalid_user_id_400(client, roster_file):
+    r = client.post("/roster/entry/delete", json={"user_id": "-3"}, headers=_XHR)
+    assert r.status_code == 400
+
+
+def test_get_unmapped_speakers_excludes_mapped_includes_members(
+    roster_file, monkeypatch
+):
+    roster_file.write_text(
+        yaml.dump({7: {"player": "Named", "character": "Char"}}), encoding="utf-8"
+    )
+    # 7 already mapped (excluded); 8 on the call; 9 spoke.
+    monkeypatch.setattr(
+        roster_service,
+        "get_bot_state",
+        lambda: {
+            "guilds": [
+                {
+                    "members": [
+                        {"id": 7, "name": "named", "display_name": "Named"},
+                        {"id": 8, "name": "alice", "display_name": "Alice"},
+                    ]
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        roster_service,
+        "get_live_session",
+        lambda: {
+            "entries": [
+                {"user_id": "9", "player": "Bob", "character": None, "text": "hello"},
+                {"user_id": "7", "player": "Named", "character": "Char", "text": "x"},
+            ]
+        },
+    )
+    result = roster_service.get_unmapped_speakers()
+    by_id = {r["user_id"]: r for r in result}
+    assert set(by_id) == {8, 9}  # 7 excluded (mapped)
+    assert by_id[8]["source"] == "on_call" and by_id[8]["suggested_name"] == "Alice"
+    assert by_id[9]["source"] == "spoke" and by_id[9]["suggested_name"] == "Bob"
+    assert by_id[9]["last_text"] == "hello"
+    assert result[0]["user_id"] == 8  # on-call sorted first

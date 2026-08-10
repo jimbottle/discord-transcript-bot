@@ -10,3 +10,10 @@ venv/
 transcripts/
 .DS_Store
 **/.claude/settings.local.json
+# roborev snapshots
+/.roborev/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key

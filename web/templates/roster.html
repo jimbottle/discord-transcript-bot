@@ -1,0 +1,305 @@
+{% extends "base.html" %}
+{% block title %}Roster - Transcript Bot{% endblock %}
+{% block content %}
+<h1>Roster</h1>
+<p class="search-meta">
+    Map Discord IDs to player &amp; character names. Edits save to
+    <code>player_map.yml</code> and take effect the next time the bot
+    starts — the running session keeps its current names.
+</p>
+{% if roster.invalid %}
+<article>
+    <p class="check-fail">
+        &#9888; The roster file is valid YAML but not a mapping (hand-edited
+        to a list/scalar). Fix it by hand before editing here — saving is
+        disabled so the file isn't overwritten.
+    </p>
+</article>
+{% endif %}
+
+<article>
+    <header><h3>On the call / recently spoke &mdash; not named yet</h3></header>
+    {% if unmapped %}
+    <table>
+        <thead><tr><th>Who</th><th>Player</th><th>Character</th><th></th></tr></thead>
+        <tbody>
+        {% for s in unmapped %}
+            <tr data-user-id="{{ s.user_id }}">
+                <td>
+                    <code>{{ s.user_id }}</code>
+                    <span class="live-badge {% if s.source == 'on_call' %}live-on{% else %}live-off{% endif %}">
+                        {%- if s.source == 'on_call' %}&#9679; on call{% else %}spoke{% endif -%}
+                    </span>
+                    {% if s.last_text %}<br><span class="search-meta">&ldquo;{{ s.last_text | truncate(60) }}&rdquo;</span>{% endif %}
+                </td>
+                <td><input type="text" class="ru-player" value="{{ s.suggested_name or '' }}" placeholder="real name"></td>
+                {# Character is the in-game name, distinct from the real
+                   name we can guess — leave it blank so Add can't silently
+                   persist player == character. #}
+                <td><input type="text" class="ru-character" value="" placeholder="character"></td>
+                <td><button type="button" class="ru-add" {% if roster.invalid %}disabled{% endif %}>Add</button></td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="search-meta">
+        No unnamed speakers right now. People show up here when they're in
+        the bot's voice channel or have spoken in the current session.
+    </p>
+    {% endif %}
+</article>
+
+<article>
+    <header><h3>Roster (<span id="roster-count">{{ roster.entries | length }}</span>)</h3></header>
+    <table id="roster-table">
+        <thead><tr><th>Discord ID</th><th>Player</th><th>Character</th><th></th></tr></thead>
+        <tbody>
+        {% for e in roster.entries %}
+            {# data-player/data-character hold the last *persisted* values
+               so Undo restores what was actually saved, not unsaved edits
+               sitting in the inputs. Kept in sync on Save / Add in JS. #}
+            <tr data-user-id="{{ e.user_id }}" data-player="{{ e.player or '' }}" data-character="{{ e.character or '' }}">
+                <td><code>{{ e.user_id }}</code></td>
+                <td><input type="text" class="re-player" value="{{ e.player or '' }}"></td>
+                <td><input type="text" class="re-character" value="{{ e.character or '' }}"></td>
+                <td>
+                    <button type="button" class="re-save" {% if roster.invalid %}disabled{% endif %}>Save</button>
+                    <button type="button" class="re-delete secondary" {% if roster.invalid %}disabled{% endif %}>Delete</button>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+
+    <h4>Add an entry by ID</h4>
+    <div class="roster-add-row">
+        <input type="text" id="add-id" placeholder="Discord user ID" inputmode="numeric" aria-label="Discord user ID">
+        <input type="text" id="add-player" placeholder="real name" aria-label="Player name">
+        <input type="text" id="add-character" placeholder="character" aria-label="Character name">
+        <button type="button" id="add-entry" {% if roster.invalid %}disabled{% endif %}>Add</button>
+    </div>
+</article>
+
+<div id="toast-root" role="status" aria-live="polite"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const UPSERT_URL = "{{ url_for('roster_upsert') }}";
+const DELETE_URL = "{{ url_for('roster_delete') }}";
+
+// Toast feedback near the corner so a confirmation is visible wherever the
+// action happened on a long roster. `action` (optional) renders a button,
+// e.g. Undo after a delete. Toasts STACK — each manages its own timeout —
+// so deleting two rows in quick succession doesn't withdraw the first row's
+// Undo before its window elapses; the stack is capped to avoid pile-up.
+// Built with textContent so names/errors can't be parsed as HTML.
+function toast(message, kind, action) {
+    const root = document.getElementById("toast-root");
+    const el = document.createElement("div");
+    el.className = "roster-toast " + (kind === "ok" ? "ok" : "err");
+    const dot = document.createElement("span");
+    dot.className = "dot";
+    el.appendChild(dot);
+    const text = document.createElement("span");
+    text.textContent = message;
+    el.appendChild(text);
+    if (action) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "undo secondary outline";
+        btn.textContent = action.label;
+        btn.addEventListener("click", () => { hideToast(el); action.onClick(); });
+        el.appendChild(btn);
+    }
+    root.appendChild(el);
+    while (root.children.length > 4) root.firstChild.remove();
+    requestAnimationFrame(() => el.classList.add("show"));
+    setTimeout(() => hideToast(el), action ? 6000 : 3500);
+}
+function hideToast(el) {
+    el.classList.remove("show");
+    setTimeout(() => el.remove(), 200);
+}
+
+async function csrfPost(url, payload) {
+    const res = await fetch(url, {
+        method: "POST",
+        headers: {
+            "X-Requested-With": "XMLHttpRequest",
+            "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+    });
+    let data = {};
+    try { data = await res.json(); } catch (e) { /* non-JSON error body */ }
+    return { ok: res.ok, data };
+}
+
+// Upsert one entry; returns the saved {user_id, player, character} or null.
+async function upsert(userId, player, character) {
+    if (!player || !character) {
+        toast("Player and character are both required.", "err");
+        return null;
+    }
+    const { ok, data } = await csrfPost(UPSERT_URL, {
+        user_id: userId, player: player, character: character,
+    });
+    if (!ok) {
+        toast(data.error || "Save failed.", "err");
+        return null;
+    }
+    toast("Saved " + data.player + " (" + data.character + ").", "ok");
+    return data;
+}
+
+// Two-step delete: first click arms the button (label -> "Confirm?") for a
+// few seconds; a second click within the window actually deletes. Guards a
+// one-click, irreversible drop from player_map.yml.
+function armDelete(btn) {
+    if (btn.dataset.armed === "1") return true;
+    btn.dataset.armed = "1";
+    btn._orig = btn.textContent;
+    btn.textContent = "Confirm?";
+    btn.classList.add("confirming");
+    btn._disarm = setTimeout(() => disarmDelete(btn), 3000);
+    return false;
+}
+function disarmDelete(btn) {
+    clearTimeout(btn._disarm);
+    btn.dataset.armed = "0";
+    btn.classList.remove("confirming");
+    if (btn._orig) btn.textContent = btn._orig;
+}
+
+// Find-or-create the roster-table row for userId, set its values, return it.
+// Built with createElement/textContent so names never become HTML.
+function ensureRosterRow(userId, player, character) {
+    const tbody = document.querySelector("#roster-table tbody");
+    let row = tbody.querySelector('tr[data-user-id="' + userId + '"]');
+    if (!row) {
+        row = document.createElement("tr");
+        row.dataset.userId = userId;
+        const idTd = document.createElement("td");
+        const code = document.createElement("code");
+        code.textContent = userId;
+        idTd.appendChild(code);
+        const pTd = document.createElement("td");
+        const pIn = document.createElement("input");
+        pIn.type = "text"; pIn.className = "re-player";
+        pTd.appendChild(pIn);
+        const cTd = document.createElement("td");
+        const cIn = document.createElement("input");
+        cIn.type = "text"; cIn.className = "re-character";
+        cTd.appendChild(cIn);
+        const aTd = document.createElement("td");
+        const save = document.createElement("button");
+        save.type = "button"; save.className = "re-save"; save.textContent = "Save";
+        const del = document.createElement("button");
+        del.type = "button"; del.className = "re-delete secondary"; del.textContent = "Delete";
+        aTd.appendChild(save);
+        aTd.appendChild(document.createTextNode(" "));
+        aTd.appendChild(del);
+        row.append(idTd, pTd, cTd, aTd);
+        tbody.appendChild(row);
+        updateCount();
+    }
+    row.querySelector(".re-player").value = player;
+    row.querySelector(".re-character").value = character;
+    // Keep the persisted-value snapshot in sync for a later Undo.
+    row.dataset.player = player;
+    row.dataset.character = character;
+    return row;
+}
+
+function updateCount() {
+    const n = document.querySelectorAll("#roster-table tbody tr").length;
+    document.getElementById("roster-count").textContent = n;
+}
+
+document.addEventListener("click", async (ev) => {
+    const t = ev.target;
+    if (t.classList.contains("ru-add")) {
+        // Name a detected speaker -> move them into the roster table.
+        const row = t.closest("tr");
+        const data = await upsert(
+            row.dataset.userId,
+            row.querySelector(".ru-player").value.trim(),
+            row.querySelector(".ru-character").value.trim(),
+        );
+        if (data) {
+            ensureRosterRow(data.user_id, data.player, data.character);
+            row.remove();
+        }
+    } else if (t.classList.contains("re-save")) {
+        const row = t.closest("tr");
+        const data = await upsert(
+            row.dataset.userId,
+            row.querySelector(".re-player").value.trim(),
+            row.querySelector(".re-character").value.trim(),
+        );
+        if (data) {
+            // Now persisted — refresh the Undo snapshot.
+            row.dataset.player = data.player;
+            row.dataset.character = data.character;
+        }
+    } else if (t.classList.contains("re-delete")) {
+        const row = t.closest("tr");
+        if (!armDelete(t)) return;  // first click arms; wait for the second
+        disarmDelete(t);
+        const uid = row.dataset.userId;
+        // Undo restores the last *persisted* values (data-*), not unsaved
+        // edits sitting in the inputs — otherwise Undo would commit a change
+        // the user never saved and that differs from what was deleted.
+        const player = row.dataset.player || "";
+        const character = row.dataset.character || "";
+        const { ok, data } = await csrfPost(DELETE_URL, { user_id: uid });
+        if (!ok) { toast(data.error || "Delete failed.", "err"); return; }
+        row.remove();
+        updateCount();
+        toast("Deleted " + uid + ".", "ok", {
+            label: "Undo",
+            onClick: async () => {
+                const re = await upsert(uid, player || "Unknown", character || "Unknown");
+                if (re) ensureRosterRow(re.user_id, re.player, re.character);
+            },
+        });
+    }
+});
+
+// Enter-to-submit so repeated roster edits don't require a mouse trip to
+// the button. Routes to the right action for the row the input lives in.
+document.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Enter") return;
+    const el = ev.target;
+    if (el.tagName !== "INPUT") return;
+    if (el.classList.contains("re-player") || el.classList.contains("re-character")) {
+        ev.preventDefault();
+        el.closest("tr").querySelector(".re-save").click();
+    } else if (el.classList.contains("ru-player") || el.classList.contains("ru-character")) {
+        ev.preventDefault();
+        el.closest("tr").querySelector(".ru-add").click();
+    } else if (el.closest(".roster-add-row")) {
+        ev.preventDefault();
+        document.getElementById("add-entry").click();
+    }
+});
+
+document.getElementById("add-entry").addEventListener("click", async () => {
+    const uid = document.getElementById("add-id").value.trim();
+    if (!/^\d+$/.test(uid)) { toast("Discord ID must be numeric.", "err"); return; }
+    const data = await upsert(
+        uid,
+        document.getElementById("add-player").value.trim(),
+        document.getElementById("add-character").value.trim(),
+    );
+    if (data) {
+        ensureRosterRow(data.user_id, data.player, data.character);
+        document.getElementById("add-id").value = "";
+        document.getElementById("add-player").value = "";
+        document.getElementById("add-character").value = "";
+    }
+});
+</script>
+{% endblock %}

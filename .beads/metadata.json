@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "discord_transcript_bot",
+  "project_id": "8dcf7648-4ef9-4156-ba42-0fbf88ec7157"
+}

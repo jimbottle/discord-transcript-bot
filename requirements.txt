@@ -22,6 +22,14 @@ openai
 faster_whisper
 speechrecognition
 
+# Apple Silicon GPU (Metal) transcription backend (discord-transcript-bot-d8g).
+# Selected automatically on Darwin/arm64 (ASR_BACKEND=auto); elsewhere the bot
+# falls back to faster-whisper, so these are scoped to Apple Silicon to keep
+# Linux/CI installs unaffected. scipy gives an anti-aliased 48k->16k resample
+# (protects WER) for the MLX path.
+mlx-whisper; sys_platform == 'darwin' and platform_machine == 'arm64'
+scipy; sys_platform == 'darwin' and platform_machine == 'arm64'
+
 # LLM for /ask command. >=0.5.1: /ask passes think= to chat(), which
 # older clients reject with TypeError (misreported as a daemon failure).
 ollama>=0.5.1

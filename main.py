@@ -87,6 +87,10 @@ if __name__ == "__main__":
     from src.bot.volo_bot import VoloBot
 
     bot = VoloBot(loop)
+    # Overwrite any previous run's bot_state.json immediately so the
+    # dashboard never shows the old run's guild / recording / (growing)
+    # uptime during the restart→on_ready window. Best-effort, never raises.
+    bot._write_runtime_state()
 
     @bot.event
     async def on_voice_state_update(member, before, after):
@@ -163,6 +167,7 @@ if __name__ == "__main__":
             helper.guild_id = guild_id
             helper.set_vc(vc)
             bot.guild_to_helper[guild_id] = helper
+            bot._write_runtime_state()  # connected (best-effort, never raises)
             await ctx.followup.send(
                 "Jacked in. Connected to the voice channel and standing by."
             )
@@ -344,6 +349,7 @@ if __name__ == "__main__":
         # Clear the flag even if it was stale-True, so a later /scribe
         # after reconnecting starts clean.
         bot.guild_is_recording.pop(guild_id, None)
+        bot._write_runtime_state()  # disconnected (best-effort, never raises)
 
         if teardown_ok:
             await ctx.followup.send(
@@ -402,6 +408,62 @@ if __name__ == "__main__":
         except Exception as e:
             await ctx.respond(f"Roster sync failed:\n{e}", ephemeral=True)
             raise e
+
+    @bot.slash_command(
+        name="add_player",
+        description="Name someone on the call so the transcript shows their name, not their ID.",
+        contexts={discord.InteractionContextType.guild},
+    )
+    async def add_player(
+        ctx: discord.context.ApplicationContext,
+        user: discord.Option(
+            discord.Member,
+            description="Pick the person on the call to name",
+        ),
+        player: discord.Option(
+            str,
+            description="Their real name (defaults to their server nickname)",
+            required=False,
+            default=None,
+        ),
+        character: discord.Option(
+            str,
+            description="Their character name (defaults to their server nickname)",
+            required=False,
+            default=None,
+        ),
+    ):
+        # Pick-from-dropdown UX: no IDs to copy. Sensible defaults so
+        # just picking the person already fixes the attribution; names
+        # can be refined by re-running. Works DURING a recording — the
+        # map is mutated in place so the live session picks it up.
+        existed = int(user.id) in bot.player_map
+        player_name = player or user.display_name
+        character_name = character or user.display_name
+        try:
+            persisted = bot.upsert_player_entry(user.id, player_name, character_name)
+        except Exception as e:
+            # The in-memory update already applied (live this session);
+            # only the on-disk save failed.
+            await ctx.respond(
+                f"Applied **{player_name}** ({character_name}) for "
+                f"{user.mention} for the current session, but saving to "
+                f"the roster file failed — it'll be lost on restart:\n`{e}`",
+                ephemeral=True,
+            )
+            return
+        verb = "Updated" if existed else "Added"
+        if persisted:
+            note = "Saved to the roster and live in the current recording."
+        else:
+            note = (
+                "Live in the current recording, but no roster file is "
+                "configured so it won't survive a restart."
+            )
+        await ctx.respond(
+            f"{verb} {user.mention} → **{player_name}** ({character_name}). {note}",
+            ephemeral=True,
+        )
 
     async def _run_ask(
         ctx: discord.context.ApplicationContext,
@@ -640,6 +702,11 @@ if __name__ == "__main__":
             discord.EmbedField(
                 name="/update_player_map",
                 value="Sync player names with roster.",
+                inline=True,
+            ),
+            discord.EmbedField(
+                name="/add_player",
+                value="Name one person on the call (works mid-session).",
                 inline=True,
             ),
             discord.EmbedField(

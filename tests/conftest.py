@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "web"))
 # without secrets, fresh checkout) still pass.
 try:
     from dotenv import load_dotenv
+
     load_dotenv(dotenv_path=os.path.join(PROJECT_ROOT, ".env"))
 except ImportError:
     pass
@@ -21,18 +22,24 @@ os.environ.setdefault("DISCORD_BOT_TOKEN", "test-placeholder")
 
 @pytest.fixture(autouse=True)
 def _fast_whisper_model(monkeypatch, request):
-    """Replace the faster-whisper module-level audio_model with a stub for
-    unit tests so HealthCheck._check_whisper_model doesn't actually load
-    large-v3 (hundreds of MB, several seconds). Integration tests opt out
-    by adding the `integration` marker — they need the real model only if
-    they exercise transcription end-to-end."""
+    """Stub the memoized ASR backend for unit tests so constructing a
+    WhisperSink / running HealthCheck._check_whisper_model doesn't actually
+    load a model (hundreds of MB, several seconds). Pre-populating the cache
+    means selection.get_backend() returns the stub without building anything.
+    Integration tests opt out via the `integration` marker — they need the
+    real backend to exercise transcription end-to-end."""
+    from src.asr import base, selection
+
     if "integration" in request.keywords:
+        selection.reset_backend_cache()
         yield
+        selection.reset_backend_cache()
         return
 
-    from src.sinks import whisper_sink as ws_mod
-
-    stub = MagicMock(name="audio_model_stub")
-    stub.transcribe.return_value = (iter([]), MagicMock(language="en"))
-    monkeypatch.setattr(ws_mod, "audio_model", stub)
+    stub = MagicMock(name="asr_backend_stub")
+    stub.name = "stub"
+    stub.model_id = "stub"
+    stub.transcribe.return_value = base.TranscribeResult(segments=[], info=None)
+    stub.healthcheck.return_value = None
+    monkeypatch.setattr(selection, "_backend", stub)
     yield

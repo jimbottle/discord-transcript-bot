@@ -28,22 +28,49 @@
     <p id="external-note" class="search-meta" style="{% if not bot_status.external %}display:none{% endif %}">
         Launched outside the dashboard (e.g. <code>make start</code>) — start/stop are disabled here; manage it from where it was started.
     </p>
-    <p id="health-summary" class="search-meta" style="{% if not bot_status.checks %}display:none{% endif %}">
-        {% if bot_status.checks %}
-        {% set ok = bot_status.checks.values() | selectattr('ok') | list | length %}
-        {{ ok }}/{{ bot_status.checks | length }} checks OK
-        {% endif %}
+    {% if bot_state and bot_status.status not in ('stopped', 'crashed') %}
+    {# Authoritative runtime state the bot itself wrote — not the
+       file-freshness guess used by the Current Session card. One line
+       per connected guild (the bot is per-guild). #}
+    {% if state_stale %}
+    <p class="check-fail">
+        &#9888; Bot not responding &mdash; no heartbeat for {{ heartbeat_label }}.
+        The status below may be stale; the process may be wedged or gone.
     </p>
-    <ul id="health-checks" class="health-check-list" style="{% if not bot_status.checks %}display:none{% endif %}">
-        {% if bot_status.checks %}
-        {% for name, check in bot_status.checks.items() %}
-        <li class="health-check {% if check.ok %}check-pass{% elif check.critical %}check-fail{% else %}check-warn{% endif %}">
-            {% if check.ok %}&#10003;{% elif check.critical %}&#10007;{% else %}&#9888;{% endif %}
-            <strong>{{ name }}</strong>: {{ check.message }}
-        </li>
-        {% endfor %}
+    {% endif %}
+    <p class="search-meta">
+        {% if bot_state.guilds %}
+            {% for g in bot_state.guilds %}
+            Connected: <strong>{{ g.guild or 'unknown' }}</strong>{% if g.channel %} &middot; #{{ g.channel }}{% endif %}
+            &middot; Recording:
+            {%- if g.stalled %} <span class="check-fail">&#9888; STALLED (no output for {{ g.output_age | duration }})</span>
+            {%- elif g.recording %} ● yes
+            {%- else %} ○ no{% endif %}{% if not loop.last %}<br>{% endif %}
+            {% endfor %}
+        {% else %}
+            Not in a voice channel.
         {% endif %}
-    </ul>
+        {% if uptime %} &middot; Uptime: {{ uptime }}{% endif %}
+    </p>
+    {% endif %}
+    {# Collapse the per-check list behind its summary so an all-green bot
+       doesn't push Current Session below the fold. Opens automatically
+       when something isn't OK (where the detail actually matters). #}
+    {% set okc = (bot_status.checks.values() | selectattr('ok') | list | length) if bot_status.checks else 0 %}
+    {% set total = bot_status.checks | length if bot_status.checks else 0 %}
+    <details id="health-details" {% if total and okc < total %}open{% endif %} style="{% if not bot_status.checks %}display:none{% endif %}">
+        <summary id="health-summary" class="search-meta">{% if bot_status.checks %}{{ okc }}/{{ total }} checks OK{% endif %}</summary>
+        <ul id="health-checks" class="health-check-list">
+            {% if bot_status.checks %}
+            {% for name, check in bot_status.checks.items() %}
+            <li class="health-check {% if check.ok %}check-pass{% elif check.critical %}check-fail{% else %}check-warn{% endif %}">
+                {% if check.ok %}&#10003;{% elif check.critical %}&#10007;{% else %}&#9888;{% endif %}
+                <strong>{{ name }}</strong>: {{ check.message }}
+            </li>
+            {% endfor %}
+            {% endif %}
+        </ul>
+    </details>
     {% if bot_status.error %}
     <details open>
         <summary>Error Output</summary>
@@ -95,6 +122,14 @@ const STATUS_URL = "{{ url_for('bot_status') }}";
 const START_URL = "{{ url_for('bot_start') }}";
 const STOP_URL = "{{ url_for('bot_stop') }}";
 
+// Tracks whether the last poll saw a failing/warning check, so a fresh
+// failure can auto-open the collapsed health panel on its rising edge
+// without re-opening (and overriding a manual collapse) every poll while
+// the failure persists. Seeded from the server-rendered state: a failure
+// already present at page load is NOT a rising edge, so the first poll
+// must not re-open a panel the user collapsed in those first seconds.
+let healthWasDegraded = {{ 'true' if (bot_status.checks and (bot_status.checks.values() | selectattr('ok') | list | length) < (bot_status.checks | length)) else 'false' }};
+
 function renderStatus(data) {
     const badge = document.getElementById("status-badge");
     const checkList = document.getElementById("health-checks");
@@ -143,6 +178,17 @@ function renderStatus(data) {
     // be parsed as HTML.
     const checks = data.checks || {};
     const names = Object.keys(checks);
+    // Show/hide the whole collapsible wrapper with the check data, and
+    // auto-open it when a failure first appears so the now-relevant detail
+    // surfaces without a reload. Only on the rising edge — a sustained
+    // failure the user has manually collapsed stays collapsed.
+    const anyNotOk = Object.values(checks).some((c) => !c.ok);
+    const details = document.getElementById("health-details");
+    if (details) {
+        details.style.display = names.length ? "" : "none";
+        if (anyNotOk && !healthWasDegraded) details.open = true;
+    }
+    healthWasDegraded = anyNotOk;
     while (checkList.firstChild) checkList.removeChild(checkList.firstChild);
     if (names.length > 0) {
         for (const name of names) {

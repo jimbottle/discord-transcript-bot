@@ -9,12 +9,32 @@ import discord
 import yaml
 from discord.sinks.errors import RecordingException
 
+from src import player_map_store
 from src.bot.health import HealthCheck
 from src.sinks.whisper_sink import WhisperSink
 
 TRANSCRIPTION_METHOD = os.getenv("TRANSCRIPTION_METHOD")
 PLAYER_MAP_FILE_PATH = os.getenv("PLAYER_MAP_FILE_PATH")
 
+# Runtime state the web dashboard reads for true connected-guild /
+# recording / uptime (vs. its file-freshness heuristic). Written
+# best-effort on lifecycle transitions; a write failure must never
+# affect the bot. Same .logs dir + cwd convention as health_status.json.
+BOT_STATE_FILE = os.path.join(os.getcwd(), ".logs", "bot_state.json")
+
+# Liveness heartbeat / stall watchdog. _write_runtime_state only fires on
+# lifecycle transitions, so without a periodic write the dashboard can't
+# tell a live-but-quiet bot from a dead one — a wedged sink once left
+# bot_state.json 115 min stale during a real session while it showed
+# "recording: true". The heartbeat rewrites state on a fixed cadence (so
+# `updated_at` is a real liveness signal) and flags a recording guild whose
+# transcript output has stalled while audio keeps backing up in the queue.
+HEARTBEAT_INTERVAL_S = 30
+# A recording guild is "stalled" when its session file hasn't grown in this
+# long AND audio is piling up in the sink's queue (the unambiguous wedged-
+# pipeline case — not just a quiet room, where the queue stays shallow).
+STALL_OUTPUT_AGE_S = 120
+STALL_QUEUE_DEPTH = 25
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +53,13 @@ class VoloBot(discord.Bot):
         self.guild_whisper_message_tasks = {}
         self.player_map = {}
         self._is_ready = False
+        self._heartbeat_task = None
         self._gateway_latency = None
         self._last_interaction_time = None
+        # Process start, set once at construction (NOT in on_ready —
+        # on_ready re-fires on every gateway reconnect, which would make
+        # the dashboard uptime jump). Accurate from the first snapshot.
+        self._started_at = time.time()
         self._connecting_guilds = set()
         self.health = HealthCheck()
         if TRANSCRIPTION_METHOD == "openai":
@@ -90,6 +115,7 @@ class VoloBot(discord.Bot):
 
         self._gateway_latency = self.latency
         self._is_ready = True
+        self._write_runtime_state()  # ready, not yet connected
 
         # Sync slash commands ONCE, globally. Command definitions only
         # change when the code changes — not on every restart — and
@@ -107,12 +133,172 @@ class VoloBot(discord.Bot):
         await self.sync_commands()
         logger.info("Synced global commands.")
 
+        # Start the liveness heartbeat once the bot is ready. The _is_ready
+        # short-circuit at the top of on_ready keeps a gateway reconnect
+        # from spawning a second loop.
+        self._start_heartbeat()
+
+    def _start_heartbeat(self):
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            return
+        self._heartbeat_task = self.loop.create_task(self._heartbeat_loop())
+
+    async def _heartbeat_loop(self):
+        """Refresh bot_state.json on a fixed cadence so the dashboard can
+        tell a live-but-quiet bot from a dead one, and log a loud warning
+        when a recording guild's pipeline has stalled (audio queuing but
+        nothing transcribed). Fully guarded — a heartbeat failure is a
+        dashboard nicety and must never crash the bot.
+        """
+        while True:
+            try:
+                await asyncio.sleep(HEARTBEAT_INTERVAL_S)
+                for gid in self._write_runtime_state():
+                    logger.warning(
+                        f"Recording STALLED for guild {gid}: audio is queuing "
+                        f"but no transcript output in >{STALL_OUTPUT_AGE_S}s — "
+                        "the sink may be wedged. Try /stop then /scribe, or "
+                        "restart the bot."
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 - heartbeat must not die loudly
+                logger.debug(f"heartbeat iteration failed (ignored): {e}")
+
     async def on_application_command(self, ctx):
         self._last_interaction_time = time.time()
+
+    async def on_voice_state_update(self, member, before, after):
+        """Refresh the dashboard's live voice roster when someone joins or
+        leaves a channel the bot is connected to.
+
+        Best-effort and fully guarded — a failure here is a dashboard
+        nicety, never allowed to affect voice. Only rewrites the small
+        state JSON (same atomic path as every other transition) and only
+        when the change actually touches one of our connected channels, so
+        unrelated server-wide voice churn doesn't thrash the file.
+        """
+        try:
+            connected = {
+                getattr(getattr(h, "vc", None), "channel", None)
+                for h in dict(self.guild_to_helper).values()
+            }
+            connected.discard(None)
+            if before.channel in connected or after.channel in connected:
+                self._write_runtime_state()
+        except Exception as e:  # noqa: BLE001 - dashboard nicety, never fatal
+            logger.debug(f"on_voice_state_update state refresh skipped: {e}")
 
     async def close_consumers(self):
         if hasattr(self, "consumer_manager"):
             await self.consumer_manager.close()
+
+    def _write_runtime_state(self):
+        """Best-effort snapshot of connected guilds / recording / uptime
+        for the web dashboard. ENTIRELY guarded: this runs on lifecycle
+        transitions including the hardened /stop|/disconnect teardown
+        path, so a failure here must never propagate. Written atomically
+        (tmp + os.replace) so the 3s dashboard poll never sees a torn
+        file. Each guild is extracted independently — one bad guild
+        can't blank the whole file.
+
+        Returns the list of guild ids detected as STALLED this write (a
+        recording guild whose output has stopped while audio backs up) so
+        the heartbeat caller can log/alert. Always returns a list, even on
+        the guarded failure path.
+        """
+        stalled_gids = []
+        try:
+            now = time.time()
+            guilds = []
+            for gid, helper in dict(self.guild_to_helper).items():
+                try:
+                    g = self.get_guild(gid)
+                    vc = getattr(helper, "vc", None)
+                    channel_obj = getattr(vc, "channel", None)
+                    channel = getattr(channel_obj, "name", None)
+                    sink = self.guild_whisper_sinks.get(gid)
+                    session = getattr(sink, "session_file", None)
+                    recording = bool(self.guild_is_recording.get(gid, False))
+                    # Stall signals, both read-only off the existing sink so
+                    # this doesn't touch whisper_sink: how long since the
+                    # session file last grew, and how much audio is waiting
+                    # in the sink's queue. A deep queue with a stale file is
+                    # the wedged-pipeline case (today's silent 45-min death);
+                    # a quiet room keeps the queue shallow.
+                    output_age = None
+                    if session:
+                        try:
+                            output_age = now - os.path.getmtime(session)
+                        except OSError:
+                            output_age = None
+                    queue_depth = 0
+                    vq = getattr(sink, "voice_queue", None)
+                    if vq is not None:
+                        try:
+                            queue_depth = vq.qsize()
+                        except Exception:  # noqa: BLE001
+                            queue_depth = 0
+                    stalled = bool(
+                        recording
+                        and queue_depth >= STALL_QUEUE_DEPTH
+                        and output_age is not None
+                        and output_age > STALL_OUTPUT_AGE_S
+                    )
+                    if stalled:
+                        stalled_gids.append(gid)
+                    guilds.append(
+                        {
+                            "guild_id": gid,
+                            "guild": getattr(g, "name", None),
+                            "channel": channel,
+                            "recording": recording,
+                            "session_file": (
+                                os.path.basename(session) if session else None
+                            ),
+                            "output_age": (
+                                round(output_age, 1) if output_age is not None else None
+                            ),
+                            "queue_depth": queue_depth,
+                            "stalled": stalled,
+                            # Current voice-channel roster so the dashboard
+                            # can offer to name people who are present but
+                            # haven't spoken yet (read-only; bot is never
+                            # signalled by the resulting edit).
+                            "members": [
+                                {
+                                    "id": getattr(m, "id", None),
+                                    "name": getattr(m, "name", None),
+                                    "display_name": getattr(m, "display_name", None),
+                                }
+                                for m in (getattr(channel_obj, "members", None) or [])
+                            ],
+                        }
+                    )
+                except Exception as e:  # noqa: BLE001 - never fail a write
+                    logger.debug(f"runtime-state: skipped guild {gid}: {e}")
+            state = {
+                "updated_at": time.time(),
+                "started_at": self._started_at,
+                "guilds": guilds,
+            }
+            os.makedirs(os.path.dirname(BOT_STATE_FILE), exist_ok=True)
+            tmp = BOT_STATE_FILE + ".tmp"
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(state, f)
+                os.replace(tmp, BOT_STATE_FILE)
+            except Exception:
+                # Don't leave an orphaned .tmp behind if json.dump or
+                # replace fails — re-raise to the outer guard after.
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                raise
+        except Exception as e:  # noqa: BLE001 - dashboard nicety, never fatal
+            logger.debug(f"runtime-state write failed (ignored): {e}")
+        return stalled_gids
 
     def _close_and_clean_sink_for_guild(self, guild_id: int):
         # Pop first so the sink is untracked even if a teardown step
@@ -147,6 +333,7 @@ class VoloBot(discord.Bot):
             self.guild_is_recording[ctx.guild_id] = True
         except Exception as e:
             logger.error(f"Error starting whisper sink: {e}")
+        self._write_runtime_state()  # recording state changed
 
     def start_whisper_sink(self, ctx: discord.context.ApplicationContext):
         guild_voice_sink = self.guild_whisper_sinks.get(ctx.guild_id, None)
@@ -261,6 +448,7 @@ class VoloBot(discord.Bot):
             await asyncio.to_thread(self.cleanup_sink, ctx)
         except Exception as e:
             logger.error(f"end_recording_session: cleanup_sink failed: {e}")
+        self._write_runtime_state()  # recording stopped (still connected)
 
     async def get_transcription(self, ctx: discord.context.ApplicationContext):
         # Get the transcription queue
@@ -302,8 +490,43 @@ class VoloBot(discord.Bot):
                     self.player_map, file, default_flow_style=False, allow_unicode=True
                 )
 
+    def upsert_player_entry(self, user_id, player, character):
+        """Add or update one Discord-user → player/character mapping.
+
+        Mutates self.player_map IN PLACE — an already-running
+        WhisperSink holds that same dict, so a person added mid-call is
+        attributed correctly for the rest of the session immediately
+        (this is the whole point: name someone who's on the call now).
+        Persists by merging into the on-disk file so other guilds' and
+        hand-edited entries are preserved.
+
+        Returns True if saved to disk, False if no PLAYER_MAP_FILE_PATH
+        is configured (in-memory only — lost on restart). Raises only on
+        a real file IO/parse error so the caller can report it.
+        """
+        user_id = int(user_id)
+        self.player_map[user_id] = {
+            "player": player,
+            "character": character,
+        }  # live for the running session
+        if not PLAYER_MAP_FILE_PATH:
+            return False
+        # Disk read / non-dict guard / atomic merge-write lives in the
+        # shared player_map_store so the web dashboard's roster editor
+        # persists identically. A non-mapping file raises ValueError (the
+        # in-memory entry above still applies); the /add_player caller
+        # surfaces it. Mid-call writes can race a live session — the store
+        # writes atomically (tmp + os.replace) so the roster is never torn.
+        player_map_store.upsert(PLAYER_MAP_FILE_PATH, user_id, player, character)
+        return True
+
     async def stop_and_cleanup(self):
         try:
+            # Stop the liveness heartbeat so it doesn't rewrite state mid-
+            # teardown or outlive the shutdown.
+            task = getattr(self, "_heartbeat_task", None)
+            if task is not None:
+                task.cancel()
             # Disconnect from all voice channels first so Discord knows we left
             for vc in self.voice_clients:
                 try:

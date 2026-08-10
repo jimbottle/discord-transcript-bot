@@ -3,6 +3,7 @@ import io
 import json
 import logging
 import os
+import re
 import threading
 import time
 import wave
@@ -12,29 +13,88 @@ from queue import Queue
 from typing import List
 
 import speech_recognition as sr
-import torch
 from discord.opus import Decoder
 from discord.sinks.core import Filters, Sink, default_filters
-from faster_whisper import WhisperModel
 from openai import OpenAI
 
-WHISPER_MODEL = "large-v3"
+from src.asr import selection
+
+# Model id + device/precision + engine selection now live in src/asr/selection.py
+# (configurable via WHISPER_MODEL / ASR_BACKEND; default large-v3, accuracy-first).
 WHISPER_LANGUAGE = "en"
-WHISPER__PRECISION = "float32"
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# Decode params. beam_size was 10 / best_of 3 — unusually high and a major
+# CPU cost for marginal accuracy; 5 is faster-whisper's own default. Made
+# configurable so the accuracy/speed knee can be A/B-tuned on real session
+# audio (discord-transcript-bot-61z). discord-transcript-bot-std.
+WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "5"))
+WHISPER_BEST_OF = int(os.getenv("WHISPER_BEST_OF", "5"))
 
-# Set the model to evaluation mode (important for inference)
+# WHISPER_BATCH_SIZE (BatchedInferencePipeline throughput, discord-transcript-bot-ob3)
+# is a faster-whisper-only knob and is read in src/asr/selection.py where that
+# backend is constructed.
+
+# Per-segment hallucination filter. On near-silent / noisy audio Whisper
+# emits high-confidence garbage (YouTube-caption ghosts like "Subtitles by
+# the Amara.org community", repeated tokens, and — with roster biasing — the
+# injected names). faster-whisper exposes per-segment quality metrics; drop a
+# segment that looks like a hallucination rather than concatenating it blindly.
+# Conservative defaults to avoid dropping real speech; every drop is logged
+# with its metrics so the thresholds can be calibrated on real audio
+# (discord-transcript-bot-61z). Env-overridable.
+WHISPER_DROP_NO_SPEECH_PROB = float(os.getenv("WHISPER_DROP_NO_SPEECH_PROB", "0.8"))
+WHISPER_DROP_AVG_LOGPROB = float(os.getenv("WHISPER_DROP_AVG_LOGPROB", "-1.0"))
+WHISPER_DROP_COMPRESSION_RATIO = float(
+    os.getenv("WHISPER_DROP_COMPRESSION_RATIO", "2.4")
+)
+
+
+def _env_flag(raw, default="1"):
+    """Parse a truthy/falsy env string. Falsy: '', '0', 'false', 'no' (any
+    case); everything else (incl. unset -> default) is truthy."""
+    return (raw if raw is not None else default).strip().lower() not in (
+        "",
+        "0",
+        "false",
+        "no",
+    )
+
+
+# Roster proper-noun biasing of initial_prompt is an unvalidated accuracy
+# lever that also causes prompt-echo hallucinations; gate it so it can be
+# disabled (or scoped) without a code change. Truthy values enable it.
+BIAS_PROMPT_WITH_ROSTER = _env_flag(os.getenv("BIAS_PROMPT_WITH_ROSTER"))
+
+# Notorious Whisper silence-hallucination phrases (YouTube caption training
+# ghosts). Matched case-insensitively against the normalized segment text as a
+# precise backstop to the metric filter. Kept lowercase + punctuation-free.
+_HALLUCINATION_PHRASES = frozenset(
+    {
+        "thank you for watching",
+        "thanks for watching",
+        "thank you for watching this video",
+        "subtitles by the amara org community",
+        "transcription by the amara org community",
+        "please subscribe",
+        "like and subscribe",
+        "see you in the next video",
+    }
+)
+
+# Whisper's initial_prompt biases spelling/vocabulary. It is end-weighted and
+# capped near 224 tokens, so we keep this base hint short and append the
+# session's roster proper nouns (character/player names) AFTER it — see
+# WhisperSink._build_initial_prompt. discord-transcript-bot-cul.
+DEFAULT_INITIAL_PROMPT = "You are writing the transcriptions for a D&D game."
+
 logger = logging.getLogger(__name__)
 
-if DEVICE == "cuda":
-    gpu_ram = torch.cuda.get_device_properties(0).total_memory/1024**3
-    if gpu_ram < 5.0:
-        logger.warning("GPU has less than 5GB of RAM. Switching to CPU.")
-        DEVICE = "cpu"
-
-audio_model = WhisperModel(WHISPER_MODEL, device=DEVICE, compute_type=WHISPER__PRECISION)
-
+# The transcription engine (faster-whisper CPU/CUDA, or MLX-Whisper on Apple
+# Silicon) is selected at runtime and memoized in src/asr/selection.py. It is
+# resolved lazily on first use — NOT at import — so importing this module is
+# cheap and tests don't load a real model. The chosen backend normalizes its
+# output to NormalizedSegment so _accept_segment + the prompt-echo filter below
+# work regardless of engine. discord-transcript-bot-d8g.
 
 
 class Speaker:
@@ -47,7 +107,7 @@ class Speaker:
         self.player = player
         self.character = character
         self.data = [data]
-        self.first_word =time
+        self.first_word = time
         self.last_word = time
         self.new_bytes = 1
 
@@ -88,6 +148,10 @@ class WhisperSink(Sink):
         self.transcriber_type = transcriber_type
         if transcriber_type == "openai":
             self.client = OpenAI()
+        else:
+            # Resolve the local transcription backend once (memoized across
+            # sinks + the health check so the model loads a single time).
+            self._backend = selection.get_backend()
         self.vc = None
         self.audio_data = {}
         self.running = True
@@ -95,6 +159,24 @@ class WhisperSink(Sink):
         self.voice_queue = Queue()
         self.executor = ThreadPoolExecutor(max_workers=8)  # TODO: Adjust this
         self.player_map = player_map
+        # Biased Whisper prompt built once from the roster's proper nouns;
+        # player_map is fixed for this sink's lifetime. discord-transcript-bot-cul.
+        # _prompt_names is the exact name list put in the prompt, used to
+        # detect when Whisper regurgitates one as a hallucination.
+        self.initial_prompt, self._prompt_names = self._build_initial_prompt()
+
+        # Ordered-commit state. Transcriptions run in parallel on the
+        # executor, but their results are written in the order the segments
+        # were *submitted* — a chunk that finishes early waits behind
+        # earlier, still-running chunks. This is submission order, not
+        # strict cross-speaker chronology (see _record_result for the
+        # caveat). `_submit_seq` is assigned only on the (single)
+        # insert_voice thread; `_next_commit` and `_pending_results` are
+        # touched only under `_commit_lock`.
+        self._submit_seq = 0
+        self._next_commit = 0
+        self._pending_results = {}
+        self._commit_lock = threading.Lock()
 
         # Per-session transcript file. Path is fixed at construction so all
         # utterances from this sink land in the same file, but the handle is
@@ -102,7 +184,7 @@ class WhisperSink(Sink):
         # never used won't leave an empty file on disk.
         transcript_dir = os.path.join(os.getcwd(), "transcripts")
         os.makedirs(transcript_dir, exist_ok=True)
-        session_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        session_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         self.session_file = os.path.join(transcript_dir, f"{session_time}.txt")
         self._session_fh = None
         self._session_fh_lock = threading.Lock()
@@ -150,7 +232,8 @@ class WhisperSink(Sink):
                     logger.warning(
                         "Voice thread did not exit within "
                         f"{self.JOIN_TIMEOUT_S}s; abandoning it (daemon "
-                        "thread, will not block process exit).")
+                        "thread, will not block process exit)."
+                    )
         except Exception as e:
             logger.error(f"Unexpected error during thread join: {e}")
         finally:
@@ -164,55 +247,199 @@ class WhisperSink(Sink):
             except AttributeError:
                 pass
             logger.debug(f"A sink thread was stopped for guild {guild_id}.")
+
     def check_audio_length(self, temp_file):
         # Ensure the BytesIO is at the start
         temp_file.seek(0)
 
         # Open the BytesIO object as a WAV file
-        with wave.open(temp_file, 'rb') as wave_file:
+        with wave.open(temp_file, "rb") as wave_file:
             frames = wave_file.getnframes()
             frame_rate = wave_file.getframerate()
             duration = frames / float(frame_rate)
         return duration
+
+    # Conservative character budget for initial_prompt. Whisper's prompt is
+    # ~224-token capped; at ~4 chars/token that's ~900 chars, so this leaves
+    # generous headroom for the base hint plus as many roster names as fit.
+    MAX_INITIAL_PROMPT_CHARS = 600
+
+    def _build_initial_prompt(self):
+        """Build a Whisper initial_prompt that biases spelling toward this
+        session's proper nouns — the character and player names from the
+        roster — so names like 'Arasaka' or a character 'Johan' transcribe
+        correctly instead of as common-word homophones. Falls back to the
+        generic D&D hint when there's no roster. Length-bounded because the
+        prompt is end-weighted and ~224-token capped; names are appended
+        after the base hint (the high-value position) and truncated whole.
+        """
+        if not BIAS_PROMPT_WITH_ROSTER:
+            # Biasing disabled (BIAS_PROMPT_WITH_ROSTER=0): generic hint only,
+            # no names injected, so no names to echo.
+            return DEFAULT_INITIAL_PROMPT, []
+        entries = [e for e in (self.player_map or {}).values() if isinstance(e, dict)]
+        names = []
+        seen = set()
+        # Two passes — ALL character names first, then ALL player names —
+        # not interleaved per entry. Characters are spoken most, so when the
+        # char budget truncates the list they must take priority globally: a
+        # later entry's character outranks an earlier entry's player. Both
+        # deduped case-insensitively.
+        for key in ("character", "player"):
+            for entry in entries:
+                name = (entry.get(key) or "").strip()
+                if name and name.lower() not in seen:
+                    seen.add(name.lower())
+                    names.append(name)
+
+        if not names:
+            return DEFAULT_INITIAL_PROMPT, []
+
+        prefix = DEFAULT_INITIAL_PROMPT + " Names: "
+        kept = []
+        for name in names:
+            candidate = ", ".join(kept + [name])
+            # +1 for the trailing period.
+            if len(prefix) + len(candidate) + 1 > self.MAX_INITIAL_PROMPT_CHARS:
+                break
+            kept.append(name)
+
+        if not kept:
+            return DEFAULT_INITIAL_PROMPT, []
+        return prefix + ", ".join(kept) + ".", kept
+
+    # Verb connectives Whisper tacks onto a regurgitated name ("Sovereign
+    # Lord GM says,"). A name plus only these is still an echo. Deliberately
+    # excludes articles/conjunctions (and/the/a): the prompt lists names
+    # comma-separated, so the echo pattern is "Name, Name" (handled by
+    # punctuation normalization), and including bare articles would over-drop
+    # real clipped speech beginning with a short name ("Will the...").
+    _ECHO_FILLERS = frozenset({"says", "said", "say", "speaking", "speaks"})
+
+    @staticmethod
+    def _normalize_echo(text):
+        """Lowercase, strip punctuation, collapse whitespace — so prompt
+        names and transcribed text compare on the same footing."""
+        return " ".join(re.sub(r"[^\w\s]", " ", text.lower()).split())
+
+    def _is_prompt_echo(self, text):
+        """True when a transcription reduces to NOTHING BUT roster names from
+        the biasing prompt (plus trivial fillers like "says").
+
+        Whisper regurgitates its initial_prompt on near-silent/garbage audio,
+        leaking the biased names as fake speech — a bare name ("Sovereign Lord
+        GM"), a name + filler ("Sovereign Lord GM says,"), OR several names run
+        together ("Sovereign Lord GM, Rahul Patch Sarker."). Strip every prompt
+        name and filler from the text; if nothing real is left and at least one
+        name was present, it's an echo.
+
+        Deliberately conservative: a line that merely *mentions* a name with
+        real content ("Noah, watch out") keeps that content, so it survives.
+        """
+        norm = self._normalize_echo(text)
+        if not norm:
+            return False
+        name_norms = sorted(
+            (n for n in (self._normalize_echo(n) for n in self._prompt_names) if n),
+            key=len,
+            reverse=True,  # strip longest names first so multi-word names go whole
+        )
+        if not name_norms:
+            return False
+        stripped = norm
+        matched_a_name = False
+        for n in name_norms:
+            new = re.sub(rf"\b{re.escape(n)}\b", " ", stripped)
+            if new != stripped:
+                matched_a_name = True
+                stripped = new
+        leftover = [w for w in stripped.split() if w not in self._ECHO_FILLERS]
+        return matched_a_name and not leftover
+
+    def _is_hallucination_phrase(self, text):
+        """True when the whole utterance is a known Whisper silence-artifact
+        (YouTube caption ghost like "Subtitles by the Amara.org community")."""
+        return self._normalize_echo(text) in _HALLUCINATION_PHRASES
+
+    def _drop_if_prompt_echo(self, text):
+        """Return text, or "" (silence downstream) when the WHOLE utterance is
+        a roster-name prompt-echo or a known Whisper hallucination phrase."""
+        if self._is_prompt_echo(text):
+            logger.info(f"Dropping prompt-echo hallucination: {text!r}")
+            return ""
+        if self._is_hallucination_phrase(text):
+            logger.info(f"Dropping known Whisper artifact: {text!r}")
+            return ""
+        return text
+
+    def _accept_segment(self, seg):
+        """Whether to keep one faster-whisper segment, or drop it as a
+        hallucination based on its quality metrics. Drops are logged with the
+        metrics so the thresholds can be calibrated on real audio."""
+        text = (getattr(seg, "text", "") or "").strip()
+        if not text:
+            return False
+        nsp = getattr(seg, "no_speech_prob", 0.0) or 0.0
+        alp = getattr(seg, "avg_logprob", 0.0) or 0.0
+        cr = getattr(seg, "compression_ratio", 1.0) or 1.0
+        reason = None
+        if cr > WHISPER_DROP_COMPRESSION_RATIO:
+            reason = f"repetition (compression_ratio={cr:.2f})"
+        elif alp < WHISPER_DROP_AVG_LOGPROB:
+            reason = f"low-confidence (avg_logprob={alp:.2f})"
+        elif nsp > WHISPER_DROP_NO_SPEECH_PROB:
+            reason = f"silence (no_speech_prob={nsp:.2f})"
+        elif self._is_hallucination_phrase(text):
+            reason = "known-artifact"
+        if reason:
+            logger.info(f"Dropping hallucinated segment [{reason}]: {text!r}")
+            return False
+        return True
+
     def transcribe_audio(self, temp_file):
         try:
             # Ensure that the audio is long enough to transcribe. If not, return an empty string
             if self.check_audio_length(temp_file) <= 0.1:
                 return ""
-            
+
             if self.transcriber_type == "openai":
                 temp_file.seek(0)
                 openai_transcription = self.client.audio.transcriptions.create(
                     file=("foobar.wav", temp_file),
                     model="whisper-1",
                     language=WHISPER_LANGUAGE,
+                    prompt=self.initial_prompt,
                 )
                 logger.info(f"OpenAI Transcription: {openai_transcription.text}")
-                return openai_transcription.text
-            else:               
-                # The whisper model
+                return self._drop_if_prompt_echo(openai_transcription.text)
+            else:
+                # The selected local engine (faster-whisper CPU/CUDA, or
+                # MLX-Whisper on Apple Silicon). It returns NormalizedSegments
+                # carrying the quality metrics _accept_segment inspects, so the
+                # accuracy pipeline below is identical regardless of backend.
                 temp_file.seek(0)
-                segments, info = audio_model.transcribe(
+                result_obj = self._backend.transcribe(
                     temp_file,
                     language=WHISPER_LANGUAGE,
-                    beam_size=10,
-                    best_of=3,
+                    beam_size=WHISPER_BEAM_SIZE,
+                    best_of=WHISPER_BEST_OF,
                     vad_filter=True,
-                    vad_parameters=dict(
-                        min_silence_duration_ms=150,
-                        threshold=0.8
-                    ),
+                    vad_parameters=dict(min_silence_duration_ms=150, threshold=0.8),
                     no_speech_threshold=0.6,
-                    initial_prompt="You are writing the transcriptions for a D&D game.",
+                    initial_prompt=self.initial_prompt,
                 )
 
-                segments = list(segments)
-                result = ""
-                for segment in segments:
-                    result += segment.text
+                # Keep only segments that pass the per-segment hallucination
+                # filter (silence/low-confidence/repetition/known-artifact),
+                # instead of concatenating everything the engine emitted.
+                result = "".join(
+                    seg.text for seg in result_obj.segments if self._accept_segment(seg)
+                )
 
                 logger.info(f"Transcription: {result}")
-                return result
+                # Final whole-utterance backstop for prompt-echo / artifacts
+                # that slipped through the per-segment metrics.
+                return self._drop_if_prompt_echo(result)
         except Exception as e:
             logger.error(f"Error transcribing audio: {e}")
             return ""
@@ -232,18 +459,17 @@ class WhisperSink(Sink):
         wav_io = io.BytesIO()
         with wave.open(wav_io, "wb") as wave_writer:
             wave_writer.setnchannels(Decoder.CHANNELS)
-            wave_writer.setsampwidth(
-                Decoder.SAMPLE_SIZE // Decoder.CHANNELS)
+            wave_writer.setsampwidth(Decoder.SAMPLE_SIZE // Decoder.CHANNELS)
             wave_writer.setframerate(Decoder.SAMPLING_RATE)
             wave_writer.writeframes(wav_data.getvalue())
 
         wav_io.seek(0)
         # Check if the audio is long enough to transcribe, else return empty string
-        
+
         transcription = self.transcribe_audio(wav_io)
 
         return transcription
-    
+
     def get_transcriptions(self):
         """Retrieve all transcriptions from the queue, format them to only include data, begin, and user_id."""
         transcriptions = []
@@ -252,7 +478,9 @@ class WhisperSink(Sink):
 
             # Assuming log_message is a dictionary (or string in JSON format)
             if isinstance(log_message, str):
-                log_message = json.loads(log_message)  # Convert from string to dictionary if needed
+                log_message = json.loads(
+                    log_message
+                )  # Convert from string to dictionary if needed
 
             # Extract only the desired fields from the log message
             begin = log_message.get("begin", "Unknown begin")
@@ -271,11 +499,26 @@ class WhisperSink(Sink):
             transcriptions.append(formatted_entry)
 
         return transcriptions
-    
+
+    # A speaker's buffer is submitted for transcription once they've gone
+    # quiet for this long...
+    SILENCE_GAP_S = 1.5
+    # ...or once it has spanned this long even without a gap, so a speaker
+    # who never pauses (a heavy combat scene) can't accumulate a
+    # multi-minute segment that takes minutes to transcribe and stalls the
+    # whole pipeline. Bounds worst-case latency. See
+    # discord-transcript-bot-hin.
+    MAX_SEGMENT_S = 30
+    # Idle nap for the insert_voice loop so it doesn't busy-spin a core
+    # when there's no audio to drain or flush.
+    IDLE_SLEEP_S = 0.1
+
     def insert_voice(self):
         while self.running:
             try:
-                # Process the voice_queue
+                # Drain ALL pending audio into per-speaker buffers. This must
+                # never block on a transcription — see the detached submit
+                # below — or the queue backs up and segments snowball.
                 while not self.voice_queue.empty():
                     item = self.voice_queue.get()
                     # Find or create a speaker
@@ -293,42 +536,95 @@ class WhisperSink(Sink):
                         user_map = self.player_map.get(user_id, {})
                         player = user_map.get("player")
                         character = user_map.get("character")
-                        self.speakers.append(Speaker(user_id, player, character, item[1], item[2]))
-                    
-                    
+                        self.speakers.append(
+                            Speaker(user_id, player, character, item[1], item[2])
+                        )
 
-
-                # Transcribe audio for each speaker
-                # so this is interesting, as we arent checking the size of the audio stream, we are just transcribing it
-                future_to_speaker = {}
-                for speaker in self.speakers:
-                    if (time.time() - speaker.last_word) < 1.5:
-                        # Lets make sure the user stopped talking.
+                # Submit every speaker that has gone quiet OR whose buffer has
+                # grown past MAX_SEGMENT_S. Each is handed to the executor and
+                # DETACHED: we never call future.result() here, so this loop
+                # keeps draining the voice_queue while transcriptions run in
+                # parallel. The speaker is removed from the active list on
+                # submit (so it isn't double-submitted); new audio from the
+                # same user starts a fresh segment. A done-callback commits
+                # the result in submission order (see _on_transcribed).
+                now = time.time()
+                for speaker in self.speakers[:]:
+                    silent = (now - speaker.last_word) >= self.SILENCE_GAP_S
+                    too_long = (
+                        speaker.last_word - speaker.first_word
+                    ) >= self.MAX_SEGMENT_S
+                    if not (silent or too_long):
                         continue
-                    if speaker.new_bytes > 1:
-                        speaker.new_bytes = 0
-                        future = self.executor.submit(self.transcribe, speaker)
-                        future_to_speaker[future] = speaker
-                    else:
+                    if speaker.new_bytes <= 1:
                         continue
-                
-                for future in future_to_speaker:
-                    speaker = future_to_speaker[future]
+                    self.speakers.remove(speaker)
+                    seq = self._submit_seq
+                    self._submit_seq += 1
                     try:
-                        transcription = future.result()
-                        current_time = time.time()
-                        speaker_new_bytes = speaker.new_bytes
-                        # Remove speaker once returned. 
-                        for s in self.speakers[:]:
-                            if speaker.user == s.user:
-                                self.write_transcription_log(s, transcription)
-                                self.speakers.remove(s)
-
+                        future = self.executor.submit(self.transcribe, speaker)
+                        future.add_done_callback(
+                            lambda fut, s=seq, spk=speaker: self._on_transcribed(
+                                s, spk, fut
+                            )
+                        )
                     except Exception as e:
-                        logger.warn(f"Error in insert_voice future: {e}")
+                        # submit/callback registration failed after seq was
+                        # allocated (e.g. a shut-down executor). No future will
+                        # ever fire _on_transcribed(seq, …), so commit this seq
+                        # empty now — otherwise _next_commit wedges on it
+                        # permanently and every later result stops committing.
+                        logger.error(
+                            f"Failed to submit transcription for {speaker.user}: {e}"
+                        )
+                        self._record_result(seq, speaker, "")
 
+                # Idle nap so this loop doesn't busy-spin when idle.
+                time.sleep(self.IDLE_SLEEP_S)
             except Exception as e:
                 logger.error(f"Error in insert_voice: {e}")
+
+    def _on_transcribed(self, seq, speaker, future):
+        """Done-callback for a detached transcription future. Runs on an
+        executor thread. A failed future is committed as empty text so one
+        bad segment can't wedge the commit pointer forever.
+
+        Must not touch self.speakers (owned by the insert_voice thread); it
+        only reads the speaker object handed to it and writes the result.
+        """
+        try:
+            transcription = future.result()
+        except Exception as e:
+            logger.warning(f"Error in transcription future for {speaker.user}: {e}")
+            transcription = ""
+        self._record_result(seq, speaker, transcription)
+
+    def _record_result(self, seq, speaker, transcription):
+        """Store a result under its submission sequence, then commit every
+        result whose turn has come IN SUBMISSION ORDER — a segment that
+        finished early waits behind earlier, still-running segments.
+
+        Note: this is submission order, not strict cross-speaker
+        chronology. A long speaker force-flushed by MAX_SEGMENT_S can be
+        submitted after a shorter, later-but-already-silent speaker, so the
+        per-session .txt line order can differ slightly from true start
+        time. The embedded `begin`/`date` fields in each JSON record remain
+        authoritative — consumers needing exact chronology should sort by
+        those rather than relying on file line order.
+
+        Called by the done-callback and by the submit-failure path (so an
+        allocated seq that never produced a future is still committed-empty
+        and can't wedge the pointer).
+        """
+        with self._commit_lock:
+            self._pending_results[seq] = (speaker, transcription)
+            while self._next_commit in self._pending_results:
+                spk, text = self._pending_results.pop(self._next_commit)
+                self._next_commit += 1
+                try:
+                    self.write_transcription_log(spk, text)
+                except Exception as e:
+                    logger.error(f"Error writing transcription log: {e}")
 
     def check_speaker_timeouts(self, current_speaker, transcription):
 
@@ -337,28 +633,32 @@ class WhisperSink(Sink):
             if current_speaker.user == speaker.user:
                 self.write_transcription_log(speaker, transcription)
                 self.speakers.remove(speaker)
-    
+
     def write_transcription_log(self, speaker, transcription):
         # Convert first_word and last_word Unix timestamps to datetime
-        first_word_time = datetime.fromtimestamp(speaker.first_word).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-        last_word_time = datetime.fromtimestamp(speaker.last_word).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        first_word_time = datetime.fromtimestamp(speaker.first_word).strftime(
+            "%Y-%m-%d %H:%M:%S.%f"
+        )[:-3]
+        last_word_time = datetime.fromtimestamp(speaker.last_word).strftime(
+            "%Y-%m-%d %H:%M:%S.%f"
+        )[:-3]
         # Prepare the log data as a dictionary
         log_data = {
-            "date": first_word_time[:10],                  # Date (from first_word)
-            "begin": first_word_time[11:],       # First word time (HH:MM:SS.ss)
-            "end": last_word_time[11:],         # Last word time (HH:MM:SS.ss)
-            "user_id": speaker.user,                       # User ID
+            "date": first_word_time[:10],  # Date (from first_word)
+            "begin": first_word_time[11:],  # First word time (HH:MM:SS.ss)
+            "end": last_word_time[11:],  # Last word time (HH:MM:SS.ss)
+            "user_id": speaker.user,  # User ID
             "player": speaker.player,
             "character": speaker.character,
-            "event_source": "Discord",                     # Event source
-            "data": transcription                          # Transcription text
+            "event_source": "Discord",  # Event source
+            "data": transcription,  # Transcription text
         }
 
         # Convert the log data to JSON
         log_message = json.dumps(log_data)
 
         # Get the transcription logger
-        transcription_logger = logging.getLogger('transcription')
+        transcription_logger = logging.getLogger("transcription")
         # Log the message
         transcription_logger.info(log_message)
         # Place into queue for processing
@@ -368,7 +668,7 @@ class WhisperSink(Sink):
         if transcription and transcription.strip():
             player = speaker.player or "Unknown"
             character = speaker.character or "Unknown"
-            timestamp = datetime.fromtimestamp(speaker.first_word).strftime('%H:%M:%S')
+            timestamp = datetime.fromtimestamp(speaker.first_word).strftime("%H:%M:%S")
             line = f"[{timestamp}] {player} ({character}) [{speaker.user}]: {transcription.strip()}\n"
             fh = self._get_session_fh()
             if fh is None:
@@ -399,7 +699,6 @@ class WhisperSink(Sink):
                     logger.warning(f"Failed to open per-session transcript file: {e}")
                     return None
             return self._session_fh
-    
 
     @Filters.container
     def write(self, data, user):
