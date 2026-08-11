@@ -61,6 +61,17 @@ These tune the local transcription backend (no effect when `TRANSCRIPTION_METHOD
 - `MLX_WHISPER_MODEL` — optional; override the MLX HF repo (otherwise mapped from `WHISPER_MODEL`, e.g. `large-v3` → `mlx-community/whisper-large-v3-mlx`).
 - `WHISPER_BEAM_SIZE` (default 5), `WHISPER_BEST_OF` (default 5), `WHISPER_BATCH_SIZE` (default 8) — faster-whisper decode params. The MLX backend ignores all three: `mlx_whisper` has no beam-search decoder (greedy + temperature fallback only) and no batched pipeline. So the beam5-vs-beam10 accuracy question applies only to the faster-whisper path; the final value is set by the A/B bake-off (discord-transcript-bot-d6j).
 
+**Warm the model before a session:** `make prewarm`. Weights download lazily on the first transcription — ~3 GB for MLX — so a cold cache means the first person to speak stalls the bot for minutes. `make prewarm` downloads and does a real end-to-end decode; `python scripts/prewarm_models.py --check` just reports cache state.
+
+### Reference-audio capture (`src/session_capture.py`)
+
+- `CAPTURE_SESSION_AUDIO` — **off by default.** When truthy, the sink persists the exact per-speaker WAV bytes it feeds the engine to `captures/<session>/`, plus `manifest.draft.jsonl` pre-filled with the machine transcription. This turns a normal game into reference data for the A/B harness (discord-transcript-bot-3dn), which is the gating input for every remaining accuracy decision.
+- `CAPTURE_MAX_GB` — disk ceiling, default 20. Capture stops past it; transcription is unaffected.
+
+The draft manifest's `reference` fields are **machine output, not ground truth** — a human corrects them, then saves as `manifest.jsonl` for `scripts/ab_transcribe.py --manifest`. Scoring against an uncorrected draft compares Whisper to itself and reports a meaninglessly low WER; the harness warns if handed a `.draft` file. Each capture directory gets a README with the correction workflow.
+
+Capture is best-effort by construction: `SessionCapture` swallows its own errors and the sink wraps its calls again, so no capture bug can cost a live session its transcription.
+
 ## Code Style
 
 - Formatter: `black`

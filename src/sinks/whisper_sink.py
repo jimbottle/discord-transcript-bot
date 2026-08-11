@@ -18,6 +18,7 @@ from discord.sinks.core import Filters, Sink, default_filters
 from openai import OpenAI
 
 from src.asr import selection
+from src.session_capture import SessionCapture
 
 # Model id + device/precision + engine selection now live in src/asr/selection.py
 # (configurable via WHISPER_MODEL / ASR_BACKEND; default large-v3, accuracy-first).
@@ -65,6 +66,13 @@ def _env_flag(raw, default="1"):
 # disabled (or scoped) without a code change. Truthy values enable it.
 BIAS_PROMPT_WITH_ROSTER = _env_flag(os.getenv("BIAS_PROMPT_WITH_ROSTER"))
 
+# Persist the per-speaker audio this session transcribes, so a live game
+# doubles as reference-data capture for the A/B harness. OFF by default: it
+# costs ~192 KB per second of captured speech and normal sessions don't want
+# it. Turn on for a session you intend to use as bake-off reference data
+# (discord-transcript-bot-3dn). See src/session_capture.py.
+CAPTURE_SESSION_AUDIO = _env_flag(os.getenv("CAPTURE_SESSION_AUDIO"), default="0")
+
 # Notorious Whisper silence-hallucination phrases (YouTube caption training
 # ghosts). Matched case-insensitively against the normalized segment text as a
 # precise backstop to the metric filter. Kept lowercase + punctuation-free.
@@ -110,6 +118,14 @@ class Speaker:
         self.first_word = time
         self.last_word = time
         self.new_bytes = 1
+        # Submission sequence, assigned by insert_voice when this segment is
+        # handed to the executor. Used to name the captured clip so the
+        # capture directory sorts in the same order as the manifest.
+        self.seq = None
+        # Basename of this segment's captured audio, set by transcribe() when
+        # capture is enabled and read when the transcription is committed, so
+        # the manifest pairs each clip with its text.
+        self.clip_name = None
 
 
 class WhisperSink(Sink):
@@ -186,6 +202,18 @@ class WhisperSink(Sink):
         os.makedirs(transcript_dir, exist_ok=True)
         session_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         self.session_file = os.path.join(transcript_dir, f"{session_time}.txt")
+        # Reference-data capture, sharing the transcript's timestamp so clips
+        # and the .txt for one session are trivially correlated. None unless
+        # CAPTURE_SESSION_AUDIO is set; the directory itself is created lazily
+        # on the first clip.
+        self.capture = (
+            SessionCapture(
+                os.path.join(os.getcwd(), "captures", session_time),
+                session_info=self._capture_session_info(session_time),
+            )
+            if CAPTURE_SESSION_AUDIO
+            else None
+        )
         self._session_fh = None
         self._session_fh_lock = threading.Lock()
         # Distinct from `running`: `running` going False just stops the
@@ -195,6 +223,31 @@ class WhisperSink(Sink):
         # per-session .txt. Only once the file is finalized in close()
         # do we refuse further writes (the roborev #514 race guard).
         self._closed = False
+
+    def _capture_session_info(self, session_time):
+        """The engine/prompt settings that produced this session's draft
+        transcriptions, recorded next to the clips.
+
+        The roster-biased ``initial_prompt`` is the important one: it's the
+        bot's main proper-noun accuracy lever, it's rebuilt from a roster that
+        may change before anyone runs the bake-off, and a config scored
+        WITHOUT it understates the bot's real accuracy on names. Recording it
+        here lets the bake-off measure like-for-like.
+        """
+        backend = getattr(self, "_backend", None)
+        return {
+            "session": session_time,
+            "transcriber_type": self.transcriber_type,
+            "backend": getattr(backend, "name", None),
+            "model": getattr(backend, "model_id", None),
+            "language": WHISPER_LANGUAGE,
+            "initial_prompt": self.initial_prompt,
+            "roster_names_in_prompt": list(self._prompt_names),
+            "beam_size": WHISPER_BEAM_SIZE,
+            "best_of": WHISPER_BEST_OF,
+            "no_speech_threshold": 0.6,
+            "vad_parameters": dict(min_silence_duration_ms=150, threshold=0.8),
+        }
 
     def start_voice_thread(self, on_exception=None):
         def thread_exception_hook(args):
@@ -464,6 +517,22 @@ class WhisperSink(Sink):
             wave_writer.writeframes(wav_data.getvalue())
 
         wav_io.seek(0)
+
+        # Persist the EXACT bytes about to be transcribed, before doing it, so
+        # a reference clip survives even if transcription then fails.
+        # getvalue() doesn't move the stream position. Runs on an executor
+        # thread, so SessionCapture is thread-safe. The except is deliberate
+        # belt-and-braces on top of SessionCapture swallowing its own errors:
+        # capture is an optional side feature and no bug in it may ever cost a
+        # live session its transcription.
+        if self.capture is not None:
+            try:
+                speaker.clip_name = self.capture.save_clip(
+                    wav_io.getvalue(), speaker.seq, speaker
+                )
+            except Exception as e:
+                logger.warning(f"Session audio capture failed for this segment: {e}")
+
         # Check if the audio is long enough to transcribe, else return empty string
 
         transcription = self.transcribe_audio(wav_io)
@@ -561,6 +630,10 @@ class WhisperSink(Sink):
                     self.speakers.remove(speaker)
                     seq = self._submit_seq
                     self._submit_seq += 1
+                    # Tag the segment with its submission order before it goes
+                    # to the executor, so a captured clip's filename sorts the
+                    # same way its manifest line will.
+                    speaker.seq = seq
                     try:
                         future = self.executor.submit(self.transcribe, speaker)
                         future.add_done_callback(
@@ -664,6 +737,21 @@ class WhisperSink(Sink):
         # Place into queue for processing
         self.transcription_output_queue.put_nowait(log_message)
 
+        # Pair this segment's captured clip with the text the engine produced,
+        # as the draft a human corrects into reference data. Deliberately
+        # before the per-session .txt write below, which early-returns on a
+        # closed file handle — the manifest line must not be lost to that.
+        if self.capture is not None:
+            try:
+                self.capture.record(
+                    getattr(speaker, "clip_name", None),
+                    speaker,
+                    transcription,
+                    begin=first_word_time[11:],
+                )
+            except Exception as e:
+                logger.warning(f"Session capture manifest write failed: {e}")
+
         # Write human-readable line to per-session transcript file
         if transcription and transcription.strip():
             player = speaker.player or "Unknown"
@@ -735,6 +823,8 @@ class WhisperSink(Sink):
         self.running = False
         self.queue.put_nowait(None)
         super().cleanup()
+        if self.capture is not None:
+            self.capture.close()
         with self._session_fh_lock:
             # Set under the lock and before clearing the handle so any
             # write racing close() either completes first or is cleanly

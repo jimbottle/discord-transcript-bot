@@ -16,6 +16,12 @@ test-integration:
 preflight:
 	./scripts/preflight.sh
 
+prewarm:
+	./venv/bin/python scripts/prewarm_models.py
+
+capture-session:
+	CAPTURE_SESSION_AUDIO=1 ./venv/bin/python main.py
+
 verify-session:
 	./scripts/post_session_verify.sh
 

@@ -120,6 +120,20 @@ def load_manifest(args):
     clips = []
     if args.manifest:
         base = Path(args.manifest).resolve().parent
+        if ".draft" in Path(args.manifest).name:
+            # A capture's manifest.draft.jsonl holds MACHINE transcriptions as
+            # its references (src/session_capture.py). Scoring against those
+            # compares Whisper to itself and reports a meaninglessly low WER,
+            # which looks like a great result — so say so loudly rather than
+            # silently producing a bogus bake-off.
+            print(
+                f"WARNING: {Path(args.manifest).name} looks like an "
+                "uncorrected capture draft. Its 'reference' fields are "
+                "machine output, not ground truth, so the WER below is "
+                "meaningless. Correct the text and save as manifest.jsonl "
+                "first — see the README in the capture directory.\n",
+                file=sys.stderr,
+            )
         for lineno, line in enumerate(Path(args.manifest).read_text().splitlines(), 1):
             line = line.strip()
             if not line:
