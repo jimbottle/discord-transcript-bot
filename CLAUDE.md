@@ -40,7 +40,7 @@ Setup: `python -m venv venv && source venv/bin/activate && pip install -r requir
 
 - **py-cord** (not discord.py) — the `discord` import is Pycord
 - **faster_whisper** — local transcription model (large-v3), loaded as module-level singleton in `whisper_sink.py`
-- **ollama** — powers the `/ask` command (model: `$ASK_OLLAMA_MODEL`, default `ai/mistral:latest`)
+- **ollama** — powers the `/ask` command (model: `$ASK_OLLAMA_MODEL`, default `gemma4:26b`)
 - **torch** — CPU-only by default (see requirements.txt for CUDA option)
 - **ffmpeg** and **libopus** — required system dependencies for voice
 
@@ -51,7 +51,7 @@ Required in `.env`:
 - `TRANSCRIPTION_METHOD` — `local` (default) or `openai`
 - `OPENAI_API_KEY` — only if using openai method
 - `PLAYER_MAP_FILE_PATH` — optional path to `player_map.yml` mapping Discord user IDs to player/character names
-- `ASK_OLLAMA_MODEL` — optional; model for `/ask`. Defaults to `ai/mistral:latest` (prior behavior). Used in both `main.py` and `src/bot/health.py:_check_ollama_model` (keep the two defaults in sync). Model choice is benchmarked in the sibling `local-models` repo (`prompts/discord_ask.json`)
+- `ASK_OLLAMA_MODEL` — optional; model for `/ask`. Defaults to `gemma4:26b`, resolved for both `main.py` and `src/bot/health.py:_check_ollama_model` by `src/config/ollama_config.get_ask_model()` so the two cannot drift. Install it with `ollama pull gemma4:26b`. **It must be a name Ollama can actually pull:** the previous default `ai/mistral:latest` was a Docker Hub (Docker Model Runner) name that Ollama's registry 404s, so `/ask` failed out of the box and the health check told users to run the very `ollama pull` that had just failed. `ollama_config.is_ollama_pullable()` guards that trap. Model choice is benchmarked in the sibling `local-models` repo (`dev/discord-ask-model`), where `gemma4:26b` beat `mistral:latest` 6/6 vs 3/6 on human-judged grounding
 
 ### Transcription engine selection (`src/asr/selection.py`)
 

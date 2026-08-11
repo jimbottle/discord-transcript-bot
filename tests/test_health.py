@@ -38,7 +38,7 @@ def test_ollama_model_default_when_env_unset(monkeypatch):
     _stub_ollama_list(monkeypatch, [])
     hc = HealthCheck()
     hc._check_ollama_model()
-    assert "ai/mistral:latest" in hc.checks["ollama_model"]["message"]
+    assert "gemma4:26b" in hc.checks["ollama_model"]["message"]
 
 
 def test_ollama_model_empty_env_falls_back_to_default(monkeypatch):
@@ -46,7 +46,7 @@ def test_ollama_model_empty_env_falls_back_to_default(monkeypatch):
     _stub_ollama_list(monkeypatch, [])
     hc = HealthCheck()
     hc._check_ollama_model()
-    assert "ai/mistral:latest" in hc.checks["ollama_model"]["message"]
+    assert "gemma4:26b" in hc.checks["ollama_model"]["message"]
 
 
 def test_ollama_model_ok_when_resolved_model_installed(monkeypatch):
@@ -62,9 +62,17 @@ def test_run_all_returns_dict_with_expected_keys():
     results = hc.run_all(autofix=False, bot=None)
     assert isinstance(results, dict)
     expected = {
-        "env_vars", "ffmpeg", "opus", "whisper_model", "openai_api",
-        "transcripts_dir", "log_dirs", "player_map",
-        "ollama_server", "ollama_model", "discord_gateway",
+        "env_vars",
+        "ffmpeg",
+        "opus",
+        "whisper_model",
+        "openai_api",
+        "transcripts_dir",
+        "log_dirs",
+        "player_map",
+        "ollama_server",
+        "ollama_model",
+        "discord_gateway",
     }
     assert expected.issubset(results.keys())
 
@@ -101,15 +109,17 @@ def test_summary_renders_one_line_per_check():
 
 # ── ollama_model is non-critical ──────────────────────────────────────
 # Regression guards for "bot won't start because /ask's model isn't pulled."
-# /ask is the only thing that uses ai/mistral:latest. Voice transcription
+# /ask is the only thing that uses the Ollama model. Voice transcription
 # does not. on_ready aborts if all_ok() is False, so ollama_model being
 # critical was effectively blocking the entire bot on a 4GB model pull.
+
 
 def test_ollama_model_is_non_critical():
     hc = HealthCheck()
     hc.run_all(autofix=False, bot=None)
-    assert hc.checks["ollama_model"]["critical"] is False, \
-        "ollama_model must stay non-critical so a missing /ask model doesn't block startup"
+    assert (
+        hc.checks["ollama_model"]["critical"] is False
+    ), "ollama_model must stay non-critical so a missing /ask model doesn't block startup"
 
 
 def test_all_ok_when_only_ollama_model_fails():
@@ -124,5 +134,30 @@ def test_all_ok_when_only_ollama_model_fails():
         "ollama_server": {"ok": True, "message": "ok", "critical": True},
         "ollama_model": {"ok": False, "message": "not installed", "critical": False},
     }
-    assert hc.all_ok() is True, \
-        "all_ok() must return True if only non-critical ollama_model is failing"
+    assert (
+        hc.all_ok() is True
+    ), "all_ok() must return True if only non-critical ollama_model is failing"
+
+
+def test_missing_model_suggests_a_command_that_can_work(monkeypatch):
+    """A pullable-but-absent model gets the pull command."""
+    monkeypatch.setenv("ASK_OLLAMA_MODEL", "gemma4:26b")
+    _stub_ollama_list(monkeypatch, [])
+    hc = HealthCheck()
+    hc._check_ollama_model()
+    assert "ollama pull gemma4:26b" in hc.checks["ollama_model"]["message"]
+
+
+def test_docker_named_model_does_not_suggest_a_failing_pull(monkeypatch):
+    """The regression: health used to tell users to run `ollama pull
+    ai/mistral:latest` — the exact command that had just 404'd for them,
+    sending them in a circle instead of naming the real problem."""
+    monkeypatch.setenv("ASK_OLLAMA_MODEL", "ai/mistral:latest")
+    _stub_ollama_list(monkeypatch, [])
+    hc = HealthCheck()
+    hc._check_ollama_model()
+    message = hc.checks["ollama_model"]["message"]
+
+    assert "ollama pull ai/mistral:latest" not in message
+    assert "Docker Hub" in message
+    assert "ASK_OLLAMA_MODEL" in message
