@@ -182,10 +182,20 @@ def main(argv=None):
             from types import SimpleNamespace
 
             clips = load_manifest(SimpleNamespace(manifest=str(corrected)))
+            # Score with the engine that actually produced the clips, not a
+            # hardcoded one — otherwise on a faster-whisper host (ASR_BACKEND
+            # set, or no mlx_whisper installed) the scoring stage raises
+            # BackendUnavailable and this reports the capture loop as broken
+            # when only the config was wrong. Backend .name values match
+            # Config.backend exactly ("mlx-whisper" / "faster-whisper").
+            # cfg.model stays the SHORT id: the harness maps it to an MLX repo
+            # itself, so passing backend.model_id would double-map it.
+            resolved = getattr(sink._backend, "name", "faster-whisper")
+            model = os.getenv("WHISPER_MODEL", "large-v3")
             cfg = Config(
-                name="mlx large-v3 (as configured)",
-                model=os.getenv("WHISPER_MODEL", "large-v3"),
-                backend="mlx-whisper",
+                name=f"{resolved} {model} (as configured)",
+                model=model,
+                backend=resolved,
             )
             print("\nScoring the captured clips with the real harness...")
             try:

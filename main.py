@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from src.bot.helper import BotHelper
 from src.config.cliargs import CLIArgs
 from src.config.ollama_config import get_ask_model
+from src.session_capture import scribe_notice
 from src.utils.answer import clamp_message, clean_ollama_answer
 from src.utils.commandline import CommandLine
 from src.utils.pdf_generator import pdf_generator
@@ -216,10 +217,15 @@ if __name__ == "__main__":
             )
             return
         bot.start_recording(ctx)
-        await ctx.respond(
-            "Recording. Every word in this channel is being transcribed in realtime.",
-            ephemeral=False,
+        message = (
+            "Recording. Every word in this channel is being transcribed in realtime."
         )
+        # Non-ephemeral so every participant sees it, not just whoever ran the
+        # command — they have no other way to know audio is being kept.
+        notice = scribe_notice(bot.guild_whisper_sinks.get(ctx.guild_id))
+        if notice:
+            message += f"\n\n{notice}"
+        await ctx.respond(message, ephemeral=False)
 
     @bot.slash_command(name="stop", description="Stop transcribing.")
     async def stop(ctx: discord.context.ApplicationContext):
@@ -250,6 +256,11 @@ if __name__ == "__main__":
         # of expiring mid-teardown and 404ing as "The application did
         # not respond". Guard the teardown so we always confirm.
         await ctx.defer()
+        # Grab the capture before teardown pops the sink from the registry;
+        # the object outlives that, and its counters are only final once the
+        # in-flight transcriptions have committed below.
+        _sink = bot.guild_whisper_sinks.get(guild_id)
+        capture = getattr(_sink, "capture", None)
         teardown_ok = True
         # Independent try blocks: a get_transcription failure must NOT
         # skip the actual teardown (that would leave guild_is_recording
@@ -273,14 +284,20 @@ if __name__ == "__main__":
         # Guarantee the flag clears even if teardown raised, so a later
         # /scribe can't see "Already recording".
         bot.guild_is_recording.pop(guild_id, None)
+        # Tell the operator what the capture produced and where. Without this
+        # nothing surfaces that a capture happened at all, let alone the path
+        # needed to go correct the draft manifest.
+        capture_line = f"\nCaptured audio: {capture.summary()}" if capture else ""
         if teardown_ok:
             await ctx.followup.send(
                 "Recording stopped. Data saved. Standing by for the next run."
+                f"{capture_line}"
             )
         else:
             await ctx.followup.send(
                 "Recording stopped, but cleanup hit an error — check the logs. "
                 "If the bot seems stuck, try `/disconnect`."
+                f"{capture_line}"
             )
 
     @bot.slash_command(name="disconnect", description="Leave the voice channel.")

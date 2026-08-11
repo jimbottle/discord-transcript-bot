@@ -218,3 +218,86 @@ def test_session_info_records_the_biased_prompt(tmp_path):
     written = json.loads((tmp_path / "sess" / SESSION_INFO_NAME).read_text())
     assert written["initial_prompt"] == "...Names: Thorin, Gus."
     assert written["model"] == "large-v3"
+
+
+# --- roborev #3510: clips must never be orphaned without a manifest line ---
+
+
+def test_manifest_line_still_written_after_close(tmp_path):
+    """The session-tail case. A transcription submitted just before /stop
+    finishes AFTER close() (the executor is never shut down), so its clip is
+    already on disk. Refusing the manifest append would orphan exactly the
+    final utterances of every captured session."""
+    cap = SessionCapture(str(tmp_path / "sess"))
+    name = cap.save_clip(_wav_bytes(), 0, _speaker())
+    cap.close()
+
+    cap.record(name, _speaker(), "the last thing anyone said")
+
+    entries = [
+        json.loads(line)
+        for line in (tmp_path / "sess" / MANIFEST_NAME).read_text().splitlines()
+    ]
+    assert [e["audio"] for e in entries] == [name]
+    assert entries[0]["reference"] == "the last thing anyone said"
+
+
+def test_manifest_line_still_written_after_disable(tmp_path):
+    """The disk-cap case. When capture trips its cap, clips already saved and
+    still in flight must keep their manifest lines — they are valid reference
+    data and the human has no other way to learn they exist."""
+    cap = SessionCapture(str(tmp_path / "sess"), max_bytes=len(_wav_bytes()) + 10)
+    name = cap.save_clip(_wav_bytes(), 0, _speaker())
+    assert cap.save_clip(_wav_bytes(), 1, _speaker()) is None  # trips the cap
+
+    cap.record(name, _speaker(), "still valid reference data")
+    cap.close()
+
+    entries = [
+        json.loads(line)
+        for line in (tmp_path / "sess" / MANIFEST_NAME).read_text().splitlines()
+    ]
+    assert [e["audio"] for e in entries] == [name]
+
+
+def test_every_saved_clip_has_a_manifest_line(tmp_path):
+    """The invariant behind both cases above, stated directly: no .wav on
+    disk without a line describing it."""
+    cap = SessionCapture(str(tmp_path / "sess"))
+    names = [cap.save_clip(_wav_bytes(), i, _speaker()) for i in range(3)]
+    cap.close()  # close BEFORE the commits land, as a real teardown does
+    for i, name in enumerate(names):
+        cap.record(name, _speaker(), f"line {i}")
+
+    on_disk = sorted(p.name for p in (tmp_path / "sess").glob("*.wav"))
+    in_manifest = sorted(
+        json.loads(line)["audio"]
+        for line in (tmp_path / "sess" / MANIFEST_NAME).read_text().splitlines()
+    )
+    assert on_disk == in_manifest
+
+
+def test_record_before_any_clip_creates_nothing(tmp_path):
+    """Dropping the closed/disabled guard must not let a stray record() call
+    conjure a capture directory for a session that never captured."""
+    cap = SessionCapture(str(tmp_path / "sess"))
+    cap.record("phantom.wav", _speaker(), "text")
+    cap.close()
+    assert not (tmp_path / "sess").exists()
+
+
+# --- roborev #3510: participants must be told audio is kept ---------------
+
+
+def test_scribe_notice_only_when_capturing(tmp_path):
+    from types import SimpleNamespace as NS
+
+    from src.session_capture import PARTICIPANT_NOTICE, scribe_notice
+
+    assert scribe_notice(NS(capture=None)) == ""
+    assert scribe_notice(None) == ""
+    notice = scribe_notice(NS(capture=SessionCapture(str(tmp_path / "s"))))
+    assert notice == PARTICIPANT_NOTICE
+    # The whole point is disclosing that AUDIO is kept, not just transcribed.
+    assert "Audio recording is ON" in notice
+    assert "saved to disk" in notice

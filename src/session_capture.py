@@ -106,6 +106,24 @@ spoken names, is worth more than hours of clean solo narration.
 """
 
 
+# Shown in-channel by /scribe when capture is on. Saving everyone's raw voice
+# to disk is a materially different thing to consent to than a text
+# transcript, and participants can't see the operator's env vars — so the
+# disclosure has to be non-ephemeral and explicit that AUDIO is kept. Lives
+# here so the wording stays next to the feature it describes.
+PARTICIPANT_NOTICE = (
+    "**Audio recording is ON for this session.** Everyone's voice is being "
+    "saved to disk as audio files, not just transcribed to text, so this "
+    "session can be used as reference data for tuning transcription accuracy."
+)
+
+
+def scribe_notice(sink):
+    """The disclosure to append to /scribe's reply for this sink — empty
+    unless the sink is actually capturing audio."""
+    return PARTICIPANT_NOTICE if getattr(sink, "capture", None) is not None else ""
+
+
 class SessionCapture:
     """Writes per-speaker clips + a draft manifest for one session.
 
@@ -242,9 +260,21 @@ class SessionCapture:
                 entry["needs_reference"] = True
             line = json.dumps(entry, ensure_ascii=False) + "\n"
             with self._lock:
-                if self._disabled or self._closed:
+                # Deliberately NOT gated on _disabled/_closed. The clip was
+                # written at the START of transcribe(), but this runs when the
+                # transcription commits — much later. Two routine sequences
+                # land here after the session is nominally over: every
+                # session's tail (close() sets _closed while futures submitted
+                # just before /stop are still running — the executor is never
+                # shut down), and a mid-session _disable() with up to
+                # max_workers clips already saved. Refusing the append would
+                # leave those clips on disk with no manifest line, so the
+                # human correcting the draft never learns they exist and the
+                # final utterances of a session are lost as reference data.
+                # Unlike the .txt handle guard, there is no race to protect
+                # against: this opens and appends its own file each call.
+                if not self._started:
                     return
-                self._ensure_dir()
                 path = os.path.join(self.directory, MANIFEST_NAME)
                 with open(path, "a", encoding="utf-8") as fh:
                     fh.write(line)
