@@ -301,3 +301,34 @@ def test_scribe_notice_only_when_capturing(tmp_path):
     # The whole point is disclosing that AUDIO is kept, not just transcribed.
     assert "Audio recording is ON" in notice
     assert "saved to disk" in notice
+
+
+def test_concurrent_capture_from_executor_threads(tmp_path):
+    """Several players talking at once means several executor threads calling
+    save_clip/record in parallel — the sink runs 8 workers. Every clip must
+    land, every manifest line must be a complete JSON object (no interleaved
+    partial appends), and the two sets must agree."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    cap = SessionCapture(str(tmp_path / "sess"))
+    payload = _wav_bytes(seconds=0.2)
+
+    def one(i):
+        spk = _speaker(user=1000 + (i % 5), player=f"P{i % 5}")
+        cap.record(cap.save_clip(payload, i, spk), spk, f"utterance {i}")
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        list(ex.map(one, range(60)))
+    cap.close()
+
+    on_disk = sorted(p.name for p in (tmp_path / "sess").glob("*.wav"))
+    lines = [
+        line
+        for line in (tmp_path / "sess" / MANIFEST_NAME).read_text().splitlines()
+        if line.strip()
+    ]
+    entries = [json.loads(line) for line in lines]  # raises on a torn write
+
+    assert len(on_disk) == 60
+    assert cap.clips == 60
+    assert on_disk == sorted(e["audio"] for e in entries)
