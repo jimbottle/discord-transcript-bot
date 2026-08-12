@@ -785,3 +785,56 @@ def test_capture_failure_does_not_break_transcription(tmp_path, monkeypatch):
     # ...and yet the sink's own path swallows it and still returns text.
     assert sink.transcribe(speaker) == "still transcribing"
     sink.close()
+
+
+def test_insert_voice_sleeps_even_when_the_loop_body_raises(tmp_path, monkeypatch):
+    """discord-transcript-bot-309 hardening: the idle sleep lives in `finally`,
+    so an exception raised every pass cannot hot-loop a core while flooding the
+    log. Without it this loop would spin as fast as the CPU allows."""
+    sink = _make_sink(tmp_path, monkeypatch)
+    sink.IDLE_SLEEP_S = 0.02
+    calls = []
+
+    class _Boom:
+        def empty(self):
+            calls.append(1)
+            raise RuntimeError("queue exploded")
+
+    monkeypatch.setattr(sink, "voice_queue", _Boom())
+
+    sink.running = True
+    th = threading.Thread(target=sink.insert_voice, daemon=True)
+    th.start()
+    time.sleep(0.3)
+    sink.running = False
+    th.join(timeout=2)
+
+    # ~0.3s at 0.02s/iteration is ~15 passes. Without the finally-sleep this
+    # would be many thousands. Generous bound — asserting "not spinning".
+    assert 0 < len(calls) < 200, f"loop ran {len(calls)} times — it is spinning"
+    sink.close()
+
+
+def test_capture_logs_that_it_is_armed_at_construction(tmp_path, monkeypatch, caplog):
+    """discord-transcript-bot-tr2: the capture dir is created lazily on the
+    first clip, so without this the operator has no confirmation capture is on
+    until someone speaks — and a session recorded with it silently OFF is only
+    discovered afterwards, when the reference data isn't there."""
+    import logging
+
+    monkeypatch.setattr(ws, "CAPTURE_SESSION_AUDIO", True)
+    with caplog.at_level(logging.INFO, logger=ws.__name__):
+        sink = _make_sink(tmp_path, monkeypatch)
+    assert any(
+        "capture ENABLED" in r.message for r in caplog.records
+    ), "enabling capture must announce itself at startup"
+    sink.close()
+
+
+def test_no_capture_announcement_when_disabled(tmp_path, monkeypatch, caplog):
+    import logging
+
+    with caplog.at_level(logging.INFO, logger=ws.__name__):
+        sink = _make_sink(tmp_path, monkeypatch)
+    assert not any("capture ENABLED" in r.message for r in caplog.records)
+    sink.close()

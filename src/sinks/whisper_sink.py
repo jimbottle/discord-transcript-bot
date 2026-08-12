@@ -214,6 +214,16 @@ class WhisperSink(Sink):
             if CAPTURE_SESSION_AUDIO
             else None
         )
+        if self.capture is not None:
+            # Say it up front. The directory is created lazily on the first
+            # clip, so without this the operator gets no confirmation capture
+            # is armed until someone speaks — and a session recorded with it
+            # silently OFF is only discovered after the game, when the
+            # reference data isn't there. discord-transcript-bot-tr2.
+            logger.info(
+                "Session audio capture ENABLED — per-speaker clips will be "
+                f"written to {self.capture.directory}"
+            )
         self._session_fh = None
         self._session_fh_lock = threading.Lock()
         # Distinct from `running`: `running` going False just stops the
@@ -652,10 +662,18 @@ class WhisperSink(Sink):
                         )
                         self._record_result(seq, speaker, "")
 
-                # Idle nap so this loop doesn't busy-spin when idle.
-                time.sleep(self.IDLE_SLEEP_S)
             except Exception as e:
                 logger.error(f"Error in insert_voice: {e}")
+            finally:
+                # Idle nap so this loop doesn't busy-spin. In `finally`, NOT at
+                # the end of the try: an exception raised each pass would
+                # otherwise skip the sleep and hot-loop a core while flooding
+                # the log — for a bug whose only symptom is heat, on the
+                # thread that keeps transcription flowing. Measurement says
+                # this isn't what caused the 100%-core spin in
+                # discord-transcript-bot-309 (that is Pycord's receive loop;
+                # this loop measured 0.0%), so this is defense in depth.
+                time.sleep(self.IDLE_SLEEP_S)
 
     def _on_transcribed(self, seq, speaker, future):
         """Done-callback for a detached transcription future. Runs on an
