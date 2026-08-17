@@ -5,6 +5,7 @@ no empty file created when a sink is constructed but never used.
 """
 
 import io
+import json
 import os
 import threading
 import time
@@ -12,6 +13,8 @@ import wave
 from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+
+import pytest
 
 import src.sinks.whisper_sink as ws
 from src.asr.base import NormalizedSegment, TranscribeResult
@@ -694,4 +697,144 @@ def test_drain_continues_while_a_transcription_is_in_flight(tmp_path, monkeypatc
         release.set()
         sink.running = False
         th.join(timeout=2)
+    sink.close()
+
+
+# --- reference-audio capture wiring (discord-transcript-bot-h7j) ----------
+#
+# The capture module itself is covered in tests/test_session_capture.py;
+# these cover the SINK's side of it: that it stays off unless asked, and
+# that when on, a transcribed segment produces a paired clip + manifest
+# line without disturbing the transcription path.
+
+
+def _capture_sink(tmp_path, monkeypatch):
+    """A sink with capture enabled, as CAPTURE_SESSION_AUDIO=1 would."""
+    monkeypatch.setattr(ws, "CAPTURE_SESSION_AUDIO", True)
+    return _make_sink(tmp_path, monkeypatch)
+
+
+def test_capture_is_off_by_default(tmp_path, monkeypatch):
+    """Normal sessions must not silently start writing GBs of audio."""
+    sink = _make_sink(tmp_path, monkeypatch)
+    assert sink.capture is None
+    sink.close()
+    assert not os.path.exists(os.path.join(tmp_path, "captures"))
+
+
+def test_capture_writes_clip_and_manifest_for_a_transcribed_segment(
+    tmp_path, monkeypatch
+):
+    """End-to-end through the sink: transcribe() saves the exact bytes it
+    feeds the backend, and the commit path pairs them with the text."""
+    sink = _capture_sink(tmp_path, monkeypatch)
+    sink._backend = _fake_backend(
+        [
+            NormalizedSegment(
+                text="I cast fireball",
+                no_speech_prob=0.0,
+                avg_logprob=-0.1,
+                compression_ratio=1.2,
+            )
+        ]
+    )
+    speaker = _spk(7)
+    speaker.seq = 3
+    speaker.data = [b"\x00\x00" * 48000]  # ~0.5s of 48k stereo
+
+    text = sink.transcribe(speaker)
+    sink.write_transcription_log(speaker, text)
+    sink.close()
+
+    session_dir = os.path.join(
+        tmp_path, "captures", os.listdir(os.path.join(tmp_path, "captures"))[0]
+    )
+    clips = [f for f in os.listdir(session_dir) if f.endswith(".wav")]
+    assert clips == ["0003_p7.wav"], "clip named by submission order + player"
+
+    manifest = os.path.join(session_dir, "manifest.draft.jsonl")
+    entry = json.loads(open(manifest).read().splitlines()[0])
+    assert entry["audio"] == "0003_p7.wav"
+    assert entry["reference"] == "I cast fireball"
+    assert entry["user_id"] == 7
+
+
+def test_capture_failure_does_not_break_transcription(tmp_path, monkeypatch):
+    """The live-session guarantee: if capture blows up mid-game, the
+    transcription still comes back."""
+    sink = _capture_sink(tmp_path, monkeypatch)
+    sink._backend = _fake_backend(
+        [
+            NormalizedSegment(
+                text="still transcribing",
+                no_speech_prob=0.0,
+                avg_logprob=-0.1,
+                compression_ratio=1.2,
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        sink.capture, "save_clip", MagicMock(side_effect=OSError("disk gone"))
+    )
+    speaker = _spk(1)
+    speaker.data = [b"\x00\x00" * 48000]
+
+    with pytest.raises(OSError):
+        sink.capture.save_clip(b"", 0, speaker)  # confirm the mock really raises
+
+    # ...and yet the sink's own path swallows it and still returns text.
+    assert sink.transcribe(speaker) == "still transcribing"
+    sink.close()
+
+
+def test_insert_voice_sleeps_even_when_the_loop_body_raises(tmp_path, monkeypatch):
+    """discord-transcript-bot-309 hardening: the idle sleep lives in `finally`,
+    so an exception raised every pass cannot hot-loop a core while flooding the
+    log. Without it this loop would spin as fast as the CPU allows."""
+    sink = _make_sink(tmp_path, monkeypatch)
+    sink.IDLE_SLEEP_S = 0.02
+    calls = []
+
+    class _Boom:
+        def empty(self):
+            calls.append(1)
+            raise RuntimeError("queue exploded")
+
+    monkeypatch.setattr(sink, "voice_queue", _Boom())
+
+    sink.running = True
+    th = threading.Thread(target=sink.insert_voice, daemon=True)
+    th.start()
+    time.sleep(0.3)
+    sink.running = False
+    th.join(timeout=2)
+
+    # ~0.3s at 0.02s/iteration is ~15 passes. Without the finally-sleep this
+    # would be many thousands. Generous bound — asserting "not spinning".
+    assert 0 < len(calls) < 200, f"loop ran {len(calls)} times — it is spinning"
+    sink.close()
+
+
+def test_capture_logs_that_it_is_armed_at_construction(tmp_path, monkeypatch, caplog):
+    """discord-transcript-bot-tr2: the capture dir is created lazily on the
+    first clip, so without this the operator has no confirmation capture is on
+    until someone speaks — and a session recorded with it silently OFF is only
+    discovered afterwards, when the reference data isn't there."""
+    import logging
+
+    monkeypatch.setattr(ws, "CAPTURE_SESSION_AUDIO", True)
+    with caplog.at_level(logging.INFO, logger=ws.__name__):
+        sink = _make_sink(tmp_path, monkeypatch)
+    assert any(
+        "capture ENABLED" in r.message for r in caplog.records
+    ), "enabling capture must announce itself at startup"
+    sink.close()
+
+
+def test_no_capture_announcement_when_disabled(tmp_path, monkeypatch, caplog):
+    import logging
+
+    with caplog.at_level(logging.INFO, logger=ws.__name__):
+        sink = _make_sink(tmp_path, monkeypatch)
+    assert not any("capture ENABLED" in r.message for r in caplog.records)
     sink.close()

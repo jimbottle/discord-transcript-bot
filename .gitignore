@@ -8,6 +8,8 @@ player_map.yaml
 venv/
 .logs/
 transcripts/
+# Captured session audio: multi-GB of recorded voices, never committed
+captures/
 .DS_Store
 **/.claude/settings.local.json
 # roborev snapshots

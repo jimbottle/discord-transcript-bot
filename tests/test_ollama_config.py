@@ -4,7 +4,12 @@ Guards the env plumbing roborev flagged on commit 2d16d19: the default
 was duplicated across main.py and health.py with no test, and an empty
 ASK_OLLAMA_MODEL= silently produced model="".
 """
-from src.config.ollama_config import DEFAULT_ASK_MODEL, get_ask_model
+
+from src.config.ollama_config import (
+    DEFAULT_ASK_MODEL,
+    get_ask_model,
+    is_ollama_pullable,
+)
 
 
 def test_default_when_env_unset(monkeypatch):
@@ -32,6 +37,26 @@ def test_surrounding_whitespace_trimmed(monkeypatch):
     assert get_ask_model() == "llama3.2:3b"
 
 
-def test_default_matches_prior_behavior():
-    # The historical hardcoded value, preserved when the var is unset.
-    assert DEFAULT_ASK_MODEL == "ai/mistral:latest"
+def test_default_is_the_benchmarked_model():
+    # Was "ai/mistral:latest" — a Docker Hub name Ollama's registry 404s, so
+    # /ask could never work unconfigured. Now the local-models bake-off winner.
+    assert DEFAULT_ASK_MODEL == "gemma4:26b"
+
+
+def test_default_is_actually_pullable_from_ollama():
+    """The bug class this whole module exists to prevent: a default nobody can
+    install. Any future change to DEFAULT_ASK_MODEL trips this."""
+    assert is_ollama_pullable(DEFAULT_ASK_MODEL)
+
+
+def test_docker_hub_names_are_rejected():
+    assert not is_ollama_pullable("ai/mistral:latest")
+    assert not is_ollama_pullable("AI/Mistral:Latest")  # case-insensitive
+    assert not is_ollama_pullable("  ai/smollm2  ")  # tolerates stray spacing
+
+
+def test_ollama_namespaced_names_are_accepted():
+    """Deliberately narrow: Ollama DOES serve user- and hf-namespaced models,
+    so a blanket 'contains a slash' rule would reject valid choices."""
+    for name in ("gemma4:26b", "mistral:latest", "someuser/model", "hf.co/org/m"):
+        assert is_ollama_pullable(name), name

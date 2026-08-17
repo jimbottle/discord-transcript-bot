@@ -110,15 +110,15 @@ class HealthCheck:
 
     def all_ok(self) -> bool:
         """True if all critical checks pass."""
-        return all(
-            c["ok"] for c in self.checks.values() if c["critical"]
-        )
+        return all(c["ok"] for c in self.checks.values() if c["critical"])
 
     def summary(self) -> str:
         """Human-readable summary of check results."""
         lines = []
         for name, result in self.checks.items():
-            icon = "PASS" if result["ok"] else ("FAIL" if result["critical"] else "WARN")
+            icon = (
+                "PASS" if result["ok"] else ("FAIL" if result["critical"] else "WARN")
+            )
             lines.append(f"[{icon}] {name}: {result['message']}")
         return "\n".join(lines)
 
@@ -139,18 +139,22 @@ class HealthCheck:
         if shutil.which("ffmpeg"):
             self._record("ffmpeg", True, "ffmpeg found on PATH")
         else:
-            self._record("ffmpeg", False, "ffmpeg not found on PATH (required for voice audio)")
+            self._record(
+                "ffmpeg", False, "ffmpeg not found on PATH (required for voice audio)"
+            )
 
     # ── opus ──────────────────────────────────────────────────────────
 
     def _check_opus(self):
         try:
             import discord.opus
+
             if not discord.opus.is_loaded():
                 discord.opus._load_default()
             # If _load_default didn't find it, try known paths (e.g. Homebrew)
             if not discord.opus.is_loaded():
                 import glob as _glob
+
                 candidates = [
                     "/opt/homebrew/lib/libopus.0.dylib",
                     "/opt/homebrew/lib/libopus.dylib",
@@ -170,7 +174,9 @@ class HealthCheck:
             if discord.opus.is_loaded():
                 self._record("opus", True, "libopus loaded")
             else:
-                self._record("opus", False, "libopus not found (required for voice codec)")
+                self._record(
+                    "opus", False, "libopus not found (required for voice codec)"
+                )
         except Exception as e:
             self._record("opus", False, f"libopus failed to load: {e}")
 
@@ -180,7 +186,9 @@ class HealthCheck:
         missing = []
         if not os.getenv("DISCORD_BOT_TOKEN"):
             missing.append("DISCORD_BOT_TOKEN")
-        if os.getenv("TRANSCRIPTION_METHOD") == "openai" and not os.getenv("OPENAI_API_KEY"):
+        if os.getenv("TRANSCRIPTION_METHOD") == "openai" and not os.getenv(
+            "OPENAI_API_KEY"
+        ):
             missing.append("OPENAI_API_KEY")
         if missing:
             self._record("env_vars", False, f"Missing: {', '.join(missing)}")
@@ -212,10 +220,16 @@ class HealthCheck:
 
     def _check_openai_api(self):
         if os.getenv("TRANSCRIPTION_METHOD") != "openai":
-            self._record("openai_api", True, "Not using OpenAI transcription (skipped)", critical=False)
+            self._record(
+                "openai_api",
+                True,
+                "Not using OpenAI transcription (skipped)",
+                critical=False,
+            )
             return
         try:
             from openai import OpenAI
+
             client = OpenAI()
             client.models.list()
             self._record("openai_api", True, "OpenAI API reachable")
@@ -230,7 +244,9 @@ class HealthCheck:
             if autofix:
                 os.makedirs(transcript_dir, exist_ok=True)
             if not os.path.isdir(transcript_dir):
-                self._record("transcripts_dir", False, f"{transcript_dir} does not exist")
+                self._record(
+                    "transcripts_dir", False, f"{transcript_dir} does not exist"
+                )
                 return
             test_file = os.path.join(transcript_dir, ".health_check")
             with open(test_file, "w") as f:
@@ -251,7 +267,9 @@ class HealthCheck:
             if not os.path.isdir(d):
                 missing.append(d)
         if missing:
-            self._record("log_dirs", False, f"Missing directories: {', '.join(missing)}")
+            self._record(
+                "log_dirs", False, f"Missing directories: {', '.join(missing)}"
+            )
         else:
             self._record("log_dirs", True, "All log directories exist")
 
@@ -260,10 +278,20 @@ class HealthCheck:
     def _check_player_map(self):
         player_map_path = os.getenv("PLAYER_MAP_FILE_PATH")
         if not player_map_path:
-            self._record("player_map", True, "PLAYER_MAP_FILE_PATH not set (optional)", critical=False)
+            self._record(
+                "player_map",
+                True,
+                "PLAYER_MAP_FILE_PATH not set (optional)",
+                critical=False,
+            )
             return
         if not os.path.exists(player_map_path):
-            self._record("player_map", False, f"File not found: {player_map_path}", critical=False)
+            self._record(
+                "player_map",
+                False,
+                f"File not found: {player_map_path}",
+                critical=False,
+            )
             return
         try:
             with open(player_map_path, "r", encoding="utf-8") as f:
@@ -271,9 +299,16 @@ class HealthCheck:
             if data is None:
                 data = {}
             if not isinstance(data, dict):
-                self._record("player_map", False, "File is not a valid YAML mapping", critical=False)
+                self._record(
+                    "player_map",
+                    False,
+                    "File is not a valid YAML mapping",
+                    critical=False,
+                )
                 return
-            self._record("player_map", True, f"Loaded {len(data)} entries", critical=False)
+            self._record(
+                "player_map", True, f"Loaded {len(data)} entries", critical=False
+            )
         except Exception as e:
             self._record("player_map", False, f"Invalid YAML: {e}", critical=False)
 
@@ -282,6 +317,7 @@ class HealthCheck:
     def _ollama_is_reachable(self) -> bool:
         try:
             import ollama
+
             ollama.list()
             return True
         except Exception:
@@ -292,11 +328,15 @@ class HealthCheck:
         # without it, so a host without ollama installed must still be able to
         # start the bot.
         if self._ollama_is_reachable():
-            self._record("ollama_server", True, "Ollama server reachable", critical=False)
+            self._record(
+                "ollama_server", True, "Ollama server reachable", critical=False
+            )
             return
 
         if not autofix:
-            self._record("ollama_server", False, "Ollama server not reachable", critical=False)
+            self._record(
+                "ollama_server", False, "Ollama server not reachable", critical=False
+            )
             return
 
         # Auto-fix: start ollama serve if we haven't already
@@ -309,10 +349,20 @@ class HealthCheck:
                     stderr=subprocess.DEVNULL,
                 )
             except FileNotFoundError:
-                self._record("ollama_server", False, "ollama binary not found on PATH (only /ask needs it)", critical=False)
+                self._record(
+                    "ollama_server",
+                    False,
+                    "ollama binary not found on PATH (only /ask needs it)",
+                    critical=False,
+                )
                 return
             except Exception as e:
-                self._record("ollama_server", False, f"Failed to start ollama: {e}", critical=False)
+                self._record(
+                    "ollama_server",
+                    False,
+                    f"Failed to start ollama: {e}",
+                    critical=False,
+                )
                 return
 
         # Poll for readiness (up to ~10s)
@@ -320,10 +370,20 @@ class HealthCheck:
             time.sleep(0.5)
             if self._ollama_is_reachable():
                 logger.info("Health autofix: ollama server is now reachable.")
-                self._record("ollama_server", True, "Ollama server started via autofix", critical=False)
+                self._record(
+                    "ollama_server",
+                    True,
+                    "Ollama server started via autofix",
+                    critical=False,
+                )
                 return
 
-        self._record("ollama_server", False, "Started ollama serve but it didn't become reachable in 10s", critical=False)
+        self._record(
+            "ollama_server",
+            False,
+            "Started ollama serve but it didn't become reachable in 10s",
+            critical=False,
+        )
 
     # ── ollama_model ──────────────────────────────────────────────────
 
@@ -331,44 +391,78 @@ class HealthCheck:
         # Shared resolver with main.py's /ask (single source of truth;
         # empty ASK_OLLAMA_MODEL= falls back to the default) so the
         # health check always verifies whatever model /ask will use.
-        from src.config.ollama_config import get_ask_model
+        from src.config.ollama_config import get_ask_model, is_ollama_pullable
+
         model_name = get_ask_model()
         try:
             import ollama
+
             models = ollama.list()
             installed = [m.model for m in models.models]
-            if any(name == model_name or name.endswith("/" + model_name) for name in installed):
-                self._record("ollama_model", True, f"{model_name} is available", critical=False)
+            if any(
+                name == model_name or name.endswith("/" + model_name)
+                for name in installed
+            ):
+                self._record(
+                    "ollama_model", True, f"{model_name} is available", critical=False
+                )
                 return
 
             # Non-critical: /ask is the only feature that uses this model.
             # Voice transcription works without it. We deliberately do NOT
-            # auto-pull on startup — at ~4GB it would block on_ready for
-            # several minutes. Run `ollama pull ai/mistral:latest` manually
-            # when /ask is needed.
+            # auto-pull on startup — these models are multi-GB and it would
+            # block on_ready for several minutes.
+            #
+            # Do not blindly suggest `ollama pull <name>`: a Docker-namespaced
+            # name can never be pulled from Ollama's registry, and this check
+            # previously sent users to run exactly the command that had just
+            # failed for them.
+            if is_ollama_pullable(model_name):
+                remedy = f"run `ollama pull {model_name}` if /ask needed"
+            else:
+                remedy = (
+                    f"`{model_name}` is a Docker Hub name and CANNOT be pulled "
+                    "from Ollama's registry — set ASK_OLLAMA_MODEL to an "
+                    "Ollama model (e.g. gemma4:26b)"
+                )
             self._record(
                 "ollama_model",
                 False,
-                f"{model_name} not installed (run `ollama pull {model_name}` if /ask needed)",
+                f"{model_name} not installed ({remedy})",
                 critical=False,
             )
         except Exception as e:
-            self._record("ollama_model", False, f"Ollama model check failed: {e}", critical=False)
+            self._record(
+                "ollama_model", False, f"Ollama model check failed: {e}", critical=False
+            )
 
     # ── discord_gateway ──────────────────────────────────────────────
 
     def _check_discord_gateway(self, bot=None):
         if bot is None:
-            self._record("discord_gateway", True, "Skipped — no bot instance (standalone check)", critical=False)
+            self._record(
+                "discord_gateway",
+                True,
+                "Skipped — no bot instance (standalone check)",
+                critical=False,
+            )
             return
         try:
             if not bot.is_ready():
-                self._record("discord_gateway", False, "Bot is not ready (gateway not connected)")
+                self._record(
+                    "discord_gateway", False, "Bot is not ready (gateway not connected)"
+                )
                 return
             latency = bot.latency
-            if latency == float('inf') or latency > 5.0:
-                self._record("discord_gateway", False, f"Gateway latency too high: {latency:.2f}s")
+            if latency == float("inf") or latency > 5.0:
+                self._record(
+                    "discord_gateway",
+                    False,
+                    f"Gateway latency too high: {latency:.2f}s",
+                )
                 return
-            self._record("discord_gateway", True, f"Connected (latency: {latency*1000:.0f}ms)")
+            self._record(
+                "discord_gateway", True, f"Connected (latency: {latency*1000:.0f}ms)"
+            )
         except Exception as e:
             self._record("discord_gateway", False, f"Gateway check failed: {e}")

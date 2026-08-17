@@ -40,7 +40,7 @@ Setup: `python -m venv venv && source venv/bin/activate && pip install -r requir
 
 - **py-cord** (not discord.py) — the `discord` import is Pycord
 - **faster_whisper** — local transcription model (large-v3), loaded as module-level singleton in `whisper_sink.py`
-- **ollama** — powers the `/ask` command (model: `$ASK_OLLAMA_MODEL`, default `ai/mistral:latest`)
+- **ollama** — powers the `/ask` command (model: `$ASK_OLLAMA_MODEL`, default `gemma4:26b`)
 - **torch** — CPU-only by default (see requirements.txt for CUDA option)
 - **ffmpeg** and **libopus** — required system dependencies for voice
 
@@ -51,7 +51,7 @@ Required in `.env`:
 - `TRANSCRIPTION_METHOD` — `local` (default) or `openai`
 - `OPENAI_API_KEY` — only if using openai method
 - `PLAYER_MAP_FILE_PATH` — optional path to `player_map.yml` mapping Discord user IDs to player/character names
-- `ASK_OLLAMA_MODEL` — optional; model for `/ask`. Defaults to `ai/mistral:latest` (prior behavior). Used in both `main.py` and `src/bot/health.py:_check_ollama_model` (keep the two defaults in sync). Model choice is benchmarked in the sibling `local-models` repo (`prompts/discord_ask.json`)
+- `ASK_OLLAMA_MODEL` — optional; model for `/ask`. Defaults to `gemma4:26b`, resolved for both `main.py` and `src/bot/health.py:_check_ollama_model` by `src/config/ollama_config.get_ask_model()` so the two cannot drift. Install it with `ollama pull gemma4:26b`. **It must be a name Ollama can actually pull:** the previous default `ai/mistral:latest` was a Docker Hub (Docker Model Runner) name that Ollama's registry 404s, so `/ask` failed out of the box and the health check told users to run the very `ollama pull` that had just failed. `ollama_config.is_ollama_pullable()` guards that trap. Model choice is benchmarked in the sibling `local-models` repo (`dev/discord-ask-model`), where `gemma4:26b` beat `mistral:latest` 6/6 vs 3/6 on human-judged grounding
 
 ### Transcription engine selection (`src/asr/selection.py`)
 
@@ -60,6 +60,17 @@ These tune the local transcription backend (no effect when `TRANSCRIPTION_METHOD
 - `ASR_BACKEND` — `auto` (default), `mlx`, or `faster-whisper`. `auto` picks MLX-Whisper (Metal GPU) on Apple Silicon and falls back to faster-whisper-CPU everywhere else (or if MLX can't load). Selection never raises.
 - `MLX_WHISPER_MODEL` — optional; override the MLX HF repo (otherwise mapped from `WHISPER_MODEL`, e.g. `large-v3` → `mlx-community/whisper-large-v3-mlx`).
 - `WHISPER_BEAM_SIZE` (default 5), `WHISPER_BEST_OF` (default 5), `WHISPER_BATCH_SIZE` (default 8) — faster-whisper decode params. The MLX backend ignores all three: `mlx_whisper` has no beam-search decoder (greedy + temperature fallback only) and no batched pipeline. So the beam5-vs-beam10 accuracy question applies only to the faster-whisper path; the final value is set by the A/B bake-off (discord-transcript-bot-d6j).
+
+**Warm the model before a session:** `make prewarm`. Weights download lazily on the first transcription — ~3 GB for MLX — so a cold cache means the first person to speak stalls the bot for minutes. `make prewarm` downloads and does a real end-to-end decode; `python scripts/prewarm_models.py --check` just reports cache state.
+
+### Reference-audio capture (`src/session_capture.py`)
+
+- `CAPTURE_SESSION_AUDIO` — **off by default.** When truthy, the sink persists the exact per-speaker WAV bytes it feeds the engine to `captures/<session>/`, plus `manifest.draft.jsonl` pre-filled with the machine transcription. This turns a normal game into reference data for the A/B harness (discord-transcript-bot-3dn), which is the gating input for every remaining accuracy decision.
+- `CAPTURE_MAX_GB` — disk ceiling, default 20. Capture stops past it; transcription is unaffected.
+
+The draft manifest's `reference` fields are **machine output, not ground truth** — a human corrects them, then saves as `manifest.jsonl` for `scripts/ab_transcribe.py --manifest`. Scoring against an uncorrected draft compares Whisper to itself and reports a meaninglessly low WER; the harness warns if handed a `.draft` file. Each capture directory gets a README with the correction workflow.
+
+Capture is best-effort by construction: `SessionCapture` swallows its own errors and the sink wraps its calls again, so no capture bug can cost a live session its transcription.
 
 ## Code Style
 

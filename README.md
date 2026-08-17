@@ -3,6 +3,8 @@
 
 This project is a Discord bot that transcribes voice channel audio into text in real-time. It uses Whisper for audio transcription and is capable of handling multiple users in a voice channel.
 
+> **This is a fork of [joshinryz/volo_discord_bot](https://github.com/joshinryz/volo_discord_bot)** by Josh Robinett, with additional contributions from Noah Feinberg. It diverged in March 2025 and has been substantially extended since — see [Attribution](#attribution) and [License](#license).
+
 ## Features
 
 - This project uses Pycord (see [Pycord Github](https://github.com/Pycord-Development/pycord))
@@ -97,9 +99,25 @@ To set up and run this Discord bot, follow these steps:
 
 Contributions to this project are welcome. Please ensure to follow the project's coding style and submit pull requests for any new features or bug fixes.
 
+## Attribution
+
+This project is a fork of [joshinryz/volo_discord_bot](https://github.com/joshinryz/volo_discord_bot) (Josh Robinett, 2023–2025; additional contributions by Noah Feinberg). The fork point is upstream commit `5e610b2` (2025-03-17); the full upstream commit history is preserved in this repository's git log.
+
+Code originating upstream and still present here, in whole or in part:
+
+- `src/bot/helper.py`, `src/utils/pdf_generator.py`, `src/utils/commandline.py`, `src/config/cliargs.py` — substantially unchanged from upstream
+- `main.py`, `src/sinks/whisper_sink.py`, `src/bot/volo_bot.py` — derived from upstream and substantially rewritten and extended
+- `assets/parchment_background.jpg` — inherited from upstream; its own provenance is not documented there
+
+Everything else — the ASR backend selection layer, reference-audio capture, the A/B transcription harness, the health-check system, the web dashboard, the player-map store, and the test suite — is original to this fork.
+
 ## License
 
-[MIT License](LICENSE)
+**No license is currently granted for this project. All rights reserved.**
+
+The upstream project publishes no LICENSE file and never has — its README states "MIT License" but links to a file that has never existed in that repository, so the upstream grant is unresolved. This fork therefore cannot pass on rights it has not clearly received, and makes no license claim of its own.
+
+If you want to use, copy, or redistribute this code, open an issue. Resolving the upstream grant with the original author is tracked as pending work; this section will be replaced with a real license once that is settled.
 
 ## Architecture
 
@@ -109,6 +127,7 @@ Contributions to this project are welcome. Please ensure to follow the project's
 
 ## Acknowledgments
 
+- Originally created by [Josh Robinett](https://github.com/joshinryz) as [volo_discord_bot](https://github.com/joshinryz/volo_discord_bot), with contributions from [Noah Feinberg](https://github.com/NoahFeinberg). This fork builds directly on that work.
 - This project uses [Faster Whisper](https://github.com/SYSTRAN/faster-whisper) for audio transcription.
 - Built with [Pycord](https://github.com/Pycord-Development/pycord) for Discord integration.
 - Uses [Ollama](https://ollama.ai) for local LLM-powered transcript queries.
