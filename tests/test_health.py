@@ -190,37 +190,87 @@ def test_ask_providers_reports_configured_cloud_tiers(monkeypatch):
     assert "cerebras" in check["message"]
 
 
-def test_ask_providers_passes_with_no_keys_when_ollama_can_carry_it(monkeypatch):
-    """A local-only /ask is a supported configuration, not a failure."""
+def test_ask_providers_passes_with_no_keys_only_when_ollama_is_reachable(monkeypatch):
+    """Local-only /ask is supported, but the check must verify the local
+    tier can actually answer — not merely that the env var permits it."""
     _clear_provider_env(monkeypatch)
 
     hc = HealthCheck()
+    hc.checks["ollama_server"] = {"ok": True, "message": "", "critical": False}
     hc._check_ask_providers()
-    check = hc.checks["ask_providers"]
 
-    assert check["ok"] is True
-    assert "local Ollama" in check["message"]
+    assert hc.checks["ask_providers"]["ok"] is True
+    assert "local Ollama" in hc.checks["ask_providers"]["message"]
 
 
-def test_ask_providers_fails_only_when_nothing_can_answer(monkeypatch):
+def test_ask_providers_fails_when_no_key_and_ollama_unreachable(monkeypatch):
+    """The case the check exists to catch: nothing at all can answer.
+    Reading ollama_enabled() alone would wrongly report PASS here."""
     _clear_provider_env(monkeypatch)
+
+    hc = HealthCheck()
+    hc.checks["ollama_server"] = {"ok": False, "message": "", "critical": False}
+    hc._check_ask_providers()
+
+    assert hc.checks["ask_providers"]["ok"] is False
+    assert "not reachable" in hc.checks["ask_providers"]["message"]
+
+
+def test_ask_providers_passes_on_cloud_key_alone_without_ollama(monkeypatch):
+    """A cloud-only host is healthy even with no ollama at all."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
     monkeypatch.setenv("ASK_DISABLE_OLLAMA", "1")
 
     hc = HealthCheck()
+    hc.checks["ollama_server"] = {"ok": False, "message": "", "critical": False}
     hc._check_ask_providers()
-    check = hc.checks["ask_providers"]
 
-    assert check["ok"] is False
-    assert check["critical"] is False  # /ask must never block bot startup
+    assert hc.checks["ask_providers"]["ok"] is True
+
+
+def test_cloud_only_host_does_not_probe_or_spawn_ollama(monkeypatch):
+    """ASK_DISABLE_OLLAMA=1 must not start a daemon the operator disabled."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    monkeypatch.setenv("ASK_DISABLE_OLLAMA", "1")
+
+    hc = HealthCheck()
+    probed = []
+    monkeypatch.setattr(
+        hc, "_check_ollama_server", lambda **kw: probed.append("server")
+    )
+    monkeypatch.setattr(hc, "_check_ollama_model", lambda: probed.append("model"))
+    # Everything except the ollama pair is stubbed out; we only care that
+    # the disabled tier is never touched.
+    for name in (
+        "_check_env_vars",
+        "_check_ffmpeg",
+        "_check_opus",
+        "_check_whisper_model",
+        "_check_openai_api",
+        "_check_player_map",
+        "_check_discord_gateway",
+    ):
+        monkeypatch.setattr(hc, name, lambda *a, **kw: None)
+    monkeypatch.setattr(hc, "_check_transcripts_dir", lambda **kw: None)
+    monkeypatch.setattr(hc, "_check_log_dirs", lambda **kw: None)
+
+    hc.run_all(autofix=True)
+
+    assert probed == []
+    assert hc.checks["ollama_server"]["ok"] is True
+    assert "cloud-only" in hc.checks["ollama_server"]["message"]
+    assert hc.checks["ollama_server"]["critical"] is False
 
 
 def test_ask_providers_is_never_critical(monkeypatch):
-    """Transcription does not depend on /ask, so no provider state may
-    stop the bot from starting and recording."""
+    """Transcription does not depend on /ask, so no provider state — not
+    even 'nothing can answer' — may stop the bot from starting."""
     _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
 
-    hc = HealthCheck()
-    hc._check_ask_providers()
-
-    assert hc.checks["ask_providers"]["critical"] is False
+    for ollama_ok in (True, False):
+        hc = HealthCheck()
+        hc.checks["ollama_server"] = {"ok": ollama_ok, "message": "", "critical": False}
+        hc._check_ask_providers()
+        assert hc.checks["ask_providers"]["critical"] is False

@@ -42,6 +42,7 @@ from src.llm.errors import (
     is_model_not_found_error,
     is_quota_error,
     is_rate_limit_error,
+    TruncatedCompletionError,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,7 +56,17 @@ SYSTEM_PROMPT = (
 # Caps latency and cost. Discord truncates around 1900 characters anyway,
 # and temperature=0 keeps answers deterministic and transcript-grounded,
 # mirroring the local bench harness the Ollama model was chosen with.
-MAX_ANSWER_TOKENS = 512
+#
+# The cloud cap is deliberately higher than the local one. Both cloud
+# defaults are reasoning-capable, and OpenAI-compatible endpoints bill
+# reasoning tokens against the SAME completion budget as visible content
+# — so a 512-token cap can be spent entirely on thinking, returning empty
+# content with finish_reason="length". That reads as an empty completion,
+# which fails the tier over, and the paid providers would quietly hand
+# every question down to local Ollama. The local tier keeps 512 because
+# it runs with think=False and has no reasoning budget to fund.
+MAX_ANSWER_TOKENS_CLOUD = 2048
+MAX_ANSWER_TOKENS_LOCAL = 512
 TEMPERATURE = 0
 
 # One extra attempt against the same tier, for ordinary rate limits only.
@@ -109,13 +120,29 @@ class _Tier:
 
 
 def _is_latched(name: str) -> bool:
-    at = _latched_out.get(name)
-    return at is not None and (time.time() - at) < PRIMARY_RECHECK_SECONDS
+    entry = _latched_out.get(name)
+    return entry is not None and (time.time() - entry[0]) < PRIMARY_RECHECK_SECONDS
 
 
-def _latch(name: str) -> None:
+def _latch(name: str, error: Exception = None) -> None:
+    """Latch a tier out, remembering the error that caused it.
+
+    The reason is kept, not just the timestamp, because a latched tier is
+    skipped on later questions and would otherwise vanish from the
+    message-selection logic: an out-of-credit primary would answer
+    "out of credit" for the first question and then "try again in a
+    minute" for the next fifteen minutes, which is advice that cannot
+    come true.
+    """
     logger.info("Latching out /ask tier '%s' for %ds", name, PRIMARY_RECHECK_SECONDS)
-    _latched_out[name] = time.time()
+    _latched_out[name] = (time.time(), error)
+
+
+def _latched_error(name: str):
+    """The error a tier was latched out for, if it is still latched."""
+    if not _is_latched(name):
+        return None
+    return _latched_out[name][1]
 
 
 def reset_latches() -> None:
@@ -157,14 +184,25 @@ def _openai_compatible_call(
         response = client.chat.completions.create(
             model=model,
             messages=_messages(transcript, question),
-            max_tokens=MAX_ANSWER_TOKENS,
+            max_tokens=MAX_ANSWER_TOKENS_CLOUD,
             temperature=TEMPERATURE,
         )
         choices = getattr(response, "choices", None) or []
-        content = choices[0].message.content if choices else None
-        if not (content or "").strip():
-            raise EmptyCompletionError(f"{model} returned an empty completion")
-        return content
+        choice = choices[0] if choices else None
+        content = getattr(getattr(choice, "message", None), "content", None)
+        if (content or "").strip():
+            return content
+
+        # An empty answer that hit the token ceiling is our configuration
+        # failing, not the provider: it is reported separately so it shows
+        # up as "raise MAX_ANSWER_TOKENS_CLOUD" in the log rather than
+        # hiding inside a generic empty-completion fallover.
+        if getattr(choice, "finish_reason", None) == "length":
+            raise TruncatedCompletionError(
+                f"{model} hit the {MAX_ANSWER_TOKENS_CLOUD}-token cap without "
+                "emitting an answer (likely spent on reasoning tokens)"
+            )
+        raise EmptyCompletionError(f"{model} returned an empty completion")
 
     return _call
 
@@ -179,7 +217,10 @@ def _ollama_call(model: str) -> Callable[[str, str], str]:
         kwargs = dict(
             model=model,
             messages=_messages(transcript, question),
-            options={"num_predict": MAX_ANSWER_TOKENS, "temperature": TEMPERATURE},
+            options={
+                "num_predict": MAX_ANSWER_TOKENS_LOCAL,
+                "temperature": TEMPERATURE,
+            },
         )
         try:
             response = ollama.chat(think=False, **kwargs)
@@ -288,7 +329,7 @@ def ask(transcript: str, question: str, sleep=time.sleep) -> AskResult:
         reset_latches()
         usable = tiers
 
-    first_error = None
+    errors_by_tier = {}
     last_error = None
 
     for index, tier in enumerate(usable):
@@ -305,8 +346,7 @@ def ask(transcript: str, question: str, sleep=time.sleep) -> AskResult:
                 )
             except Exception as e:  # noqa: BLE001 — classified just below
                 last_error = e
-                if first_error is None:
-                    first_error = e
+                errors_by_tier.setdefault(tier.name, e)
 
                 exhausted = is_quota_error(e) or is_daily_cap_error(e)
                 missing_model = is_model_not_found_error(e)
@@ -322,7 +362,7 @@ def ask(transcript: str, question: str, sleep=time.sleep) -> AskResult:
                         "exhausted" if exhausted else "unknown model",
                         e,
                     )
-                    _latch(tier.name)
+                    _latch(tier.name, e)
                     break
                 if empty:
                     logger.warning("/ask tier '%s' returned an empty answer", tier.name)
@@ -348,12 +388,26 @@ def ask(transcript: str, question: str, sleep=time.sleep) -> AskResult:
                 )
                 sleep(delay)
 
-    # The user-facing message comes from the FIRST tier's failure: if
-    # OpenRouter is out of credit and the local Ollama simply is not
-    # installed, "the account is out of credit" is the useful thing to
-    # say, not "ollama is not running".
+    # The user-facing message comes from the FIRST tier's failure in the
+    # configured order — if OpenRouter is out of credit and the local
+    # Ollama simply is not installed, "the account is out of credit" is
+    # the useful thing to say, not "ollama is not running".
+    #
+    # Walk the full tier list, not just the ones tried this call: a tier
+    # skipped because it was latched out still carries the error it was
+    # latched for. Without that, question 1 says "out of credit" and
+    # questions 2..N for the next fifteen minutes say "try again in a
+    # minute" — advice that cannot come true, since nothing clears
+    # without a top-up.
+    governing_error = None
+    for tier in tiers:
+        candidate = errors_by_tier.get(tier.name) or _latched_error(tier.name)
+        if candidate is not None:
+            governing_error = candidate
+            break
+
     raise AllProvidersFailed(
         f"All {len(usable)} /ask tier(s) failed; last error: {last_error}",
-        _user_message_for(first_error),
+        _user_message_for(governing_error),
         last_error=last_error,
     )

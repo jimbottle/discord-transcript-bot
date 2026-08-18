@@ -10,6 +10,7 @@ from src.llm import chain, config
 from src.llm.errors import (
     AllProvidersFailed,
     EmptyCompletionError,
+    TruncatedCompletionError,
     is_daily_cap_error,
     is_model_not_found_error,
     is_quota_error,
@@ -336,3 +337,205 @@ def test_model_defaults_are_provider_specific(monkeypatch, no_env):
     assert config.openrouter_model() == config.DEFAULT_OPENROUTER_MODEL
     assert config.cerebras_model() == config.DEFAULT_CEREBRAS_MODEL
     assert config.openrouter_model() != config.cerebras_model()
+
+
+# ── provider adapters ─────────────────────────────────────────────────
+#
+# The tests above inject synthetic tiers, which leaves the two functions
+# that actually speak to a provider untested. These drive the real
+# adapter bodies against fake SDK modules.
+
+
+class _FakeMessage:
+    def __init__(self, content):
+        self.content = content
+
+
+class _FakeChoice:
+    def __init__(self, content, finish_reason="stop"):
+        self.message = _FakeMessage(content)
+        self.finish_reason = finish_reason
+
+
+class _FakeResponse:
+    def __init__(self, choices):
+        self.choices = choices
+
+
+class _FakeCompletions:
+    def __init__(self, response):
+        self._response = response
+        self.kwargs = None
+
+    def create(self, **kwargs):
+        self.kwargs = kwargs
+        if isinstance(self._response, Exception):
+            raise self._response
+        return self._response
+
+
+class _FakeOpenAI:
+    """Captures constructor kwargs so the retry/header policy is assertable."""
+
+    last_init = None
+
+    def __init__(self, **kwargs):
+        type(self).last_init = kwargs
+        self.chat = type("_Chat", (), {})()
+        self.chat.completions = self._completions
+
+    @classmethod
+    def factory(cls, completions):
+        return type("_Bound", (cls,), {"_completions": completions})
+
+
+def _install_fake_openai(monkeypatch, response):
+    """Patch the openai module the adapter imports at call time."""
+    import openai
+
+    completions = _FakeCompletions(response)
+    fake_cls = _FakeOpenAI.factory(completions)
+    monkeypatch.setattr(openai, "OpenAI", fake_cls)
+    return fake_cls, completions
+
+
+def test_cloud_adapter_returns_the_completion_text(monkeypatch):
+    _install_fake_openai(monkeypatch, _FakeResponse([_FakeChoice("the answer")]))
+    call = chain._openai_compatible_call("https://x/v1", "key", "some-model")
+    assert call("transcript", "question") == "the answer"
+
+
+def test_cloud_adapter_disables_sdk_retries_and_sends_headers(monkeypatch):
+    """max_retries=0 matters: the SDK's own ladder would multiply the wait
+    before this module's classifier ever saw the error."""
+    fake_cls, completions = _install_fake_openai(
+        monkeypatch, _FakeResponse([_FakeChoice("ok")])
+    )
+    call = chain._openai_compatible_call(
+        "https://x/v1", "key", "some-model", {"X-Title": "t"}
+    )
+    call("transcript", "question")
+
+    assert fake_cls.last_init["max_retries"] == 0
+    assert fake_cls.last_init["api_key"] == "key"
+    assert fake_cls.last_init["base_url"] == "https://x/v1"
+    assert fake_cls.last_init["default_headers"] == {"X-Title": "t"}
+    assert completions.kwargs["model"] == "some-model"
+    assert completions.kwargs["max_tokens"] == chain.MAX_ANSWER_TOKENS_CLOUD
+
+
+def test_cloud_adapter_raises_on_no_choices(monkeypatch):
+    _install_fake_openai(monkeypatch, _FakeResponse([]))
+    call = chain._openai_compatible_call("https://x/v1", "key", "m")
+    with pytest.raises(EmptyCompletionError):
+        call("transcript", "question")
+
+
+def test_cloud_adapter_raises_on_whitespace_only_content(monkeypatch):
+    _install_fake_openai(monkeypatch, _FakeResponse([_FakeChoice("   ")]))
+    call = chain._openai_compatible_call("https://x/v1", "key", "m")
+    with pytest.raises(EmptyCompletionError):
+        call("transcript", "question")
+
+
+def test_cloud_adapter_reports_truncation_distinctly(monkeypatch):
+    """A reasoning model that spends the whole budget thinking returns
+    empty content with finish_reason='length'. Reporting that as a plain
+    empty completion is how a paid tier silently falls through to local."""
+    _install_fake_openai(
+        monkeypatch, _FakeResponse([_FakeChoice("", finish_reason="length")])
+    )
+    call = chain._openai_compatible_call("https://x/v1", "key", "m")
+    with pytest.raises(TruncatedCompletionError):
+        call("transcript", "question")
+
+
+def test_truncation_still_fails_over_like_an_empty_completion():
+    """It is a subclass on purpose: distinct in the log, same in the chain."""
+    assert issubclass(TruncatedCompletionError, EmptyCompletionError)
+
+
+# ── local adapter ─────────────────────────────────────────────────────
+
+
+class _FakeOllama:
+    def __init__(self, content="local answer", raise_on_think=None):
+        self.content = content
+        self.raise_on_think = raise_on_think
+        self.calls = []
+
+    def chat(self, **kwargs):
+        self.calls.append(kwargs)
+        if "think" in kwargs and self.raise_on_think is not None:
+            raise self.raise_on_think
+        return {"message": {"content": self.content}}
+
+
+def _install_fake_ollama(monkeypatch, fake):
+    import ollama
+
+    monkeypatch.setattr(ollama, "chat", fake.chat)
+    return fake
+
+
+def test_local_adapter_returns_content_and_disables_thinking(monkeypatch):
+    fake = _install_fake_ollama(monkeypatch, _FakeOllama())
+    assert chain._ollama_call("m")("transcript", "question") == "local answer"
+    assert fake.calls[0]["think"] is False
+    assert fake.calls[0]["options"]["num_predict"] == chain.MAX_ANSWER_TOKENS_LOCAL
+
+
+def test_local_adapter_raises_on_empty_content(monkeypatch):
+    _install_fake_ollama(monkeypatch, _FakeOllama(content="  "))
+    with pytest.raises(EmptyCompletionError):
+        chain._ollama_call("m")("transcript", "question")
+
+
+def test_old_ollama_client_gets_the_answer_not_an_upgrade_notice(monkeypatch):
+    """Clients older than 0.5.x reject think=. Since the answer cleaner
+    strips inline <think> anyway, drop the kwarg and answer the question
+    rather than failing the tier."""
+    fake = _install_fake_ollama(
+        monkeypatch,
+        _FakeOllama(
+            raise_on_think=TypeError(
+                "chat() got an unexpected keyword argument 'think'"
+            )
+        ),
+    )
+    assert chain._ollama_call("m")("transcript", "question") == "local answer"
+    assert len(fake.calls) == 2
+    assert "think" not in fake.calls[1]
+
+
+def test_unrelated_type_error_still_propagates(monkeypatch):
+    """The downgrade is matched on the exact message so a genuine bug in
+    the call is not silently retried and swallowed."""
+    _install_fake_ollama(
+        monkeypatch, _FakeOllama(raise_on_think=TypeError("something else entirely"))
+    )
+    with pytest.raises(TypeError, match="something else entirely"):
+        chain._ollama_call("m")("transcript", "question")
+
+
+# ── latch remembers why ───────────────────────────────────────────────
+
+
+def test_latched_reason_survives_into_later_questions(monkeypatch):
+    """Regression for the message degrading over the latch window: with
+    the primary latched out on a 402 and no other tier able to answer,
+    question 2 must still say 'out of credit', not 'try again in a
+    minute' — nothing clears without a top-up."""
+    tiers = [
+        _tier("openrouter", lambda: (_ for _ in ()).throw(_HTTPError(402))),
+        _tier("ollama", lambda: (_ for _ in ()).throw(Exception("connection refused"))),
+    ]
+    monkeypatch.setattr(chain, "build_tiers", lambda: tiers)
+
+    with pytest.raises(AllProvidersFailed) as first:
+        chain.ask("t", "q1", sleep=lambda _: None)
+    assert first.value.user_message == chain.DISCORD_QUOTA_MSG
+
+    with pytest.raises(AllProvidersFailed) as second:
+        chain.ask("t", "q2", sleep=lambda _: None)
+    assert second.value.user_message == chain.DISCORD_QUOTA_MSG

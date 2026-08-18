@@ -19,6 +19,19 @@ class EmptyCompletionError(RuntimeError):
     """
 
 
+class TruncatedCompletionError(EmptyCompletionError):
+    """A provider spent its whole token budget without emitting content.
+
+    A subclass of :class:`EmptyCompletionError` because the chain should
+    treat it the same way — hand the question to the next tier — but it
+    is worth its own name and log line: an empty reply is the provider
+    misbehaving, whereas this one is *our* ``max_tokens`` being too low
+    for a reasoning model to think and answer inside. Silently
+    classifying it as "empty" is how a paid tier ends up quietly
+    falling through to the local one on every question.
+    """
+
+
 class AllProvidersFailed(RuntimeError):
     """Every configured tier declined to answer.
 

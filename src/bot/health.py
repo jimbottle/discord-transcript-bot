@@ -81,27 +81,45 @@ class HealthCheck:
 
         self._check_player_map()
         if autofix:
+            self._write_status("initializing", "ollama_server")
+
+        # ASK_DISABLE_OLLAMA=1 means /ask is cloud-only. Probing (and with
+        # autofix, SPAWNING) an ollama daemon the operator explicitly
+        # disabled would be an unwanted background process plus up to 10s
+        # of startup latency for a tier that will never be called.
+        from src.llm import config as llm_config
+
+        if llm_config.ollama_enabled():
+            self._check_ollama_server(autofix=autofix)
+            if autofix:
+                self._write_status("initializing", "ollama_model")
+
+            # Only check model if server is up
+            if self.checks.get("ollama_server", {}).get("ok"):
+                self._check_ollama_model()
+            else:
+                # Non-critical: ollama is only used by /ask; bot must still start.
+                self._record(
+                    "ollama_model",
+                    False,
+                    "Skipped — ollama server is not running",
+                    critical=False,
+                )
+        else:
+            for name in ("ollama_server", "ollama_model"):
+                self._record(
+                    name,
+                    True,
+                    "Skipped — /ask is cloud-only (ASK_DISABLE_OLLAMA)",
+                    critical=False,
+                )
+
+        # Runs AFTER the ollama checks: whether the local tier can carry
+        # /ask is a fact about a reachable daemon, not about an env var.
+        if autofix:
             self._write_status("initializing", "ask_providers")
 
         self._check_ask_providers()
-        if autofix:
-            self._write_status("initializing", "ollama_server")
-
-        self._check_ollama_server(autofix=autofix)
-        if autofix:
-            self._write_status("initializing", "ollama_model")
-
-        # Only check model if server is up
-        if self.checks.get("ollama_server", {}).get("ok"):
-            self._check_ollama_model()
-        else:
-            # Non-critical: ollama is only used by /ask; bot must still start.
-            self._record(
-                "ollama_model",
-                False,
-                "Skipped — ollama server is not running",
-                critical=False,
-            )
 
         if autofix:
             self._write_status("initializing", "discord_gateway")
@@ -348,10 +366,16 @@ class HealthCheck:
             )
             return
 
-        # No cloud key. That is a supported configuration (local-only
-        # /ask), so it passes when Ollama is available to carry it and
-        # fails only when nothing at all can answer.
-        if llm_config.ollama_enabled():
+        # No cloud key. Local-only /ask is a supported configuration, but
+        # only when the local tier can actually answer — so this consults
+        # the ollama_server result rather than the env var that merely
+        # permits it. Claiming "Ollama will carry it" on a host with no
+        # ollama running would pass in exactly the case the check exists
+        # to catch: nothing at all can answer.
+        ollama_ready = llm_config.ollama_enabled() and self.checks.get(
+            "ollama_server", {}
+        ).get("ok", False)
+        if ollama_ready:
             self._record(
                 "ask_providers",
                 True,
@@ -359,11 +383,16 @@ class HealthCheck:
                 critical=False,
             )
         else:
+            reason = (
+                "ollama is not reachable"
+                if llm_config.ollama_enabled()
+                else "ASK_DISABLE_OLLAMA is set"
+            )
             self._record(
                 "ask_providers",
                 False,
-                "No /ask provider: set OPENROUTER_API_KEY or "
-                "CEREBRAS_PAID_API_KEY, or unset ASK_DISABLE_OLLAMA",
+                f"No /ask provider can answer ({reason}): set "
+                "OPENROUTER_API_KEY or CEREBRAS_PAID_API_KEY, or start ollama",
                 critical=False,
             )
 
