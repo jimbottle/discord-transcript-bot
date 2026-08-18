@@ -81,6 +81,10 @@ class HealthCheck:
 
         self._check_player_map()
         if autofix:
+            self._write_status("initializing", "ask_providers")
+
+        self._check_ask_providers()
+        if autofix:
             self._write_status("initializing", "ollama_server")
 
         self._check_ollama_server(autofix=autofix)
@@ -311,6 +315,57 @@ class HealthCheck:
             )
         except Exception as e:
             self._record("player_map", False, f"Invalid YAML: {e}", critical=False)
+
+    # ── ask_providers ─────────────────────────────────────────────────
+
+    def _check_ask_providers(self):
+        """Report which cloud tiers `/ask` can reach.
+
+        Key presence only — deliberately no test call. A live probe would
+        spend money on every bot start, and a key that is present but out
+        of credit is something the chain already handles at question time
+        by failing over. Non-critical throughout: `/ask` is the only
+        consumer, and it still has the local Ollama tier, so a host with
+        no keys at all must still be able to start and transcribe.
+        """
+        from src.llm import config as llm_config
+
+        providers = llm_config.configured_cloud_providers()
+        if providers:
+            described = ", ".join(
+                f"{name} ({model})"
+                for name, model in (
+                    ("openrouter", llm_config.openrouter_model()),
+                    ("cerebras", llm_config.cerebras_model()),
+                )
+                if name in providers
+            )
+            self._record(
+                "ask_providers",
+                True,
+                f"/ask providers configured: {described}",
+                critical=False,
+            )
+            return
+
+        # No cloud key. That is a supported configuration (local-only
+        # /ask), so it passes when Ollama is available to carry it and
+        # fails only when nothing at all can answer.
+        if llm_config.ollama_enabled():
+            self._record(
+                "ask_providers",
+                True,
+                "No cloud key set — /ask will use local Ollama only",
+                critical=False,
+            )
+        else:
+            self._record(
+                "ask_providers",
+                False,
+                "No /ask provider: set OPENROUTER_API_KEY or "
+                "CEREBRAS_PAID_API_KEY, or unset ASK_DISABLE_OLLAMA",
+                critical=False,
+            )
 
     # ── ollama_server ─────────────────────────────────────────────────
 

@@ -40,7 +40,8 @@ Setup: `python -m venv venv && source venv/bin/activate && pip install -r requir
 
 - **py-cord** (not discord.py) — the `discord` import is Pycord
 - **faster_whisper** — local transcription model (large-v3), loaded as module-level singleton in `whisper_sink.py`
-- **ollama** — powers the `/ask` command (model: `$ASK_OLLAMA_MODEL`, default `gemma4:26b`)
+- **openai** (SDK) — drives both cloud `/ask` providers; OpenRouter and Cerebras are OpenAI-compatible
+- **ollama** — the local last-resort `/ask` tier (model: `$ASK_OLLAMA_MODEL`, default `gemma4:26b`)
 - **torch** — CPU-only by default (see requirements.txt for CUDA option)
 - **ffmpeg** and **libopus** — required system dependencies for voice
 
@@ -51,7 +52,31 @@ Required in `.env`:
 - `TRANSCRIPTION_METHOD` — `local` (default) or `openai`
 - `OPENAI_API_KEY` — only if using openai method
 - `PLAYER_MAP_FILE_PATH` — optional path to `player_map.yml` mapping Discord user IDs to player/character names
-- `ASK_OLLAMA_MODEL` — optional; model for `/ask`. Defaults to `gemma4:26b`, resolved for both `main.py` and `src/bot/health.py:_check_ollama_model` by `src/config/ollama_config.get_ask_model()` so the two cannot drift. Install it with `ollama pull gemma4:26b`. **It must be a name Ollama can actually pull:** the previous default `ai/mistral:latest` was a Docker Hub (Docker Model Runner) name that Ollama's registry 404s, so `/ask` failed out of the box and the health check told users to run the very `ollama pull` that had just failed. `ollama_config.is_ollama_pullable()` guards that trap. Model choice is benchmarked in the sibling `local-models` repo (`dev/discord-ask-model`), where `gemma4:26b` beat `mistral:latest` 6/6 vs 3/6 on human-judged grounding
+- `ASK_OLLAMA_MODEL` — optional; model for the *local* `/ask` tier. Defaults to `gemma4:26b`, resolved for both the chain and `src/bot/health.py:_check_ollama_model` by `src/config/ollama_config.get_ask_model()` so the two cannot drift. Install it with `ollama pull gemma4:26b`. **It must be a name Ollama can actually pull:** the previous default `ai/mistral:latest` was a Docker Hub (Docker Model Runner) name that Ollama's registry 404s, so `/ask` failed out of the box and the health check told users to run the very `ollama pull` that had just failed. `ollama_config.is_ollama_pullable()` guards that trap. Model choice is benchmarked in the sibling `local-models` repo (`dev/discord-ask-model`), where `gemma4:26b` beat `mistral:latest` 6/6 vs 3/6 on human-judged grounding
+
+### `/ask` provider chain (`src/llm/`)
+
+`/ask` walks three tiers in order, skipping any that is unconfigured:
+
+| | primary | fallback | last resort |
+|---|---|---|---|
+| provider | OpenRouter | Cerebras (paid) | local Ollama |
+| key | `OPENROUTER_API_KEY` | `CEREBRAS_PAID_API_KEY` | — |
+| model | `OPENROUTER_MODEL` (default `nvidia/nemotron-3-super-120b-a12b`) | `CEREBRAS_MODEL` (default `gpt-oss-120b`) | `ASK_OLLAMA_MODEL` |
+| base URL | `OPENROUTER_BASE_URL` | `CEREBRAS_BASE_URL` | — |
+
+The ordering and failover semantics are ported from the sibling `raylytics/louisville-open-data-expenditure-bot` repo (`analytics_agent._call_with_retry`); that repo is the reference for this pattern. **The providers have separate base URLs and separate model ids** — an OpenRouter slug like `vendor/model` means nothing to Cerebras — so each tier carries its own model rather than sharing one `MODEL` var.
+
+Failure handling (`src/llm/chain.py`), all covered by `tests/test_llm_chain.py`:
+
+- **402 / daily-cap 429** → next tier immediately, and the tier is latched out for 15 minutes (`PRIMARY_RECHECK_SECONDS`) so later questions skip a round trip known to fail. Heals by itself when the window lapses.
+- **ordinary 429** → one more attempt on the same tier (per-minute windows do clear), then the next tier. Deliberately does *not* latch: that would route 15 minutes of traffic to the billed provider over a one-minute spike.
+- **empty completion / unknown model (404)** → next tier immediately.
+- The user-facing message is chosen from the **first** tier's failure, not the last — "out of credit" is more useful than "ollama is not running" when the local tier merely isn't installed. `DISCORD_QUOTA_MSG` asks for a top-up; `DISCORD_DAILY_CAP_MSG` says it resets on its own. Do not conflate them.
+
+`ASK_DISABLE_OLLAMA=1` makes `/ask` cloud-only. With no cloud key set, `/ask` runs on Ollama alone — a supported configuration, so `health.py:_check_ask_providers` passes in that case and only fails when nothing at all can answer. No `/ask` check is ever critical: transcription does not depend on it.
+
+**`src/llm/chain.ask()` is blocking and must be called via `asyncio.to_thread`.** The old `ollama.chat` call ran directly on the event loop; a three-tier cloud chain can occupy tens of seconds, which would stall voice receive and the gateway heartbeat rather than just the command.
 
 ### Transcription engine selection (`src/asr/selection.py`)
 

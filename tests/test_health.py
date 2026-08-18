@@ -161,3 +161,66 @@ def test_docker_named_model_does_not_suggest_a_failing_pull(monkeypatch):
     assert "ollama pull ai/mistral:latest" not in message
     assert "Docker Hub" in message
     assert "ASK_OLLAMA_MODEL" in message
+
+
+# ── ask_providers ────────────────────────────────────────────────────
+
+
+def _clear_provider_env(monkeypatch):
+    for var in (
+        "OPENROUTER_API_KEY",
+        "CEREBRAS_PAID_API_KEY",
+        "CEREBRAS_API_KEY",
+        "ASK_DISABLE_OLLAMA",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_ask_providers_reports_configured_cloud_tiers(monkeypatch):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    monkeypatch.setenv("CEREBRAS_PAID_API_KEY", "cb-key")
+
+    hc = HealthCheck()
+    hc._check_ask_providers()
+    check = hc.checks["ask_providers"]
+
+    assert check["ok"] is True
+    assert "openrouter" in check["message"]
+    assert "cerebras" in check["message"]
+
+
+def test_ask_providers_passes_with_no_keys_when_ollama_can_carry_it(monkeypatch):
+    """A local-only /ask is a supported configuration, not a failure."""
+    _clear_provider_env(monkeypatch)
+
+    hc = HealthCheck()
+    hc._check_ask_providers()
+    check = hc.checks["ask_providers"]
+
+    assert check["ok"] is True
+    assert "local Ollama" in check["message"]
+
+
+def test_ask_providers_fails_only_when_nothing_can_answer(monkeypatch):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("ASK_DISABLE_OLLAMA", "1")
+
+    hc = HealthCheck()
+    hc._check_ask_providers()
+    check = hc.checks["ask_providers"]
+
+    assert check["ok"] is False
+    assert check["critical"] is False  # /ask must never block bot startup
+
+
+def test_ask_providers_is_never_critical(monkeypatch):
+    """Transcription does not depend on /ask, so no provider state may
+    stop the bot from starting and recording."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+    hc = HealthCheck()
+    hc._check_ask_providers()
+
+    assert hc.checks["ask_providers"]["critical"] is False

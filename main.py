@@ -5,13 +5,13 @@ import time
 from datetime import datetime
 
 import discord
-import ollama
 import yaml
 from dotenv import load_dotenv
 
 from src.bot.helper import BotHelper
 from src.config.cliargs import CLIArgs
-from src.config.ollama_config import get_ask_model
+from src.llm.chain import ask as llm_ask
+from src.llm.errors import AllProvidersFailed
 from src.session_capture import scribe_notice
 from src.utils.answer import clamp_message, clean_ollama_answer
 from src.utils.commandline import CommandLine
@@ -21,10 +21,10 @@ from src.utils.voice import disconnect_targets
 load_dotenv()
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 PLAYER_MAP_FILE_PATH = os.getenv("PLAYER_MAP_FILE_PATH")
-# Model used by /ask. Resolved via the shared resolver (empty/unset env
-# → default) so main.py and src/bot/health.py can never disagree about
-# which model /ask actually uses.
-ASK_OLLAMA_MODEL = get_ask_model()
+# /ask no longer pins a single model here: it walks a provider chain
+# (OpenRouter → Cerebras paid → local Ollama) and each tier carries its
+# own model id, resolved in src/llm/config.py so main.py and
+# src/bot/health.py can never disagree about what /ask will use.
 # Discord hard-rejects messages longer than this many characters.
 DISCORD_MESSAGE_LIMIT = 2000
 
@@ -587,37 +587,23 @@ if __name__ == "__main__":
         await ctx.defer(ephemeral=not public)
 
         try:
-            response = ollama.chat(
-                model=ASK_OLLAMA_MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are an assistant that answers questions about a voice chat transcript. Be concise and direct. Only reference what's actually in the transcript. If the answer isn't in the transcript, say so.",
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Here is the transcript:\n\n{transcript_text}\n\nQuestion: {question}",
-                    },
-                ],
-                # /ask wants a short grounded answer, not chain-of-thought.
-                # think=False disables native thinking (Gemma 4 defaults it
-                # on); clean_ollama_answer strips inline <think> for models
-                # that ignore it. num_predict caps latency — Discord
-                # truncates at ~1900 chars anyway. temperature=0 keeps
-                # answers deterministic and transcript-grounded AND mirrors
-                # the local-models bench harness (bench.py runs think=False,
-                # num_predict=512, temperature=0) so a model that scores
-                # well there behaves the same here.
-                think=False,
-                options={"num_predict": 512, "temperature": 0},
+            # llm_ask is blocking and may walk three providers, so it must
+            # not run on the event loop. The old ollama.chat call did, and
+            # a cloud chain can occupy tens of seconds — long enough to
+            # stall voice receive and the gateway heartbeat, not just this
+            # command.
+            result = await asyncio.to_thread(llm_ask, transcript_text, question)
+            answer = clean_ollama_answer(result.answer)
+            logger.info(
+                f"/ask answered by {result.provider} ({result.model})"
+                f"{' [fallback]' if result.used_fallback else ''}"
             )
-            answer = clean_ollama_answer(response["message"]["content"])
 
             if not answer:
                 await ctx.followup.send(
                     "The model returned no answer (it may have produced only "
-                    "internal reasoning). Try rephrasing, or set "
-                    "`ASK_OLLAMA_MODEL` to a non-reasoning model."
+                    "internal reasoning). Try rephrasing, or point "
+                    "`OPENROUTER_MODEL` at a non-reasoning model."
                 )
                 return
 
@@ -628,27 +614,16 @@ if __name__ == "__main__":
                 f"**Q:** {question}\n\n{answer}", DISCORD_MESSAGE_LIMIT
             )
             await ctx.followup.send(message)
+        except AllProvidersFailed as e:
+            # Every tier declined. The chain has already picked the message
+            # that fits the reason (out of credit vs. daily cap vs. simply
+            # unreachable), so pass it straight through rather than
+            # guessing here.
+            logger.error(f"/ask: no provider could answer: {e}")
+            await ctx.followup.send(e.user_message)
         except Exception as e:
-            # An ollama client older than 0.5.x rejects the think= kwarg
-            # with `TypeError: chat() got an unexpected keyword argument
-            # 'think'`. Special-case ONLY that exact message so an
-            # unrelated TypeError elsewhere in the block isn't
-            # misattributed to the client version.
-            if isinstance(
-                e, TypeError
-            ) and "unexpected keyword argument 'think'" in str(e):
-                logger.error(f"Ollama client error: {e}")
-                await ctx.followup.send(
-                    "The Ollama Python client is too old for `/ask` "
-                    "(needs the `think` parameter). Upgrade it: "
-                    "`pip install -U 'ollama>=0.5.1'`.\n"
-                    f"`{e}`"
-                )
-            else:
-                logger.error(f"Ollama error: {e}")
-                await ctx.followup.send(
-                    f"Failed to query the model. Make sure Ollama is running.\n`{e}`"
-                )
+            logger.exception("/ask failed unexpectedly")
+            await ctx.followup.send(f"Failed to query the model.\n`{e}`")
 
     @bot.slash_command(
         name="ask",
