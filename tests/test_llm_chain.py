@@ -539,3 +539,40 @@ def test_latched_reason_survives_into_later_questions(monkeypatch):
     with pytest.raises(AllProvidersFailed) as second:
         chain.ask("t", "q2", sleep=lambda _: None)
     assert second.value.user_message == chain.DISCORD_QUOTA_MSG
+
+
+def test_truncation_is_named_in_the_log_not_hidden_as_an_empty_reply(
+    monkeypatch, caplog
+):
+    """The distinct class only pays off if it reaches a log line: the chain
+    fails over and returns successfully, so last_error never surfaces
+    unless the truncating tier was the last one tried. Without this, a
+    paid tier quietly handing every question to local Ollama is
+    indistinguishable from a provider returning junk."""
+    truncated = TruncatedCompletionError("hit the 2048-token cap")
+    tiers = [
+        _tier("openrouter", lambda: (_ for _ in ()).throw(truncated)),
+        _tier("ollama", lambda: "local answer"),
+    ]
+    with caplog.at_level("WARNING"):
+        result = _run_with_tiers(monkeypatch, tiers)
+
+    assert result.provider == "ollama"
+    messages = " ".join(r.getMessage() for r in caplog.records)
+    assert "MAX_ANSWER_TOKENS_CLOUD" in messages
+    assert str(chain.MAX_ANSWER_TOKENS_CLOUD) in messages
+
+
+def test_ordinary_empty_reply_logs_without_the_token_advice(monkeypatch, caplog):
+    """The opposite case must not tell the operator to raise a cap that is
+    not the problem."""
+    tiers = [
+        _tier("openrouter", lambda: (_ for _ in ()).throw(EmptyCompletionError("nil"))),
+        _tier("ollama", lambda: "local answer"),
+    ]
+    with caplog.at_level("WARNING"):
+        _run_with_tiers(monkeypatch, tiers)
+
+    messages = " ".join(r.getMessage() for r in caplog.records)
+    assert "MAX_ANSWER_TOKENS_CLOUD" not in messages
+    assert "empty answer" in messages

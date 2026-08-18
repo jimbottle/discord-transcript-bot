@@ -368,12 +368,18 @@ class HealthCheck:
 
         # No cloud key. Local-only /ask is a supported configuration, but
         # only when the local tier can actually answer — so this consults
-        # the ollama_server result rather than the env var that merely
-        # permits it. Claiming "Ollama will carry it" on a host with no
-        # ollama running would pass in exactly the case the check exists
-        # to catch: nothing at all can answer.
+        # the real check results rather than the env var that merely
+        # permits it.
+        #
+        # Keyed on ollama_MODEL, not ollama_server: a reachable daemon
+        # without the model pulled cannot answer either (_ollama_call gets
+        # "manifest unknown", which the chain classifies and latches), and
+        # reporting PASS there would reproduce one level down exactly the
+        # defect this check was rewritten to fix. The model check
+        # transitively covers the server, since it is recorded as failed
+        # when the daemon is unreachable.
         ollama_ready = llm_config.ollama_enabled() and self.checks.get(
-            "ollama_server", {}
+            "ollama_model", {}
         ).get("ok", False)
         if ollama_ready:
             self._record(
@@ -383,16 +389,18 @@ class HealthCheck:
                 critical=False,
             )
         else:
-            reason = (
-                "ollama is not reachable"
-                if llm_config.ollama_enabled()
-                else "ASK_DISABLE_OLLAMA is set"
-            )
+            if not llm_config.ollama_enabled():
+                reason = "ASK_DISABLE_OLLAMA is set"
+            elif not self.checks.get("ollama_server", {}).get("ok", False):
+                reason = "ollama is not reachable"
+            else:
+                reason = "the local model is not installed"
             self._record(
                 "ask_providers",
                 False,
                 f"No /ask provider can answer ({reason}): set "
-                "OPENROUTER_API_KEY or CEREBRAS_PAID_API_KEY, or start ollama",
+                "OPENROUTER_API_KEY or CEREBRAS_PAID_API_KEY, or install the "
+                "local model",
                 critical=False,
             )
 

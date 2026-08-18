@@ -365,7 +365,30 @@ def ask(transcript: str, question: str, sleep=time.sleep) -> AskResult:
                     _latch(tier.name, e)
                     break
                 if empty:
-                    logger.warning("/ask tier '%s' returned an empty answer", tier.name)
+                    if isinstance(e, TruncatedCompletionError):
+                        # Named explicitly, because this one is OUR bug to
+                        # fix, not the provider's. It is also the only
+                        # place it becomes visible: the chain fails over
+                        # to the next tier and returns successfully, so
+                        # last_error never reaches anyone unless the
+                        # truncating tier happened to be the last tried.
+                        # Without this line, a paid tier quietly handing
+                        # every question to local Ollama looks exactly
+                        # like a provider returning junk.
+                        logger.warning(
+                            "/ask tier '%s' spent its %d-token budget without "
+                            "answering — raise MAX_ANSWER_TOKENS_CLOUD if this "
+                            "repeats: %s",
+                            tier.name,
+                            MAX_ANSWER_TOKENS_CLOUD,
+                            e,
+                        )
+                    else:
+                        logger.warning(
+                            "/ask tier '%s' returned an empty answer: %s",
+                            tier.name,
+                            e,
+                        )
                     break
                 if not rate_limited:
                     logger.error("/ask tier '%s' failed: %s", tier.name, e)

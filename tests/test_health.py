@@ -7,11 +7,28 @@ faster-whisper large-v3 — conftest's `_fast_whisper_model` fixture stubs
 `audio_model` for the fast suite.
 """
 
+import os
 from unittest.mock import MagicMock
 
 import pytest
 
 from src.bot.health import HealthCheck
+from src.bot import health as health_module
+
+
+@pytest.fixture(autouse=True)
+def _isolate_status_file(monkeypatch, tmp_path):
+    """No test may write .logs/health_status.json.
+
+    The web dashboard reads that exact path (web/bot_manager.py), and the
+    bot only rewrites it at startup. A test that calls run_all(autofix=True)
+    with most checks stubbed would leave the UI reporting a handful of fake
+    checks — as "ready" — for a live bot whose real results had been erased,
+    and it would stay wrong for the rest of the session.
+    """
+    monkeypatch.setattr(
+        health_module, "STATUS_FILE", str(tmp_path / "health_status.json")
+    )
 
 
 def _stub_ollama_list(monkeypatch, installed_names):
@@ -197,6 +214,7 @@ def test_ask_providers_passes_with_no_keys_only_when_ollama_is_reachable(monkeyp
 
     hc = HealthCheck()
     hc.checks["ollama_server"] = {"ok": True, "message": "", "critical": False}
+    hc.checks["ollama_model"] = {"ok": True, "message": "", "critical": False}
     hc._check_ask_providers()
 
     assert hc.checks["ask_providers"]["ok"] is True
@@ -210,6 +228,7 @@ def test_ask_providers_fails_when_no_key_and_ollama_unreachable(monkeypatch):
 
     hc = HealthCheck()
     hc.checks["ollama_server"] = {"ok": False, "message": "", "critical": False}
+    hc.checks["ollama_model"] = {"ok": False, "message": "", "critical": False}
     hc._check_ask_providers()
 
     assert hc.checks["ask_providers"]["ok"] is False
@@ -272,5 +291,52 @@ def test_ask_providers_is_never_critical(monkeypatch):
     for ollama_ok in (True, False):
         hc = HealthCheck()
         hc.checks["ollama_server"] = {"ok": ollama_ok, "message": "", "critical": False}
+        hc.checks["ollama_model"] = {"ok": ollama_ok, "message": "", "critical": False}
         hc._check_ask_providers()
         assert hc.checks["ask_providers"]["critical"] is False
+
+
+def test_ask_providers_fails_when_model_is_not_installed(monkeypatch):
+    """A reachable daemon is not enough: without the model pulled,
+    _ollama_call gets 'manifest unknown' and the chain latches the tier.
+    Reporting PASS here would repeat, one level down, the defect that
+    keying this check on real results was meant to fix."""
+    _clear_provider_env(monkeypatch)
+
+    hc = HealthCheck()
+    hc.checks["ollama_server"] = {"ok": True, "message": "", "critical": False}
+    hc.checks["ollama_model"] = {"ok": False, "message": "", "critical": False}
+    hc._check_ask_providers()
+
+    assert hc.checks["ask_providers"]["ok"] is False
+    assert "model is not installed" in hc.checks["ask_providers"]["message"]
+
+
+def test_health_checks_never_touch_the_live_status_file(monkeypatch, tmp_path):
+    """Regression: a stubbed run_all(autofix=True) once overwrote
+    .logs/health_status.json, leaving the dashboard reporting three fake
+    checks as 'ready' for a bot whose real results were gone."""
+    live = os.path.join(os.getcwd(), ".logs", "health_status.json")
+    before = os.path.exists(live) and os.path.getmtime(live)
+
+    hc = HealthCheck()
+    for name in (
+        "_check_env_vars",
+        "_check_ffmpeg",
+        "_check_opus",
+        "_check_whisper_model",
+        "_check_openai_api",
+        "_check_player_map",
+        "_check_discord_gateway",
+        "_check_ollama_server",
+        "_check_ollama_model",
+        "_check_ask_providers",
+    ):
+        monkeypatch.setattr(hc, name, lambda *a, **kw: None)
+    monkeypatch.setattr(hc, "_check_transcripts_dir", lambda **kw: None)
+    monkeypatch.setattr(hc, "_check_log_dirs", lambda **kw: None)
+
+    hc.run_all(autofix=True)
+
+    after = os.path.exists(live) and os.path.getmtime(live)
+    assert after == before, "run_all wrote to the live health status file"
