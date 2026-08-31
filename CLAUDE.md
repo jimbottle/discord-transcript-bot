@@ -95,6 +95,8 @@ These tune the local transcription backend (no effect when `TRANSCRIPTION_METHOD
 
 The draft manifest's `reference` fields are **machine output, not ground truth** — a human corrects them, then saves as `manifest.jsonl` for `scripts/ab_transcribe.py --manifest`. Scoring against an uncorrected draft compares Whisper to itself and reports a meaninglessly low WER; the harness warns if handed a `.draft` file. Each capture directory gets a README with the correction workflow.
 
+**Marginal clips are order-dependent** (discord-transcript-bot-adg): on near-unintelligible audio the MLX decode depends on what ran earlier in the same process, so those clips add order-dependent noise to the corpus WER. Bake-off methodology: `ab_transcribe.py --order-trials 3 --stable-manifest <out>` flags clips whose hypothesis changes between shuffled-order runs and writes the manifest without them; delete near-unintelligible clips from the reference rather than guessing their text; then score with `--isolate` (one subprocess per config). Per-clip WER and hypotheses are always in `--json-out`.
+
 Capture is best-effort by construction: `SessionCapture` swallows its own errors and the sink wraps its calls again, so no capture bug can cost a live session its transcription.
 
 ## Code Style
