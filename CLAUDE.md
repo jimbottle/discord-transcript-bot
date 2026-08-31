@@ -86,7 +86,7 @@ These tune the local transcription backend (no effect when `TRANSCRIPTION_METHOD
 - `MLX_WHISPER_MODEL` — optional; override the MLX HF repo (otherwise mapped from `WHISPER_MODEL`, e.g. `large-v3` → `mlx-community/whisper-large-v3-mlx`).
 - `WHISPER_BEAM_SIZE` (default 5), `WHISPER_BEST_OF` (default 5), `WHISPER_BATCH_SIZE` (default 8) — faster-whisper decode params. The MLX backend ignores all three: `mlx_whisper` has no beam-search decoder (greedy + temperature fallback only) and no batched pipeline. So the beam5-vs-beam10 accuracy question applies only to the faster-whisper path; the final value is set by the A/B bake-off (discord-transcript-bot-d6j).
 
-**Warm the model before a session:** `make prewarm`. Weights download lazily on the first transcription — ~3 GB for MLX — so a cold cache means the first person to speak stalls the bot for minutes. `make prewarm` downloads and does a real end-to-end decode; `python scripts/prewarm_models.py --check` just reports cache state.
+**Warm the model before a session:** `make prewarm`. Weights download lazily on the first transcription — ~3 GB for MLX — so a cold cache means the first person to speak stalls the bot for minutes. `make prewarm` downloads and does a real end-to-end decode; `python scripts/prewarm_models.py --check` just reports cache state (exit 1 when the resolved model is cold). The startup health check runs the same probe (`src/asr/model_cache.py`) and logs a loud warning *before* a cold-cache download starts, so a multi-minute stall is never unexplained; the probe mirrors `selection._build_backend`'s choice without loading anything, so keep the two in step.
 
 ### Reference-audio capture (`src/session_capture.py`)
 

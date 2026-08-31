@@ -16,6 +16,7 @@ whole path works — not just that the files downloaded.
 USAGE
     python scripts/prewarm_models.py            # download + warm
     python scripts/prewarm_models.py --check    # report cache state, download nothing
+                                                # (exit 1 if the resolved model is cold)
 """
 
 import argparse
@@ -30,7 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.asr import selection  # noqa: E402
+from src.asr import model_cache, selection  # noqa: E402
 from src.asr.base import BackendUnavailable  # noqa: E402
 
 # Spoken by macOS `say` for the end-to-end check. Deliberately D&D-flavored
@@ -103,8 +104,15 @@ def main(argv=None):
     print(f"WHISPER_MODEL={model}  ASR_BACKEND={backend_pref}")
     print(f"Model cache: {describe_cache()}")
 
+    # The same cold/warm answer the startup health check gives, for the
+    # model the bot would actually load (discord-transcript-bot-56t).
+    state = model_cache.probe()
+    if state is not None:
+        print(f"Resolved model: {state.describe()}")
+
     if args.check:
-        return 0
+        # Non-zero when cold so a pre-session script can gate on it.
+        return 1 if (state is not None and not state.cached) else 0
 
     print("\nResolving backend (downloads weights on a cold cache)...")
     start = time.monotonic()

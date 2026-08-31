@@ -340,3 +340,77 @@ def test_health_checks_never_touch_the_live_status_file(monkeypatch, tmp_path):
 
     after = os.path.exists(live) and os.path.getmtime(live)
     assert after == before, "run_all wrote to the live health status file"
+
+
+# ── whisper_model: cold cache is announced, not silently downloaded ────
+# discord-transcript-bot-56t. get_backend() downloads ~3 GB on a cold
+# cache from inside this check; the operator must be told BEFORE the stall.
+
+
+def _cache_state(cached):
+    from src.asr.model_cache import CacheState
+
+    return CacheState(
+        backend="mlx-whisper",
+        model_id="large-v3",
+        repo="mlx-community/whisper-large-v3-mlx",
+        cached=cached,
+        cache_dir="/nowhere/hub",
+        approx_gb=3.0,
+    )
+
+
+def test_whisper_check_warns_before_a_cold_cache_download(monkeypatch, caplog):
+    import logging
+
+    from src.asr import model_cache
+
+    monkeypatch.setattr(model_cache, "probe", lambda: _cache_state(False))
+    hc = HealthCheck()
+    written = []
+    monkeypatch.setattr(
+        hc, "_write_status", lambda phase, check=None: written.append((phase, check))
+    )
+    with caplog.at_level(logging.WARNING, logger="src.bot.health"):
+        hc._check_whisper_model(autofix=True)
+
+    assert any("downloading ~3 GB" in r.message for r in caplog.records)
+    # The provisional "downloading" state reached the dashboard status file
+    # before the (stubbed) load ran.
+    assert ("initializing", "whisper_model") in written
+    # ...and the final verdict still reflects the real load.
+    result = hc.checks["whisper_model"]
+    assert result["ok"] is True
+    assert "make prewarm" in result["message"]
+
+
+def test_whisper_check_is_quiet_on_a_warm_cache(monkeypatch, caplog):
+    import logging
+
+    from src.asr import model_cache
+
+    monkeypatch.setattr(model_cache, "probe", lambda: _cache_state(True))
+    hc = HealthCheck()
+    written = []
+    monkeypatch.setattr(
+        hc, "_write_status", lambda phase, check=None: written.append((phase, check))
+    )
+    with caplog.at_level(logging.WARNING, logger="src.bot.health"):
+        hc._check_whisper_model(autofix=True)
+
+    assert not any("downloading" in r.message for r in caplog.records)
+    assert written == []
+    assert hc.checks["whisper_model"]["ok"] is True
+    assert "downloaded" not in hc.checks["whisper_model"]["message"]
+
+
+def test_whisper_check_survives_a_broken_probe(monkeypatch):
+    from src.asr import model_cache
+
+    def boom():
+        raise RuntimeError("probe exploded")
+
+    monkeypatch.setattr(model_cache, "probe", boom)
+    hc = HealthCheck()
+    hc._check_whisper_model()
+    assert hc.checks["whisper_model"]["ok"] is True

@@ -63,7 +63,7 @@ class HealthCheck:
         if autofix:
             self._write_status("initializing", "whisper_model")
 
-        self._check_whisper_model()
+        self._check_whisper_model(autofix=autofix)
         if autofix:
             self._write_status("initializing", "openai_api")
 
@@ -219,7 +219,28 @@ class HealthCheck:
 
     # ── whisper_model ─────────────────────────────────────────────────
 
-    def _check_whisper_model(self):
+    def _check_whisper_model(self, autofix: bool = False):
+        # Weights download lazily inside get_backend() — ~3 GB on a cold
+        # cache — so first say whether that is about to happen. Otherwise
+        # the bot just looks hung for minutes with no indication why
+        # (discord-transcript-bot-56t). The provisional record is written to
+        # the status file during startup so the dashboard shows the
+        # download too, not only the terminal. Best-effort: probe() never
+        # raises and a probe failure must not fail the real check below.
+        cold = None
+        try:
+            from src.asr.model_cache import probe
+
+            state = probe()
+            if state is not None and not state.cached:
+                cold = state
+                logger.warning(state.cold_message())
+                self._record("whisper_model", False, state.cold_message())
+                if autofix:
+                    self._write_status("initializing", "whisper_model")
+        except Exception as e:  # noqa: BLE001 - diagnostics only
+            logger.debug("cold-cache probe skipped: %s", e)
+
         try:
             from src.asr.selection import get_backend
 
@@ -230,11 +251,13 @@ class HealthCheck:
             # caught (roborev #512).
             backend = get_backend()
             backend.healthcheck()
-            self._record(
-                "whisper_model",
-                True,
-                f"{backend.name}/{backend.model_id} loaded and responding",
-            )
+            message = f"{backend.name}/{backend.model_id} loaded and responding"
+            if cold is not None:
+                message += (
+                    " (weights were downloaded during this start; run "
+                    "`make prewarm` before the next session to skip the wait)"
+                )
+            self._record("whisper_model", True, message)
         except Exception as e:
             self._record("whisper_model", False, f"Whisper model failed: {e}")
 
