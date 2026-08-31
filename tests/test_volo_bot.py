@@ -180,6 +180,7 @@ def test_write_runtime_state_connected_and_recording(tmp_path, monkeypatch):
     state = json.loads((tmp_path / "bot_state.json").read_text())
     assert state["started_at"] == 1000.0
     assert "updated_at" in state
+    assert state["cpu_pct"] is None  # first write: no window to measure yet
     assert state["guilds"] == [
         {
             "guild_id": 123,
@@ -462,3 +463,111 @@ def test_upsert_player_entry_atomic_no_orphan_on_write_failure(tmp_path, monkeyp
         1: {"player": "Keep", "character": "Keep"}
     }
     assert fake.player_map[7] == {"player": "X", "character": "Y"}  # in-memory applied
+
+
+# ── cpu_pct + hot-and-idle spin alert (discord-transcript-bot-309) ─────────
+
+
+class _Clock:
+    """Controllable process_time / monotonic pair."""
+
+    def __init__(self):
+        self.cpu = 100.0
+        self.wall = 5000.0
+
+    def advance(self, wall, cpu):
+        self.wall += wall
+        self.cpu += cpu
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    c = _Clock()
+    monkeypatch.setattr(vb_mod.time, "process_time", lambda: c.cpu)
+    monkeypatch.setattr(vb_mod.time, "monotonic", lambda: c.wall)
+    return c
+
+
+def _state(tmp_path):
+    return json.loads((tmp_path / "bot_state.json").read_text())
+
+
+def test_cpu_pct_is_measured_between_writes_and_alerts_when_idle(
+    tmp_path, monkeypatch, clock
+):
+    monkeypatch.setattr(vb_mod, "BOT_STATE_FILE", str(tmp_path / "bot_state.json"))
+    fake = _write_self()  # no guilds at all == idle
+    VoloBot._write_runtime_state(fake)
+    assert _state(tmp_path)["cpu_pct"] is None
+    assert fake._cpu_alert is None
+
+    clock.advance(wall=30.0, cpu=28.5)  # one core pegged for a heartbeat
+    VoloBot._write_runtime_state(fake)
+    assert _state(tmp_path)["cpu_pct"] == 95.0
+    assert "kill -USR1" in fake._cpu_alert and "thread_dump" in fake._cpu_alert
+
+    # A rapid follow-up write (lifecycle transition) reuses the reading and
+    # keeps the baseline instead of producing a noisy sub-second sample.
+    clock.advance(wall=0.2, cpu=0.0)
+    VoloBot._write_runtime_state(fake)
+    assert _state(tmp_path)["cpu_pct"] == 95.0
+
+    clock.advance(wall=30.0, cpu=0.3)  # calmed down
+    VoloBot._write_runtime_state(fake)
+    assert _state(tmp_path)["cpu_pct"] == 1.0
+    assert fake._cpu_alert is None
+
+
+def test_hot_cpu_while_transcribing_is_not_an_alert(tmp_path, monkeypatch, clock):
+    """The CPU backend legitimately uses every core mid-game; only hot AND
+    idle (nothing queued, nothing produced recently) means a spin."""
+    monkeypatch.setattr(vb_mod, "BOT_STATE_FILE", str(tmp_path / "bot_state.json"))
+    fresh = _aged_session(tmp_path, 5)  # transcript grew 5s ago
+    fake = _write_self(
+        guild_to_helper={5: SimpleNamespace(vc=_vc("voice"))},
+        guild_whisper_sinks={5: _fake_sink(fresh, 0)},
+        guild_is_recording={5: True},
+    )
+    VoloBot._write_runtime_state(fake)
+    clock.advance(wall=30.0, cpu=120.0)  # 400%: four cores decoding
+    VoloBot._write_runtime_state(fake)
+    assert _state(tmp_path)["cpu_pct"] == 400.0
+    assert fake._cpu_alert is None
+
+    # Same load, but the room went quiet an hour ago and nothing is queued:
+    # that is the discord-transcript-bot-309 signature.
+    fake.guild_whisper_sinks[5] = _fake_sink(_aged_session(tmp_path, 3600), 0)
+    clock.advance(wall=30.0, cpu=30.0)
+    VoloBot._write_runtime_state(fake)
+    assert fake._cpu_alert is not None
+
+    # ...unless audio is actually queued (busy, just slow).
+    fake.guild_whisper_sinks[5] = _fake_sink(_aged_session(tmp_path, 3600), 3)
+    clock.advance(wall=30.0, cpu=30.0)
+    VoloBot._write_runtime_state(fake)
+    assert fake._cpu_alert is None
+
+
+def test_heartbeat_loop_logs_the_cpu_alert(monkeypatch, caplog):
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(_seconds):
+        await real_sleep(0)
+
+    monkeypatch.setattr(vb_mod.asyncio, "sleep", fast_sleep)
+    fake = SimpleNamespace(
+        _write_runtime_state=lambda: [],
+        _cpu_alert="Process CPU at 99% while transcription is idle — kill -USR1 1",
+    )
+
+    async def drive():
+        task = asyncio.ensure_future(VoloBot._heartbeat_loop(fake))
+        for _ in range(4):
+            await real_sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    with caplog.at_level(logging.WARNING, logger="src.bot.volo_bot"):
+        asyncio.run(drive())
+    assert any("kill -USR1" in r.getMessage() for r in caplog.records)

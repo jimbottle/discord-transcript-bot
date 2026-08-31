@@ -35,8 +35,38 @@ HEARTBEAT_INTERVAL_S = 30
 # pipeline case — not just a quiet room, where the queue stays shallow).
 STALL_OUTPUT_AGE_S = 120
 STALL_QUEUE_DEPTH = 25
+# CPU spin detector (discord-transcript-bot-309): process CPU% is sampled
+# between state writes and published as `cpu_pct`. High CPU while
+# transcription is legitimately busy is normal (the CPU backend uses every
+# core), so the heartbeat only warns when the process is hot AND idle: no
+# audio queued and no transcript output for IDLE_OUTPUT_AGE_S.
+HIGH_CPU_PCT = 90
+IDLE_OUTPUT_AGE_S = 60
+# Minimum window for a CPU% sample; state writes on rapid lifecycle
+# transitions would otherwise produce noisy sub-second readings.
+CPU_SAMPLE_MIN_WINDOW_S = 1.0
 
 logger = logging.getLogger(__name__)
+
+
+def _sample_cpu_pct(obj):
+    """Process CPU% since ``obj``'s previous sample, or None until a window
+    of at least CPU_SAMPLE_MIN_WINDOW_S has elapsed. Shorter gaps return the
+    previous reading and keep the baseline, so a burst of lifecycle writes
+    can't reset the measurement. Module-level (not a method) so it works on
+    any object that can hold two attributes — the bot, or a test stand-in."""
+    now_cpu, now_wall = time.process_time(), time.monotonic()
+    prev = getattr(obj, "_cpu_sample", None)
+    if prev is None:
+        obj._cpu_sample = (now_cpu, now_wall)
+        return None
+    window = now_wall - prev[1]
+    if window < CPU_SAMPLE_MIN_WINDOW_S:
+        return getattr(obj, "_last_cpu_pct", None)
+    pct = round((now_cpu - prev[0]) / window * 100.0, 1)
+    obj._cpu_sample = (now_cpu, now_wall)
+    obj._last_cpu_pct = pct
+    return pct
 
 
 class VoloBot(discord.Bot):
@@ -160,6 +190,9 @@ class VoloBot(discord.Bot):
                         "the sink may be wedged. Try /stop then /scribe, or "
                         "restart the bot."
                     )
+                cpu_alert = getattr(self, "_cpu_alert", None)
+                if cpu_alert:
+                    logger.warning(cpu_alert)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 - heartbeat must not die loudly
@@ -277,9 +310,29 @@ class VoloBot(discord.Bot):
                     )
                 except Exception as e:  # noqa: BLE001 - never fail a write
                     logger.debug(f"runtime-state: skipped guild {gid}: {e}")
+            # Hot-and-idle detection (discord-transcript-bot-309): a core
+            # pegged while nothing is queued and nothing has been produced
+            # for a while is a spinning thread, not work. Busy rooms keep
+            # output_age small, so a CPU backend at 400% mid-game never trips.
+            cpu_pct = _sample_cpu_pct(self)
+            idle = all(
+                g["queue_depth"] == 0
+                and (g["output_age"] is None or g["output_age"] >= IDLE_OUTPUT_AGE_S)
+                for g in guilds
+            )
+            self._cpu_alert = None
+            if cpu_pct is not None and cpu_pct >= HIGH_CPU_PCT and idle:
+                self._cpu_alert = (
+                    f"Process CPU at {cpu_pct:.0f}% while transcription is idle "
+                    f"(nothing queued, no output for ≥{IDLE_OUTPUT_AGE_S}s) — a "
+                    f"thread is spinning. Run `kill -USR1 {os.getpid()}` to write "
+                    "a ranked stack dump to .logs/thread_dump-*.txt "
+                    "(discord-transcript-bot-309)."
+                )
             state = {
                 "updated_at": time.time(),
                 "started_at": self._started_at,
+                "cpu_pct": cpu_pct,
                 "guilds": guilds,
             }
             os.makedirs(os.path.dirname(BOT_STATE_FILE), exist_ok=True)

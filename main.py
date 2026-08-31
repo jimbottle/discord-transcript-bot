@@ -85,6 +85,19 @@ if __name__ == "__main__":
     configure_logging()
     loop = asyncio.get_event_loop()
 
+    # `kill -USR1 <pid>` writes a sampled all-thread stack dump to .logs/ —
+    # the no-root way to name the thread behind a CPU spin
+    # (discord-transcript-bot-309). Must run on the main thread.
+    from src.utils.thread_dump import install_signal_handler
+
+    install_signal_handler(directory=".logs")
+
+    # Guarded workarounds for the pinned Pycord voice-receive branch; each
+    # skips itself with a warning if upstream has changed shape.
+    from src.bot.pycord_patches import apply_all as apply_pycord_patches
+
+    apply_pycord_patches()
+
     from src.bot.volo_bot import VoloBot
 
     bot = VoloBot(loop)
