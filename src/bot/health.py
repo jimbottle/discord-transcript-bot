@@ -235,7 +235,13 @@ class HealthCheck:
             if state is not None and not state.cached:
                 cold = state
                 logger.warning(state.cold_message())
-                self._record("whisper_model", False, state.cold_message())
+                # critical=False: this is an in-progress notice, not a
+                # failure — the dashboard renders ok=False+critical as a
+                # red ✗ and would alarm about the very download being
+                # announced. It is overwritten by the real verdict below.
+                self._record(
+                    "whisper_model", False, state.cold_message(), critical=False
+                )
                 if autofix:
                     self._write_status("initializing", "whisper_model")
         except Exception as e:  # noqa: BLE001 - diagnostics only

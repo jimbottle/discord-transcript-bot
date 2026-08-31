@@ -368,13 +368,21 @@ def test_whisper_check_warns_before_a_cold_cache_download(monkeypatch, caplog):
     monkeypatch.setattr(model_cache, "probe", lambda: _cache_state(False))
     hc = HealthCheck()
     written = []
-    monkeypatch.setattr(
-        hc, "_write_status", lambda phase, check=None: written.append((phase, check))
-    )
+    provisional = []
+
+    def capture_status(phase, check=None):
+        written.append((phase, check))
+        provisional.append(dict(hc.checks.get("whisper_model", {})))
+
+    monkeypatch.setattr(hc, "_write_status", capture_status)
     with caplog.at_level(logging.WARNING, logger="src.bot.health"):
         hc._check_whisper_model(autofix=True)
 
     assert any("downloading ~3 GB" in r.message for r in caplog.records)
+    # The provisional record persisted to the dashboard is an in-progress
+    # notice (warn styling), not a critical failure (red ✗) — roborev #4307.
+    assert provisional and provisional[0]["ok"] is False
+    assert provisional[0]["critical"] is False
     # The provisional "downloading" state reached the dashboard status file
     # before the (stubbed) load ran.
     assert ("initializing", "whisper_model") in written
