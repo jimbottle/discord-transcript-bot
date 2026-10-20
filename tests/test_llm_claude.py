@@ -54,10 +54,16 @@ def _use(monkeypatch, client):
     return client
 
 
-def _status_error(cls, status):
+def _status_error(cls, status, message="nope"):
+    """An SDK error built the way the SDK builds it: the parsed JSON body on
+    ``body`` and a ``"Error code: N - {dict}"`` dump on ``message``."""
     req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
-    resp = httpx.Response(status, request=req, json={"error": {"message": "nope"}})
-    return cls(f"status {status}", response=resp, body=None)
+    body = {
+        "type": "error",
+        "error": {"type": "invalid_request_error", "message": message},
+    }
+    resp = httpx.Response(status, request=req, json=body)
+    return cls(f"Error code: {status} - {body}", response=resp, body=body)
 
 
 # ── configuration ────────────────────────────────────────────────────
@@ -186,18 +192,56 @@ def test_api_errors_become_user_messages(monkeypatch, error, expected):
 
 
 def test_out_of_credit_is_named_as_billing(monkeypatch):
-    err = _status_error(anthropic.BadRequestError, 400)
-    err.message = "Your credit balance is too low to access the Anthropic API."
+    err = _status_error(
+        anthropic.BadRequestError,
+        400,
+        "Your credit balance is too low to access the Anthropic API.",
+    )
     _use(monkeypatch, _FakeClient(error=err))
     with pytest.raises(claude.AskFailed) as ei:
         claude.ask("t", "q")
     assert ei.value.user_message == claude.BILLING_MSG
 
 
-def test_other_bad_request_carries_the_api_message(monkeypatch):
-    err = _status_error(anthropic.BadRequestError, 400)
-    err.message = "max_tokens: too large"
+def test_other_bad_request_carries_the_api_message_not_the_dict_dump(monkeypatch):
+    err = _status_error(anthropic.BadRequestError, 400, "prompt is too long")
     _use(monkeypatch, _FakeClient(error=err))
     with pytest.raises(claude.AskFailed) as ei:
         claude.ask("t", "q")
-    assert "max_tokens: too large" in ei.value.user_message
+    assert ei.value.user_message == "Anthropic rejected the request: prompt is too long"
+    assert "{" not in ei.value.user_message, "no raw body dump in the channel"
+
+
+def test_bad_request_without_a_json_body_falls_back_to_status(monkeypatch):
+    req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    resp = httpx.Response(400, request=req, text="<html>gateway</html>")
+    err = anthropic.BadRequestError(
+        "<html>gateway</html>", response=resp, body="<html>gateway</html>"
+    )
+    _use(monkeypatch, _FakeClient(error=err))
+    with pytest.raises(claude.AskFailed) as ei:
+        claude.ask("t", "q")
+    assert ei.value.user_message == "Anthropic rejected the request: HTTP 400"
+
+
+# ── max_tokens ───────────────────────────────────────────────────────
+
+
+def test_max_tokens_with_text_appends_a_truncation_note(monkeypatch, caplog):
+    import logging
+
+    _use(
+        monkeypatch,
+        _FakeClient(_response(text="Half an ans", stop_reason="max_tokens")),
+    )
+    with caplog.at_level(logging.WARNING, logger="src.llm.claude"):
+        result = claude.ask("t", "q")
+    assert result.answer == "Half an ans" + claude.TRUNCATION_NOTE
+    assert any("max_tokens" in r.message for r in caplog.records)
+
+
+def test_max_tokens_with_no_text_names_the_budget(monkeypatch):
+    _use(monkeypatch, _FakeClient(_response(text="", stop_reason="max_tokens")))
+    with pytest.raises(claude.AskFailed) as ei:
+        claude.ask("t", "q")
+    assert ei.value.user_message == claude.TRUNCATED_MSG

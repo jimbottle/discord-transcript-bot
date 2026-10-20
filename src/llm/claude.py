@@ -46,6 +46,12 @@ UNREACHABLE_MSG = "Couldn't reach Anthropic (network or timeout). Try again shor
 SERVER_ERROR_MSG = "Anthropic is having trouble right now. Try again shortly."
 REFUSAL_MSG = "Claude declined to answer that one."
 EMPTY_MSG = "The model returned no answer. Try rephrasing the question."
+TRUNCATED_MSG = (
+    "The model ran out of room before answering (it hit the token limit "
+    "while reasoning). Try a narrower question, or lower ASK_EFFORT on the "
+    "bot host."
+)
+TRUNCATION_NOTE = "\n\n_(answer cut off at the token limit)_"
 
 
 def _env(name: str) -> str:
@@ -91,6 +97,21 @@ class AskResult:
     output_tokens: int = 0
 
 
+def _api_error_message(error: anthropic.APIStatusError) -> str:
+    """The API's own human-readable error text. The SDK's ``e.message`` is
+    ``"Error code: 400 - {<whole parsed body>}"`` — a dict dump, not
+    something to post to a channel — so dig the message out of the body
+    and fall back to a fixed string."""
+    body = getattr(error, "body", None)
+    if isinstance(body, dict):
+        inner = body.get("error")
+        if isinstance(inner, dict) and inner.get("message"):
+            return str(inner["message"])
+        if body.get("message"):
+            return str(body["message"])
+    return f"HTTP {getattr(error, 'status_code', '?')}"
+
+
 def _client() -> anthropic.Anthropic:
     # Built per call: cheap, and it picks up a key set after startup.
     return anthropic.Anthropic(api_key=api_key(), max_retries=2, timeout=TIMEOUT_S)
@@ -133,11 +154,11 @@ def ask(transcript: str, question: str) -> AskResult:
     except anthropic.RateLimitError as e:
         raise AskFailed(RATE_LIMIT_MSG, e) from e
     except anthropic.BadRequestError as e:
-        # The API's own wording lives in e.message (from the error body).
-        text = (getattr(e, "message", "") or str(e)).lower()
-        if "credit" in text or "billing" in text:
+        detail = _api_error_message(e)
+        lowered = detail.lower()
+        if "credit" in lowered or "billing" in lowered:
             raise AskFailed(BILLING_MSG, e) from e
-        raise AskFailed(f"Anthropic rejected the request: {e.message}", e) from e
+        raise AskFailed(f"Anthropic rejected the request: {detail}", e) from e
     except anthropic.APIStatusError as e:
         if e.status_code >= 500:
             raise AskFailed(SERVER_ERROR_MSG, e) from e
@@ -145,13 +166,25 @@ def ask(transcript: str, question: str) -> AskResult:
     except anthropic.APIConnectionError as e:  # includes APITimeoutError
         raise AskFailed(UNREACHABLE_MSG, e) from e
 
-    if getattr(response, "stop_reason", None) == "refusal":
+    stop_reason = getattr(response, "stop_reason", None)
+    if stop_reason == "refusal":
         raise AskFailed(REFUSAL_MSG)
     answer = "".join(
         getattr(block, "text", "")
         for block in response.content
         if getattr(block, "type", None) == "text"
     ).strip()
+    if stop_reason == "max_tokens":
+        # The budget covers thinking too, so this usually means the model
+        # reasoned past MAX_ANSWER_TOKENS. Say so rather than posting a
+        # silently clipped answer or a misleading "try rephrasing".
+        logger.warning(
+            f"/ask hit max_tokens={MAX_ANSWER_TOKENS} on {request['model']} "
+            f"(effort {effort()}); answer {'truncated' if answer else 'empty'}"
+        )
+        if not answer:
+            raise AskFailed(TRUNCATED_MSG)
+        answer += TRUNCATION_NOTE
     if not answer:
         raise AskFailed(EMPTY_MSG)
     usage = getattr(response, "usage", None)
