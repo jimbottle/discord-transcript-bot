@@ -30,8 +30,12 @@ def test_sampler_ranks_spinning_thread_above_parked_thread():
     spinner.start()
     parker.start()
     try:
+        # The spinner holds the GIL, so the sampler lands roughly once per
+        # switch interval (5 ms) regardless of ``interval``: ~30-70 samples/s
+        # idle, fewer under load. Sample a full second and keep the floor low;
+        # the invariant under test is the ranking, not the sample rate.
         samples = thread_dump.sample_threads(
-            seconds=0.3, interval=0.002, exclude_ident=threading.get_ident()
+            seconds=1.0, interval=0.002, exclude_ident=threading.get_ident()
         )
     finally:
         stop.set()
@@ -42,7 +46,7 @@ def test_sampler_ranks_spinning_thread_above_parked_thread():
     spin = samples[spinner.ident]
     park = samples[parker.ident]
     assert spin.name == "spinner" and park.name == "parker"
-    assert spin.samples > 10 and park.samples > 10
+    assert spin.samples >= 5 and park.samples >= 5
     assert spin.hot_score > park.hot_score
     assert park.modal_fraction > 0.9, "a sleeping thread sits on its sleep line"
     assert "_park" in park.locations.most_common(1)[0][0]
