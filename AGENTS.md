@@ -69,6 +69,8 @@ bd close <id>         # Complete work
 
 **Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
 
+**`.beads/` is gitignored in this repo (decision 2026-10-20).** The export, hooks and config under `.beads/` are never committed; tracker state lives only in the local Dolt DB on this machine. Do not `git add -f` anything under `.beads/`, and never write a `chore(bd): sync export` commit.
+
 ## Session Completion
 
 **When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
