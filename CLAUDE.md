@@ -28,6 +28,7 @@ Setup: `python -m venv venv && source venv/bin/activate && pip install -r requir
 3. `WhisperSink.write()` receives audio bytes from Discord, queues them per-speaker
 4. A background thread (`insert_voice`) monitors speakers, waits for 1.5s silence gap, then submits audio to a `ThreadPoolExecutor` for transcription
 5. Transcription results are written to per-session files (`transcripts/`) and a logging-based transcript log (`.logs/transcripts/`)
+6. `/stop` (or `/disconnect`, or the bot being kicked) stops the loop, which then flushes every still-buffered speaker, and `stop_voice_thread` waits up to `DRAIN_TIMEOUT_S` for the in-flight transcriptions before `close()` finalizes the session file — so the last thing said before `/stop` is not lost. `start_recording` returns `False` when the sink could not start and `/scribe` reports that instead of claiming to record.
 
 **State is tracked per-guild on the `VoloBot` instance:**
 - `guild_to_helper` — `BotHelper` (voice client wrapper)

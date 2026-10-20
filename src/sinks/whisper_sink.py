@@ -7,7 +7,7 @@ import re
 import threading
 import time
 import wave
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime
 from queue import Queue
 from typing import List
@@ -97,6 +97,8 @@ DEFAULT_INITIAL_PROMPT = "You are writing the transcriptions for a D&D game."
 
 logger = logging.getLogger(__name__)
 
+_now = time.time  # Speaker's default timestamp; the parameter shadows the module
+
 # The transcription engine (faster-whisper CPU/CUDA, or MLX-Whisper on Apple
 # Silicon) is selected at runtime and memoized in src/asr/selection.py. It is
 # resolved lazily on first use — NOT at import — so importing this module is
@@ -110,7 +112,10 @@ class Speaker:
     A class to store the audio data and transcription for each user.
     """
 
-    def __init__(self, user: int, player: str, character: str, data, time=time.time()):
+    def __init__(self, user: int, player: str, character: str, data, time=None):
+        if time is None:
+            # Not a default argument: that would be evaluated once at import.
+            time = _now()
         self.user = user
         self.player = player
         self.character = character
@@ -193,6 +198,13 @@ class WhisperSink(Sink):
         self._next_commit = 0
         self._pending_results = {}
         self._commit_lock = threading.Lock()
+        # Detached transcription futures that have not completed yet. The
+        # insert_voice loop never waits on them (that is the snowball fix),
+        # so teardown must: a segment submitted just before /stop is still
+        # running when the voice thread exits, and close() would otherwise
+        # finalize the .txt before its text arrives (discord-transcript-bot-abh).
+        self._inflight = set()
+        self._inflight_lock = threading.Lock()
 
         # Per-session transcript file. Path is fixed at construction so all
         # utterances from this sink land in the same file, but the handle is
@@ -281,9 +293,14 @@ class WhisperSink(Sink):
 
     # Upper bound for joining the voice thread. It should exit within a
     # couple of seconds of self.running going False (one insert_voice
-    # loop iteration), so this is generous; it exists only so a wedged
-    # transcription future can't block teardown forever.
+    # loop iteration plus the final flush), so this is generous; it
+    # exists only so a wedged loop can't block teardown forever.
     JOIN_TIMEOUT_S = 15
+    # Upper bound for the in-flight transcriptions to finish after the
+    # voice thread has exited. The final flush can submit one segment per
+    # speaker (each ≤ MAX_SEGMENT_S of audio), so this covers a full
+    # table's worth of trailing speech on the GPU backend with margin.
+    DRAIN_TIMEOUT_S = 60
 
     def stop_voice_thread(self):
         self.running = False
@@ -297,6 +314,7 @@ class WhisperSink(Sink):
                         f"{self.JOIN_TIMEOUT_S}s; abandoning it (daemon "
                         "thread, will not block process exit)."
                     )
+            self._wait_for_inflight()
         except Exception as e:
             logger.error(f"Unexpected error during thread join: {e}")
         finally:
@@ -310,6 +328,25 @@ class WhisperSink(Sink):
             except AttributeError:
                 pass
             logger.debug(f"A sink thread was stopped for guild {guild_id}.")
+
+    def _wait_for_inflight(self):
+        """Block (bounded) until every detached transcription future has
+        completed, so their text is committed while the session file is
+        still writable. Runs on the teardown path; must never raise."""
+        with self._inflight_lock:
+            pending = list(self._inflight)
+        if not pending:
+            return
+        logger.info(
+            f"Waiting for {len(pending)} in-flight transcription(s) to finish..."
+        )
+        done, not_done = wait(pending, timeout=self.DRAIN_TIMEOUT_S)
+        if not_done:
+            logger.warning(
+                f"{len(not_done)} transcription(s) still running after "
+                f"{self.DRAIN_TIMEOUT_S}s; their text will reach the JSON log "
+                "but not the per-session .txt."
+            )
 
     def check_audio_length(self, temp_file):
         # Ensure the BytesIO is at the start
@@ -595,30 +632,7 @@ class WhisperSink(Sink):
     def insert_voice(self):
         while self.running:
             try:
-                # Drain ALL pending audio into per-speaker buffers. This must
-                # never block on a transcription — see the detached submit
-                # below — or the queue backs up and segments snowball.
-                while not self.voice_queue.empty():
-                    item = self.voice_queue.get()
-                    # Find or create a speaker
-                    speaker = next(
-                        (s for s in self.speakers if s.user == item[0]), None
-                    )
-                    if speaker:
-                        speaker.data.append(item[1])
-                        speaker.new_bytes += 1
-                        speaker.last_word = item[2]
-                    elif (
-                        self.max_speakers < 0 or len(self.speakers) <= self.max_speakers
-                    ):
-                        user_id = item[0]
-                        user_map = self.player_map.get(user_id, {})
-                        player = user_map.get("player")
-                        character = user_map.get("character")
-                        self.speakers.append(
-                            Speaker(user_id, player, character, item[1], item[2])
-                        )
-
+                self._drain_voice_queue()
                 # Submit every speaker that has gone quiet OR whose buffer has
                 # grown past MAX_SEGMENT_S. Each is handed to the executor and
                 # DETACHED: we never call future.result() here, so this loop
@@ -633,35 +647,8 @@ class WhisperSink(Sink):
                     too_long = (
                         speaker.last_word - speaker.first_word
                     ) >= self.MAX_SEGMENT_S
-                    if not (silent or too_long):
-                        continue
-                    if speaker.new_bytes <= 1:
-                        continue
-                    self.speakers.remove(speaker)
-                    seq = self._submit_seq
-                    self._submit_seq += 1
-                    # Tag the segment with its submission order before it goes
-                    # to the executor, so a captured clip's filename sorts the
-                    # same way its manifest line will.
-                    speaker.seq = seq
-                    try:
-                        future = self.executor.submit(self.transcribe, speaker)
-                        future.add_done_callback(
-                            lambda fut, s=seq, spk=speaker: self._on_transcribed(
-                                s, spk, fut
-                            )
-                        )
-                    except Exception as e:
-                        # submit/callback registration failed after seq was
-                        # allocated (e.g. a shut-down executor). No future will
-                        # ever fire _on_transcribed(seq, …), so commit this seq
-                        # empty now — otherwise _next_commit wedges on it
-                        # permanently and every later result stops committing.
-                        logger.error(
-                            f"Failed to submit transcription for {speaker.user}: {e}"
-                        )
-                        self._record_result(seq, speaker, "")
-
+                    if silent or too_long:
+                        self._submit_speaker(speaker)
             except Exception as e:
                 logger.error(f"Error in insert_voice: {e}")
             finally:
@@ -674,6 +661,70 @@ class WhisperSink(Sink):
                 # discord-transcript-bot-309 (that is Pycord's receive loop;
                 # this loop measured 0.0%), so this is defense in depth.
                 time.sleep(self.IDLE_SLEEP_S)
+        self._flush_on_stop()
+
+    def _flush_on_stop(self):
+        """Final flush when the loop exits on /stop or /disconnect: whoever
+        was mid-sentence has a buffer that never reached SILENCE_GAP_S, and
+        Pycord drains its decoders into write() during stop_recording(), so
+        the queue can hold audio too. Submit all of it; stop_voice_thread
+        then waits for the futures (discord-transcript-bot-abh). Guarded:
+        this runs on the voice thread's way out and must not raise."""
+        try:
+            self._drain_voice_queue()
+            for speaker in self.speakers[:]:
+                self._submit_speaker(speaker)
+        except Exception as e:
+            logger.error(f"Error flushing buffered audio on stop: {e}")
+
+    def _drain_voice_queue(self):
+        """Move ALL pending audio into per-speaker buffers. Must never block
+        on a transcription (see the detached submit in _submit_speaker) or
+        the queue backs up and segments snowball."""
+        while not self.voice_queue.empty():
+            item = self.voice_queue.get()
+            # Find or create a speaker
+            speaker = next((s for s in self.speakers if s.user == item[0]), None)
+            if speaker:
+                speaker.data.append(item[1])
+                speaker.new_bytes += 1
+                speaker.last_word = item[2]
+            elif self.max_speakers < 0 or len(self.speakers) <= self.max_speakers:
+                user_id = item[0]
+                user_map = self.player_map.get(user_id, {})
+                player = user_map.get("player")
+                character = user_map.get("character")
+                self.speakers.append(
+                    Speaker(user_id, player, character, item[1], item[2])
+                )
+
+    def _submit_speaker(self, speaker):
+        """Hand one speaker's buffer to the executor (detached) and remove it
+        from the active list. Only the insert_voice thread calls this."""
+        if speaker.new_bytes <= 1:
+            return
+        self.speakers.remove(speaker)
+        seq = self._submit_seq
+        self._submit_seq += 1
+        # Tag the segment with its submission order before it goes to the
+        # executor, so a captured clip's filename sorts the same way its
+        # manifest line will.
+        speaker.seq = seq
+        try:
+            future = self.executor.submit(self.transcribe, speaker)
+            with self._inflight_lock:
+                self._inflight.add(future)
+            future.add_done_callback(
+                lambda fut, s=seq, spk=speaker: self._on_transcribed(s, spk, fut)
+            )
+        except Exception as e:
+            # submit/callback registration failed after seq was allocated
+            # (e.g. a shut-down executor). No future will ever fire
+            # _on_transcribed(seq, …), so commit this seq empty now —
+            # otherwise _next_commit wedges on it permanently and every
+            # later result stops committing.
+            logger.error(f"Failed to submit transcription for {speaker.user}: {e}")
+            self._record_result(seq, speaker, "")
 
     def _on_transcribed(self, seq, speaker, future):
         """Done-callback for a detached transcription future. Runs on an
@@ -683,6 +734,8 @@ class WhisperSink(Sink):
         Must not touch self.speakers (owned by the insert_voice thread); it
         only reads the speaker object handed to it and writes the result.
         """
+        with self._inflight_lock:
+            self._inflight.discard(future)
         try:
             transcription = future.result()
         except Exception as e:
@@ -854,3 +907,13 @@ class WhisperSink(Sink):
                     self._session_fh = None
             except OSError:
                 pass
+        # Release the worker threads: each /scribe builds a fresh sink with
+        # its own pool, and an un-shut-down pool keeps its (up to 8) idle
+        # workers alive for the life of the process. wait=False — anything
+        # still running was already given DRAIN_TIMEOUT_S by
+        # stop_voice_thread; it may finish on its own but can no longer
+        # reach the finalized .txt. Guarded: close() must never raise.
+        try:
+            self.executor.shutdown(wait=False)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"executor shutdown skipped: {e}")

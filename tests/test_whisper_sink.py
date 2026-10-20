@@ -838,3 +838,111 @@ def test_no_capture_announcement_when_disabled(tmp_path, monkeypatch, caplog):
         sink = _make_sink(tmp_path, monkeypatch)
     assert not any("capture ENABLED" in r.message for r in caplog.records)
     sink.close()
+
+
+# ── Teardown must not lose the trailing utterance (discord-transcript-bot-abh)
+# Two ways /stop used to drop the last thing said: a speaker still buffered
+# (never reached SILENCE_GAP_S) was never submitted when the loop exited, and
+# a detached future still running when close() finalized the .txt had its
+# text refused by _get_session_fh.
+
+
+def test_loop_exit_flushes_buffered_speakers(tmp_path, monkeypatch):
+    sink = _make_sink(tmp_path, monkeypatch)
+    sink.SILENCE_GAP_S = 1000  # nobody ever counts as silent
+    sink.MAX_SEGMENT_S = 1000  # ...or as too long
+    submitted = []
+    monkeypatch.setattr(
+        sink, "transcribe", lambda spk: submitted.append(spk.user) or ""
+    )
+
+    t = time.time()
+    sink.voice_queue.put_nowait([7, b"aa", t])
+    sink.voice_queue.put_nowait([7, b"bb", t])  # new_bytes > 1
+
+    # Run one pass so the speaker is buffered, then stop.
+    _run_insert_voice(sink, until=lambda: bool(sink.speakers))
+    deadline = time.time() + 2
+    while not submitted and time.time() < deadline:
+        time.sleep(0.02)
+    assert submitted == [7], "a speaker mid-sentence at /stop must still be transcribed"
+    assert sink.speakers == [], "flushed speakers leave the active list"
+    sink.close()
+
+
+def test_loop_exit_flushes_audio_still_in_the_queue(tmp_path, monkeypatch):
+    """Pycord drains its decoders into write() during stop_recording(), so
+    audio can land in voice_queue after the loop's last drain pass."""
+    sink = _make_sink(tmp_path, monkeypatch)
+    sink.SILENCE_GAP_S = 1000
+    sink.MAX_SEGMENT_S = 1000
+    submitted = []
+    monkeypatch.setattr(
+        sink, "transcribe", lambda spk: submitted.append(spk.user) or ""
+    )
+    sink.running = False  # loop body never runs; only the exit flush does
+    t = time.time()
+    sink.voice_queue.put_nowait([4, b"aa", t])
+    sink.voice_queue.put_nowait([4, b"bb", t])
+    sink.insert_voice()
+    deadline = time.time() + 2
+    while not submitted and time.time() < deadline:
+        time.sleep(0.02)
+    assert submitted == [4]
+    sink.close()
+
+
+def test_stop_voice_thread_waits_for_inflight_transcription(tmp_path, monkeypatch):
+    """A future submitted before /stop must have its text in the .txt: the
+    teardown waits for it (bounded) before close() finalizes the file."""
+    sink = _make_sink(tmp_path, monkeypatch)
+    sink.SILENCE_GAP_S = 1000
+    sink.MAX_SEGMENT_S = 0.0
+    release = threading.Event()
+
+    def slow_transcribe(spk):
+        release.wait(5)
+        return "the last words"
+
+    monkeypatch.setattr(sink, "transcribe", slow_transcribe)
+    t = time.time()
+    sink.voice_queue.put_nowait([1, b"aa", t])
+    sink.voice_queue.put_nowait([1, b"bb", t])
+
+    sink.running = True
+    th = threading.Thread(target=sink.insert_voice, daemon=True)
+    th.start()
+    deadline = time.time() + 2
+    while not sink._inflight and time.time() < deadline:
+        time.sleep(0.02)
+    assert sink._inflight, "the transcription should be in flight"
+    sink.voice_thread = th
+
+    # Release the transcription shortly after teardown starts, from another
+    # thread, so stop_voice_thread is genuinely blocked waiting on it.
+    threading.Timer(0.2, release.set).start()
+    sink.stop_voice_thread()
+    assert not sink._inflight, "teardown returns only once the future is done"
+    sink.close()
+    with open(sink.session_file, encoding="utf-8") as fh:
+        assert "the last words" in fh.read()
+
+
+def test_stop_voice_thread_bounded_when_transcription_wedged(tmp_path, monkeypatch):
+    sink = _make_sink(tmp_path, monkeypatch)
+    sink.DRAIN_TIMEOUT_S = 0.1
+    never = threading.Event()
+    f = sink.executor.submit(never.wait, 5)
+    sink._inflight.add(f)
+    t0 = time.time()
+    sink.stop_voice_thread()  # must return promptly, not hang
+    assert time.time() - t0 < 2
+    never.set()
+    sink.close()
+
+
+def test_close_shuts_down_executor(tmp_path, monkeypatch):
+    sink = _make_sink(tmp_path, monkeypatch)
+    sink.close()
+    with pytest.raises(RuntimeError):
+        sink.executor.submit(lambda: None)
