@@ -106,18 +106,9 @@ if __name__ == "__main__":
     # uptime during the restart→on_ready window. Best-effort, never raises.
     bot._write_runtime_state()
 
-    @bot.event
-    async def on_voice_state_update(member, before, after):
-        if member.id == bot.user.id:
-            # If the bot left the "before" channel
-            if after.channel is None:
-                guild_id = before.channel.guild.id
-                helper = bot.guild_to_helper.get(guild_id, None)
-                if helper:
-                    helper.set_vc(None)
-                    bot.guild_to_helper.pop(guild_id, None)
-
-                bot._close_and_clean_sink_for_guild(guild_id)
+    # NOTE: do not register on_voice_state_update here with @bot.event —
+    # that REPLACES VoloBot.on_voice_state_update (bot-left cleanup +
+    # dashboard roster refresh). Use @bot.listen() for any extra handler.
 
     @bot.slash_command(name="connect", description="Join your voice channel.")
     async def connect(ctx: discord.context.ApplicationContext):
@@ -229,7 +220,13 @@ if __name__ == "__main__":
                 "Already recording. Can't run two taps at once.", ephemeral=True
             )
             return
-        bot.start_recording(ctx)
+        if not bot.start_recording(ctx):
+            await ctx.respond(
+                "Couldn't start recording — the transcriber failed to start. "
+                "Check the bot logs, then `/disconnect`, `/connect` and try again.",
+                ephemeral=True,
+            )
+            return
         message = (
             "Recording. Every word in this channel is being transcribed in realtime."
         )

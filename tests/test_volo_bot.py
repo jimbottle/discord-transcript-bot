@@ -571,3 +571,114 @@ def test_heartbeat_loop_logs_the_cpu_alert(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="src.bot.volo_bot"):
         asyncio.run(drive())
     assert any("kill -USR1" in r.getMessage() for r in caplog.records)
+
+
+# ── start_recording reports failure (discord-transcript-bot-vjm) ───────
+# /scribe used to say "Recording." no matter what; now it only does when
+# start_recording returns True.
+
+
+def _rec_self(start_sink):
+    return SimpleNamespace(
+        guild_is_recording={},
+        guild_whisper_sinks={},
+        start_whisper_sink=start_sink,
+        _close_and_clean_sink_for_guild=MagicMock(),
+        _write_runtime_state=MagicMock(),
+    )
+
+
+def test_start_recording_returns_true_and_sets_flag_on_success():
+    fake = _rec_self(MagicMock())
+    ctx = SimpleNamespace(guild_id=5)
+    assert VoloBot.start_recording(fake, ctx) is True
+    assert fake.guild_is_recording[5] is True
+    fake._write_runtime_state.assert_called_once()
+
+
+def test_start_recording_returns_false_and_cleans_up_when_sink_fails():
+    fake = _rec_self(MagicMock(side_effect=RecordingException("already recording")))
+    ctx = SimpleNamespace(guild_id=5)
+    assert VoloBot.start_recording(fake, ctx) is False
+    assert 5 not in fake.guild_is_recording, "no recording flag for a failed start"
+    fake._close_and_clean_sink_for_guild.assert_called_once_with(5)
+    fake._write_runtime_state.assert_called_once()
+
+
+# ── on_voice_state_update owns the bot-left cleanup (discord-transcript-bot-xnj)
+
+
+def _vs_self(**kw):
+    base = dict(
+        user=SimpleNamespace(id=100),
+        guild_to_helper={},
+        guild_is_recording={},
+        guild_whisper_sinks={},
+        _close_and_clean_sink_for_guild=MagicMock(),
+        _write_runtime_state=MagicMock(),
+        _on_bot_left_voice=None,
+    )
+    base.update(kw)
+    fake = SimpleNamespace(**base)
+    # Bind the real helper so the event path exercises it.
+    fake._on_bot_left_voice = lambda gid: VoloBot._on_bot_left_voice(fake, gid)
+    return fake
+
+
+class _Chan:
+    """Hashable stand-in for a voice channel (SimpleNamespace is not
+    hashable, and the handler builds a set of connected channels)."""
+
+    def __init__(self, guild_id, name):
+        self.guild = SimpleNamespace(id=guild_id)
+        self.name = name
+        self.members = []
+
+
+def _vstate(channel):
+    return SimpleNamespace(channel=channel)
+
+
+def test_bot_leaving_voice_tears_down_guild_vstate():
+    chan = _Chan(9, "table")
+    helper = SimpleNamespace(vc=SimpleNamespace(channel=chan), set_vc=MagicMock())
+    fake = _vs_self(guild_to_helper={9: helper}, guild_is_recording={9: True})
+    asyncio.run(
+        VoloBot.on_voice_state_update(
+            fake, SimpleNamespace(id=100), _vstate(chan), _vstate(None)
+        )
+    )
+    assert 9 not in fake.guild_to_helper
+    assert 9 not in fake.guild_is_recording, "a kicked bot must not stay 'recording'"
+    helper.set_vc.assert_called_once_with(None)
+    fake._close_and_clean_sink_for_guild.assert_called_once_with(9)
+    assert fake._write_runtime_state.called
+
+
+def test_other_member_leaving_connected_channel_refreshes_roster_only():
+    chan = _Chan(9, "table")
+    helper = SimpleNamespace(vc=SimpleNamespace(channel=chan), set_vc=MagicMock())
+    fake = _vs_self(guild_to_helper={9: helper}, guild_is_recording={9: True})
+    asyncio.run(
+        VoloBot.on_voice_state_update(
+            fake, SimpleNamespace(id=42), _vstate(chan), _vstate(None)
+        )
+    )
+    assert fake.guild_to_helper == {9: helper}
+    assert fake.guild_is_recording == {9: True}
+    fake._close_and_clean_sink_for_guild.assert_not_called()
+    fake._write_runtime_state.assert_called_once()
+
+
+def test_voice_churn_elsewhere_does_not_touch_vstate():
+    chan = _Chan(9, "table")
+    other = _Chan(9, "afk")
+    helper = SimpleNamespace(vc=SimpleNamespace(channel=chan), set_vc=MagicMock())
+    fake = _vs_self(guild_to_helper={9: helper})
+    asyncio.run(
+        VoloBot.on_voice_state_update(
+            fake, SimpleNamespace(id=42), _vstate(other), _vstate(None)
+        )
+    )
+    fake._write_runtime_state.assert_not_called()
+    fake._close_and_clean_sink_for_guild.assert_not_called()
