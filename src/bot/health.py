@@ -2,8 +2,6 @@ import json
 import logging
 import os
 import shutil
-import subprocess
-import time
 
 import yaml
 
@@ -15,7 +13,6 @@ STATUS_FILE = os.path.join(os.getcwd(), ".logs", "health_status.json")
 class HealthCheck:
     def __init__(self):
         self.checks = {}  # name -> {ok: bool, message: str, critical: bool}
-        self._ollama_process = None
 
     def _write_status(self, phase: str, current_check: str = None):
         """Write current health status to the status file for the web UI."""
@@ -40,7 +37,7 @@ class HealthCheck:
         """Run all checks, return {name: {ok, message, critical}}.
 
         If autofix=True, checks will attempt to fix themselves before
-        declaring failure (e.g. start ollama, pull models, create dirs).
+        declaring failure (e.g. create missing directories).
         Status file is only written during autofix (startup) runs so that
         slash-command re-checks don't overwrite the startup state.
 
@@ -81,45 +78,9 @@ class HealthCheck:
 
         self._check_player_map()
         if autofix:
-            self._write_status("initializing", "ollama_server")
+            self._write_status("initializing", "ask_provider")
 
-        # ASK_DISABLE_OLLAMA=1 means /ask is cloud-only. Probing (and with
-        # autofix, SPAWNING) an ollama daemon the operator explicitly
-        # disabled would be an unwanted background process plus up to 10s
-        # of startup latency for a tier that will never be called.
-        from src.llm import config as llm_config
-
-        if llm_config.ollama_enabled():
-            self._check_ollama_server(autofix=autofix)
-            if autofix:
-                self._write_status("initializing", "ollama_model")
-
-            # Only check model if server is up
-            if self.checks.get("ollama_server", {}).get("ok"):
-                self._check_ollama_model()
-            else:
-                # Non-critical: ollama is only used by /ask; bot must still start.
-                self._record(
-                    "ollama_model",
-                    False,
-                    "Skipped — ollama server is not running",
-                    critical=False,
-                )
-        else:
-            for name in ("ollama_server", "ollama_model"):
-                self._record(
-                    name,
-                    True,
-                    "Skipped — /ask is cloud-only (ASK_DISABLE_OLLAMA)",
-                    critical=False,
-                )
-
-        # Runs AFTER the ollama checks: whether the local tier can carry
-        # /ask is a fact about a reachable daemon, not about an env var.
-        if autofix:
-            self._write_status("initializing", "ask_providers")
-
-        self._check_ask_providers()
+        self._check_ask_provider()
 
         if autofix:
             self._write_status("initializing", "discord_gateway")
@@ -363,198 +324,31 @@ class HealthCheck:
         except Exception as e:
             self._record("player_map", False, f"Invalid YAML: {e}", critical=False)
 
-    # ── ask_providers ─────────────────────────────────────────────────
+    # ── ask_provider ─────────────────────────────────────────────────
 
-    def _check_ask_providers(self):
-        """Report which cloud tiers `/ask` can reach.
+    def _check_ask_provider(self):
+        """Whether `/ask` has an Anthropic key.
 
-        Key presence only — deliberately no test call. A live probe would
-        spend money on every bot start, and a key that is present but out
-        of credit is something the chain already handles at question time
-        by failing over. Non-critical throughout: `/ask` is the only
-        consumer, and it still has the local Ollama tier, so a host with
-        no keys at all must still be able to start and transcribe.
+        Key presence only — deliberately no test call, which would spend
+        money on every bot start; a key that is present but rejected is
+        reported at question time by src/llm/claude. Never critical: `/ask`
+        is the only consumer and transcription must start without it.
         """
-        from src.llm import config as llm_config
+        from src.llm import claude
 
-        providers = llm_config.configured_cloud_providers()
-        if providers:
-            described = ", ".join(
-                f"{name} ({model})"
-                for name, model in (
-                    ("openrouter", llm_config.openrouter_model()),
-                    ("cerebras", llm_config.cerebras_model()),
-                )
-                if name in providers
-            )
+        if claude.configured():
             self._record(
-                "ask_providers",
+                "ask_provider",
                 True,
-                f"/ask providers configured: {described}",
-                critical=False,
-            )
-            return
-
-        # No cloud key. Local-only /ask is a supported configuration, but
-        # only when the local tier can actually answer — so this consults
-        # the real check results rather than the env var that merely
-        # permits it.
-        #
-        # Keyed on ollama_MODEL, not ollama_server: a reachable daemon
-        # without the model pulled cannot answer either (_ollama_call gets
-        # "manifest unknown", which the chain classifies and latches), and
-        # reporting PASS there would reproduce one level down exactly the
-        # defect this check was rewritten to fix. The model check
-        # transitively covers the server, since it is recorded as failed
-        # when the daemon is unreachable.
-        ollama_ready = llm_config.ollama_enabled() and self.checks.get(
-            "ollama_model", {}
-        ).get("ok", False)
-        if ollama_ready:
-            self._record(
-                "ask_providers",
-                True,
-                "No cloud key set — /ask will use local Ollama only",
+                f"/ask: Anthropic ({claude.model()}, effort {claude.effort()})",
                 critical=False,
             )
         else:
-            if not llm_config.ollama_enabled():
-                reason = "ASK_DISABLE_OLLAMA is set"
-            elif not self.checks.get("ollama_server", {}).get("ok", False):
-                reason = "ollama is not reachable"
-            else:
-                reason = "the local model is not installed"
             self._record(
-                "ask_providers",
+                "ask_provider",
                 False,
-                f"No /ask provider can answer ({reason}): set "
-                "OPENROUTER_API_KEY or CEREBRAS_PAID_API_KEY, or install the "
-                "local model",
+                "ANTHROPIC_API_KEY not set — /ask is disabled (see op.env.example)",
                 critical=False,
-            )
-
-    # ── ollama_server ─────────────────────────────────────────────────
-
-    def _ollama_is_reachable(self) -> bool:
-        try:
-            import ollama
-
-            ollama.list()
-            return True
-        except Exception:
-            return False
-
-    def _check_ollama_server(self, autofix: bool = False):
-        # Non-critical: only /ask depends on ollama. Voice transcription works
-        # without it, so a host without ollama installed must still be able to
-        # start the bot.
-        if self._ollama_is_reachable():
-            self._record(
-                "ollama_server", True, "Ollama server reachable", critical=False
-            )
-            return
-
-        if not autofix:
-            self._record(
-                "ollama_server", False, "Ollama server not reachable", critical=False
-            )
-            return
-
-        # Auto-fix: start ollama serve if we haven't already
-        if self._ollama_process is None or self._ollama_process.poll() is not None:
-            logger.info("Health autofix: starting 'ollama serve'...")
-            try:
-                self._ollama_process = subprocess.Popen(
-                    ["ollama", "serve"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            except FileNotFoundError:
-                self._record(
-                    "ollama_server",
-                    False,
-                    "ollama binary not found on PATH (only /ask needs it)",
-                    critical=False,
-                )
-                return
-            except Exception as e:
-                self._record(
-                    "ollama_server",
-                    False,
-                    f"Failed to start ollama: {e}",
-                    critical=False,
-                )
-                return
-
-        # Poll for readiness (up to ~10s)
-        for i in range(20):
-            time.sleep(0.5)
-            if self._ollama_is_reachable():
-                logger.info("Health autofix: ollama server is now reachable.")
-                self._record(
-                    "ollama_server",
-                    True,
-                    "Ollama server started via autofix",
-                    critical=False,
-                )
-                return
-
-        self._record(
-            "ollama_server",
-            False,
-            "Started ollama serve but it didn't become reachable in 10s",
-            critical=False,
-        )
-
-    # ── ollama_model ──────────────────────────────────────────────────
-
-    def _check_ollama_model(self):
-        # Shared resolver with main.py's /ask (single source of truth;
-        # empty ASK_OLLAMA_MODEL= falls back to the default) so the
-        # health check always verifies whatever model /ask will use.
-        from src.config.ollama_config import get_ask_model, is_ollama_pullable
-
-        model_name = get_ask_model()
-        try:
-            import ollama
-
-            models = ollama.list()
-            installed = [m.model for m in models.models]
-            if any(
-                name == model_name or name.endswith("/" + model_name)
-                for name in installed
-            ):
-                self._record(
-                    "ollama_model", True, f"{model_name} is available", critical=False
-                )
-                return
-
-            # Non-critical: /ask is the only feature that uses this model.
-            # Voice transcription works without it. We deliberately do NOT
-            # auto-pull on startup — these models are multi-GB and it would
-            # block on_ready for several minutes.
-            #
-            # Do not blindly suggest `ollama pull <name>`: a Docker-namespaced
-            # name can never be pulled from Ollama's registry, and this check
-            # previously sent users to run exactly the command that had just
-            # failed for them.
-            if is_ollama_pullable(model_name):
-                remedy = f"run `ollama pull {model_name}` if /ask needed"
-            else:
-                remedy = (
-                    f"`{model_name}` is a Docker Hub name and CANNOT be pulled "
-                    "from Ollama's registry — set ASK_OLLAMA_MODEL to an "
-                    "Ollama model (e.g. gemma4:26b)"
-                )
-            self._record(
-                "ollama_model",
-                False,
-                f"{model_name} not installed ({remedy})",
-                critical=False,
-            )
-        except Exception as e:
-            self._record(
-                "ollama_model", False, f"Ollama model check failed: {e}", critical=False
             )
 
     # ── discord_gateway ──────────────────────────────────────────────

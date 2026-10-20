@@ -132,8 +132,8 @@ class VoloBot(discord.Bot):
                 *(_ghost_cleanup(g) for g in self.guilds), return_exceptions=True
             )
 
-        # Run startup health checks in a thread so blocking autofix
-        # (ollama serve poll, model pull) doesn't freeze the event loop.
+        # Run startup health checks in a thread so the blocking parts (the
+        # whisper model load and its test decode) don't freeze the event loop.
         await asyncio.to_thread(self.health.run_all, autofix=True, bot=self)
         for line in self.health.summary().splitlines():
             logger.info(f"Health: {line}")

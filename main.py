@@ -10,10 +10,9 @@ from dotenv import load_dotenv
 
 from src.bot.helper import BotHelper
 from src.config.cliargs import CLIArgs
-from src.llm.chain import ask as llm_ask
-from src.llm.errors import AllProvidersFailed
+from src.llm.claude import AskFailed, ask as llm_ask
 from src.session_capture import scribe_notice
-from src.utils.answer import clamp_message, clean_ollama_answer
+from src.utils.answer import clamp_message, clean_answer
 from src.utils.commandline import CommandLine
 from src.utils.pdf_generator import pdf_generator
 from src.utils.voice import disconnect_targets
@@ -21,10 +20,8 @@ from src.utils.voice import disconnect_targets
 load_dotenv()
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 PLAYER_MAP_FILE_PATH = os.getenv("PLAYER_MAP_FILE_PATH")
-# /ask no longer pins a single model here: it walks a provider chain
-# (OpenRouter → Cerebras paid → local Ollama) and each tier carries its
-# own model id, resolved in src/llm/config.py so main.py and
-# src/bot/health.py can never disagree about what /ask will use.
+# /ask is answered by Claude (src/llm/claude.py); the model and effort are
+# resolved there so main.py and src/bot/health.py cannot disagree.
 # Discord hard-rejects messages longer than this many characters.
 DISCORD_MESSAGE_LIMIT = 2000
 
@@ -597,39 +594,34 @@ if __name__ == "__main__":
         await ctx.defer(ephemeral=not public)
 
         try:
-            # llm_ask is blocking and may walk three providers, so it must
-            # not run on the event loop. The old ollama.chat call did, and
-            # a cloud chain can occupy tens of seconds — long enough to
-            # stall voice receive and the gateway heartbeat, not just this
-            # command.
+            # llm_ask is blocking and can take tens of seconds, so it must
+            # not run on the event loop — that would stall voice receive and
+            # the gateway heartbeat, not just this command.
             result = await asyncio.to_thread(llm_ask, transcript_text, question)
-            answer = clean_ollama_answer(result.answer)
+            answer = clean_answer(result.answer)
             logger.info(
-                f"/ask answered by {result.provider} ({result.model})"
-                f"{' [fallback]' if result.used_fallback else ''}"
+                f"/ask answered by {result.model} (input={result.input_tokens}, "
+                f"cached={result.cached_tokens}, output={result.output_tokens})"
             )
 
             if not answer:
                 await ctx.followup.send(
-                    "The model returned no answer (it may have produced only "
-                    "internal reasoning). Try rephrasing, or point "
-                    "`OPENROUTER_MODEL` at a non-reasoning model."
+                    "The model returned no answer. Try rephrasing the question."
                 )
                 return
 
-            # clean_ollama_answer only caps the answer; a long /ask
+            # clean_answer only caps the answer; a long /ask
             # question can still push the composed message past Discord's
             # hard limit. clamp_message is the unit-tested final guard.
             message = clamp_message(
                 f"**Q:** {question}\n\n{answer}", DISCORD_MESSAGE_LIMIT
             )
             await ctx.followup.send(message)
-        except AllProvidersFailed as e:
-            # Every tier declined. The chain has already picked the message
-            # that fits the reason (out of credit vs. daily cap vs. simply
-            # unreachable), so pass it straight through rather than
-            # guessing here.
-            logger.error(f"/ask: no provider could answer: {e}")
+        except AskFailed as e:
+            # claude.ask has already chosen the message that fits the reason
+            # (bad key, rate limit, out of credit, unreachable, refusal), so
+            # pass it straight through rather than guessing here.
+            logger.error(f"/ask failed: {e.user_message} ({e.__cause__!r})")
             await ctx.followup.send(e.user_message)
         except Exception as e:
             logger.exception("/ask failed unexpectedly")
@@ -729,9 +721,8 @@ if __name__ == "__main__":
     @bot.slash_command(name="health", description="Show system health status.")
     async def health(ctx: discord.context.ApplicationContext):
         await ctx.defer(ephemeral=True)
-        # Reuse the bot's existing HealthCheck instance so any ollama process
-        # it spawned at startup stays tracked, and to avoid re-loading the
-        # whisper model on every /health invocation.
+        # Reuse the bot's existing HealthCheck instance to avoid re-loading
+        # the whisper model on every /health invocation.
         await asyncio.to_thread(bot.health.run_all, autofix=False, bot=bot)
         status = (
             "All systems operational."

@@ -1,23 +1,24 @@
-"""Post-processing for raw Ollama `/ask` answers before they go to Discord.
+"""Post-processing for raw `/ask` answers before they go to Discord.
 
 Kept as a pure, side-effect-free helper so it can be unit-tested without
-a live Discord or Ollama (the `/ask` command itself needs both).
+a live Discord or model API (the `/ask` command itself needs both).
 """
+
 import re
 
-# Reasoning models (e.g. deepseek-r1) stream their chain-of-thought
-# inline in message.content as <think>...</think> rather than in
-# Ollama's native `thinking` field. Without stripping it the bot would
-# post the entire reasoning monologue to the channel. Gemma 4 defaults
-# thinking ON in Ollama, so the call site also passes think=False; this
-# is the defense-in-depth for any model that ignores that.
+# Claude returns reasoning in separate thinking blocks that src/llm/claude
+# never includes in the answer, so inline <think>...</think> text should
+# not occur. The stripping below predates the move to the Anthropic API
+# (open-weight reasoning models put their monologue inline) and stays as
+# defense in depth: posting a reasoning trace to the channel is the worse
+# failure.
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 DISCORD_LIMIT = 1900
 TRUNCATION_SUFFIX = "\n\n...(truncated)"
 
 
-def clean_ollama_answer(text: str, limit: int = DISCORD_LIMIT) -> str:
+def clean_answer(text: str, limit: int = DISCORD_LIMIT) -> str:
     """Strip reasoning blocks and enforce Discord's message-size limit.
 
     - Removes well-formed ``<think>...</think>`` blocks (incl. nested).
@@ -56,7 +57,7 @@ def clean_ollama_answer(text: str, limit: int = DISCORD_LIMIT) -> str:
     lowered = cleaned.lower()
     close_idx = lowered.rfind("</think>")
     if close_idx != -1:
-        cleaned = cleaned[close_idx + len("</think>"):]
+        cleaned = cleaned[close_idx + len("</think>") :]
 
     open_idx = cleaned.lower().find("<think>")
     if open_idx != -1:
@@ -73,7 +74,7 @@ def clean_ollama_answer(text: str, limit: int = DISCORD_LIMIT) -> str:
 def clamp_message(message: str, limit: int) -> str:
     """Clamp a fully composed message to a hard character ``limit``.
 
-    ``clean_ollama_answer`` only bounds the *answer*; the rendered
+    ``clean_answer`` only bounds the *answer*; the rendered
     ``**Q:** <question>\\n\\n<answer>`` can still exceed Discord's hard
     2000-char limit when the question is long. Returns ``message``
     unchanged if it already fits, otherwise truncates and appends

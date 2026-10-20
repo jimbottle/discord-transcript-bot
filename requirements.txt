@@ -30,9 +30,8 @@ speechrecognition
 mlx-whisper; sys_platform == 'darwin' and platform_machine == 'arm64'
 scipy; sys_platform == 'darwin' and platform_machine == 'arm64'
 
-# LLM for /ask command. >=0.5.1: /ask passes think= to chat(), which
-# older clients reject with TypeError (misreported as a daemon failure).
-ollama>=0.5.1
+# /ask is answered by Claude (src/llm/claude.py).
+anthropic
 
 # torch support of cuda 12
 #--extra-index-url https://download.pytorch.org/whl/cu121

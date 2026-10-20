@@ -31,49 +31,6 @@ def _isolate_status_file(monkeypatch, tmp_path):
     )
 
 
-def _stub_ollama_list(monkeypatch, installed_names):
-    """Stub ollama.list() so _check_ollama_model runs without a daemon."""
-    import ollama
-
-    fake = MagicMock()
-    fake.models = [MagicMock(model=n) for n in installed_names]
-    monkeypatch.setattr(ollama, "list", lambda: fake)
-
-
-def test_ollama_model_uses_env_override(monkeypatch):
-    """Regression for roborev #768 (MEDIUM): _check_ollama_model must
-    honor ASK_OLLAMA_MODEL, not a hardcoded literal."""
-    monkeypatch.setenv("ASK_OLLAMA_MODEL", "custom/model:99")
-    _stub_ollama_list(monkeypatch, [])  # nothing installed
-    hc = HealthCheck()
-    hc._check_ollama_model()
-    assert "custom/model:99" in hc.checks["ollama_model"]["message"]
-
-
-def test_ollama_model_default_when_env_unset(monkeypatch):
-    monkeypatch.delenv("ASK_OLLAMA_MODEL", raising=False)
-    _stub_ollama_list(monkeypatch, [])
-    hc = HealthCheck()
-    hc._check_ollama_model()
-    assert "gemma4:26b" in hc.checks["ollama_model"]["message"]
-
-
-def test_ollama_model_empty_env_falls_back_to_default(monkeypatch):
-    monkeypatch.setenv("ASK_OLLAMA_MODEL", "  ")
-    _stub_ollama_list(monkeypatch, [])
-    hc = HealthCheck()
-    hc._check_ollama_model()
-    assert "gemma4:26b" in hc.checks["ollama_model"]["message"]
-
-
-def test_ollama_model_ok_when_resolved_model_installed(monkeypatch):
-    monkeypatch.setenv("ASK_OLLAMA_MODEL", "gemma4:26b")
-    _stub_ollama_list(monkeypatch, ["gemma4:26b"])
-    hc = HealthCheck()
-    hc._check_ollama_model()
-    assert hc.checks["ollama_model"]["ok"] is True
-
-
 def test_run_all_returns_dict_with_expected_keys():
     hc = HealthCheck()
     results = hc.run_all(autofix=False, bot=None)
@@ -87,8 +44,7 @@ def test_run_all_returns_dict_with_expected_keys():
         "transcripts_dir",
         "log_dirs",
         "player_map",
-        "ollama_server",
-        "ollama_model",
+        "ask_provider",
         "discord_gateway",
     }
     assert expected.issubset(results.keys())
@@ -124,192 +80,60 @@ def test_summary_renders_one_line_per_check():
     assert summary.count("\n") + 1 >= len(hc.checks)
 
 
-# ── ollama_model is non-critical ──────────────────────────────────────
-# Regression guards for "bot won't start because /ask's model isn't pulled."
-# /ask is the only thing that uses the Ollama model. Voice transcription
-# does not. on_ready aborts if all_ok() is False, so ollama_model being
-# critical was effectively blocking the entire bot on a 4GB model pull.
+# ── ask_provider ──────────────────────────────────────────────────────
+# /ask is the only thing that needs the Anthropic key. Voice transcription
+# does not, and on_ready aborts if all_ok() is False, so this check must
+# never be critical.
 
 
-def test_ollama_model_is_non_critical():
+def test_ask_provider_passes_with_a_key(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("ASK_MODEL", "claude-sonnet-5-5")
     hc = HealthCheck()
-    hc.run_all(autofix=False, bot=None)
-    assert (
-        hc.checks["ollama_model"]["critical"] is False
-    ), "ollama_model must stay non-critical so a missing /ask model doesn't block startup"
+    hc._check_ask_provider()
+    check = hc.checks["ask_provider"]
+    assert check["ok"] is True
+    assert "claude-sonnet-5-5" in check["message"]
+    assert check["critical"] is False
 
 
-def test_all_ok_when_only_ollama_model_fails():
-    """Synthesize a check set where every critical check passes and only
-    ollama_model is failing — all_ok() must return True."""
+def test_ask_provider_warns_without_a_key(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "  ")
+    hc = HealthCheck()
+    hc._check_ask_provider()
+    check = hc.checks["ask_provider"]
+    assert check["ok"] is False
+    assert "ANTHROPIC_API_KEY" in check["message"]
+    assert check["critical"] is False
+
+
+def test_all_ok_when_only_ask_provider_fails():
+    """Every critical check passes and only ask_provider is failing —
+    all_ok() must return True so a missing key never blocks startup."""
     hc = HealthCheck()
     hc.checks = {
         "env_vars": {"ok": True, "message": "ok", "critical": True},
         "ffmpeg": {"ok": True, "message": "ok", "critical": True},
         "opus": {"ok": True, "message": "ok", "critical": True},
         "whisper_model": {"ok": True, "message": "ok", "critical": True},
-        "ollama_server": {"ok": True, "message": "ok", "critical": True},
-        "ollama_model": {"ok": False, "message": "not installed", "critical": False},
+        "ask_provider": {"ok": False, "message": "no key", "critical": False},
     }
-    assert (
-        hc.all_ok() is True
-    ), "all_ok() must return True if only non-critical ollama_model is failing"
+    assert hc.all_ok() is True
 
 
-def test_missing_model_suggests_a_command_that_can_work(monkeypatch):
-    """A pullable-but-absent model gets the pull command."""
-    monkeypatch.setenv("ASK_OLLAMA_MODEL", "gemma4:26b")
-    _stub_ollama_list(monkeypatch, [])
+def test_run_all_never_calls_anthropic(monkeypatch):
+    """The health check must not spend tokens: no client is ever built."""
+    import anthropic
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+    def boom(*a, **k):
+        raise AssertionError("health check constructed an Anthropic client")
+
+    monkeypatch.setattr(anthropic, "Anthropic", boom)
     hc = HealthCheck()
-    hc._check_ollama_model()
-    assert "ollama pull gemma4:26b" in hc.checks["ollama_model"]["message"]
-
-
-def test_docker_named_model_does_not_suggest_a_failing_pull(monkeypatch):
-    """The regression: health used to tell users to run `ollama pull
-    ai/mistral:latest` — the exact command that had just 404'd for them,
-    sending them in a circle instead of naming the real problem."""
-    monkeypatch.setenv("ASK_OLLAMA_MODEL", "ai/mistral:latest")
-    _stub_ollama_list(monkeypatch, [])
-    hc = HealthCheck()
-    hc._check_ollama_model()
-    message = hc.checks["ollama_model"]["message"]
-
-    assert "ollama pull ai/mistral:latest" not in message
-    assert "Docker Hub" in message
-    assert "ASK_OLLAMA_MODEL" in message
-
-
-# ── ask_providers ────────────────────────────────────────────────────
-
-
-def _clear_provider_env(monkeypatch):
-    for var in (
-        "OPENROUTER_API_KEY",
-        "CEREBRAS_PAID_API_KEY",
-        "CEREBRAS_API_KEY",
-        "ASK_DISABLE_OLLAMA",
-    ):
-        monkeypatch.delenv(var, raising=False)
-
-
-def test_ask_providers_reports_configured_cloud_tiers(monkeypatch):
-    _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
-    monkeypatch.setenv("CEREBRAS_PAID_API_KEY", "cb-key")
-
-    hc = HealthCheck()
-    hc._check_ask_providers()
-    check = hc.checks["ask_providers"]
-
-    assert check["ok"] is True
-    assert "openrouter" in check["message"]
-    assert "cerebras" in check["message"]
-
-
-def test_ask_providers_passes_with_no_keys_only_when_ollama_is_reachable(monkeypatch):
-    """Local-only /ask is supported, but the check must verify the local
-    tier can actually answer — not merely that the env var permits it."""
-    _clear_provider_env(monkeypatch)
-
-    hc = HealthCheck()
-    hc.checks["ollama_server"] = {"ok": True, "message": "", "critical": False}
-    hc.checks["ollama_model"] = {"ok": True, "message": "", "critical": False}
-    hc._check_ask_providers()
-
-    assert hc.checks["ask_providers"]["ok"] is True
-    assert "local Ollama" in hc.checks["ask_providers"]["message"]
-
-
-def test_ask_providers_fails_when_no_key_and_ollama_unreachable(monkeypatch):
-    """The case the check exists to catch: nothing at all can answer.
-    Reading ollama_enabled() alone would wrongly report PASS here."""
-    _clear_provider_env(monkeypatch)
-
-    hc = HealthCheck()
-    hc.checks["ollama_server"] = {"ok": False, "message": "", "critical": False}
-    hc.checks["ollama_model"] = {"ok": False, "message": "", "critical": False}
-    hc._check_ask_providers()
-
-    assert hc.checks["ask_providers"]["ok"] is False
-    assert "not reachable" in hc.checks["ask_providers"]["message"]
-
-
-def test_ask_providers_passes_on_cloud_key_alone_without_ollama(monkeypatch):
-    """A cloud-only host is healthy even with no ollama at all."""
-    _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
-    monkeypatch.setenv("ASK_DISABLE_OLLAMA", "1")
-
-    hc = HealthCheck()
-    hc.checks["ollama_server"] = {"ok": False, "message": "", "critical": False}
-    hc._check_ask_providers()
-
-    assert hc.checks["ask_providers"]["ok"] is True
-
-
-def test_cloud_only_host_does_not_probe_or_spawn_ollama(monkeypatch):
-    """ASK_DISABLE_OLLAMA=1 must not start a daemon the operator disabled."""
-    _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
-    monkeypatch.setenv("ASK_DISABLE_OLLAMA", "1")
-
-    hc = HealthCheck()
-    probed = []
-    monkeypatch.setattr(
-        hc, "_check_ollama_server", lambda **kw: probed.append("server")
-    )
-    monkeypatch.setattr(hc, "_check_ollama_model", lambda: probed.append("model"))
-    # Everything except the ollama pair is stubbed out; we only care that
-    # the disabled tier is never touched.
-    for name in (
-        "_check_env_vars",
-        "_check_ffmpeg",
-        "_check_opus",
-        "_check_whisper_model",
-        "_check_openai_api",
-        "_check_player_map",
-        "_check_discord_gateway",
-    ):
-        monkeypatch.setattr(hc, name, lambda *a, **kw: None)
-    monkeypatch.setattr(hc, "_check_transcripts_dir", lambda **kw: None)
-    monkeypatch.setattr(hc, "_check_log_dirs", lambda **kw: None)
-
-    hc.run_all(autofix=True)
-
-    assert probed == []
-    assert hc.checks["ollama_server"]["ok"] is True
-    assert "cloud-only" in hc.checks["ollama_server"]["message"]
-    assert hc.checks["ollama_server"]["critical"] is False
-
-
-def test_ask_providers_is_never_critical(monkeypatch):
-    """Transcription does not depend on /ask, so no provider state — not
-    even 'nothing can answer' — may stop the bot from starting."""
-    _clear_provider_env(monkeypatch)
-
-    for ollama_ok in (True, False):
-        hc = HealthCheck()
-        hc.checks["ollama_server"] = {"ok": ollama_ok, "message": "", "critical": False}
-        hc.checks["ollama_model"] = {"ok": ollama_ok, "message": "", "critical": False}
-        hc._check_ask_providers()
-        assert hc.checks["ask_providers"]["critical"] is False
-
-
-def test_ask_providers_fails_when_model_is_not_installed(monkeypatch):
-    """A reachable daemon is not enough: without the model pulled,
-    _ollama_call gets 'manifest unknown' and the chain latches the tier.
-    Reporting PASS here would repeat, one level down, the defect that
-    keying this check on real results was meant to fix."""
-    _clear_provider_env(monkeypatch)
-
-    hc = HealthCheck()
-    hc.checks["ollama_server"] = {"ok": True, "message": "", "critical": False}
-    hc.checks["ollama_model"] = {"ok": False, "message": "", "critical": False}
-    hc._check_ask_providers()
-
-    assert hc.checks["ask_providers"]["ok"] is False
-    assert "model is not installed" in hc.checks["ask_providers"]["message"]
+    hc._check_ask_provider()
+    assert hc.checks["ask_provider"]["ok"] is True
 
 
 def test_health_checks_never_touch_the_live_status_file(monkeypatch, tmp_path):
@@ -328,9 +152,7 @@ def test_health_checks_never_touch_the_live_status_file(monkeypatch, tmp_path):
         "_check_openai_api",
         "_check_player_map",
         "_check_discord_gateway",
-        "_check_ollama_server",
-        "_check_ollama_model",
-        "_check_ask_providers",
+        "_check_ask_provider",
     ):
         monkeypatch.setattr(hc, name, lambda *a, **kw: None)
     monkeypatch.setattr(hc, "_check_transcripts_dir", lambda **kw: None)

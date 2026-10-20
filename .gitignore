@@ -1,4 +1,5 @@
 /.env
+/op.env
 *.mp3
 __pycache__/
 Sessions/
