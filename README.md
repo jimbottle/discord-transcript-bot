@@ -32,8 +32,8 @@ To set up and run this Discord bot, follow these steps:
 1. **Clone the Repository:**
 
    ```bash
-   git clone https://github.com/your-github-username/discord-transcription-bot.git
-   cd discord-transcription-bot
+   git clone https://github.com/jimbottle/discord-transcript-bot.git
+   cd discord-transcript-bot
    ```
 
 2. **Create a Virtual Environment (optional but recommended):**
@@ -113,7 +113,7 @@ Everything else — the ASR backend selection layer, reference-audio capture, th
 
 ## License
 
-**No license is currently granted for this project. All rights reserved.**
+**No license is granted yet, because the upstream grant is unresolved.**
 
 The upstream project publishes no LICENSE file and never has — its README states "MIT License" but links to a file that has never existed in that repository, so the upstream grant is unresolved. This fork therefore cannot pass on rights it has not clearly received, and makes no license claim of its own.
 
