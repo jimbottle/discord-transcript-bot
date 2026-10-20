@@ -7,7 +7,7 @@ import re
 import threading
 import time
 import wave
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from queue import Queue
 from typing import List
@@ -203,8 +203,13 @@ class WhisperSink(Sink):
         # so teardown must: a segment submitted just before /stop is still
         # running when the voice thread exits, and close() would otherwise
         # finalize the .txt before its text arrives (discord-transcript-bot-abh).
-        self._inflight = set()
-        self._inflight_lock = threading.Lock()
+        # Counted down at the END of each done-callback, after the result
+        # has been committed — not when the future finishes. CPython's
+        # Future.set_result wakes concurrent.futures.wait() BEFORE it runs
+        # the done-callbacks, so waiting on the futures themselves can
+        # return while _on_transcribed is still writing (roborev #6410).
+        self._inflight = 0
+        self._inflight_cv = threading.Condition()
 
         # Per-session transcript file. Path is fixed at construction so all
         # utterances from this sink land in the same file, but the handle is
@@ -330,20 +335,24 @@ class WhisperSink(Sink):
             logger.debug(f"A sink thread was stopped for guild {guild_id}.")
 
     def _wait_for_inflight(self):
-        """Block (bounded) until every detached transcription future has
-        completed, so their text is committed while the session file is
-        still writable. Runs on the teardown path; must never raise."""
-        with self._inflight_lock:
-            pending = list(self._inflight)
-        if not pending:
-            return
-        logger.info(
-            f"Waiting for {len(pending)} in-flight transcription(s) to finish..."
-        )
-        done, not_done = wait(pending, timeout=self.DRAIN_TIMEOUT_S)
-        if not_done:
+        """Block (bounded) until every detached transcription has been
+        COMMITTED — its done-callback has run to completion — so the text is
+        in the session file before close() finalizes it. Runs on the
+        teardown path; must never raise."""
+        with self._inflight_cv:
+            pending = self._inflight
+            if not pending:
+                return
+            logger.info(
+                f"Waiting for {pending} in-flight transcription(s) to finish..."
+            )
+            drained = self._inflight_cv.wait_for(
+                lambda: self._inflight == 0, timeout=self.DRAIN_TIMEOUT_S
+            )
+            remaining = self._inflight
+        if not drained:
             logger.warning(
-                f"{len(not_done)} transcription(s) still running after "
+                f"{remaining} transcription(s) still running after "
                 f"{self.DRAIN_TIMEOUT_S}s; their text will reach the JSON log "
                 "but not the per-session .txt."
             )
@@ -710,10 +719,12 @@ class WhisperSink(Sink):
         # executor, so a captured clip's filename sorts the same way its
         # manifest line will.
         speaker.seq = seq
+        # Counted before submit so teardown can never observe "nothing in
+        # flight" between the submit and the callback registration.
+        with self._inflight_cv:
+            self._inflight += 1
         try:
             future = self.executor.submit(self.transcribe, speaker)
-            with self._inflight_lock:
-                self._inflight.add(future)
             future.add_done_callback(
                 lambda fut, s=seq, spk=speaker: self._on_transcribed(s, spk, fut)
             )
@@ -722,9 +733,15 @@ class WhisperSink(Sink):
             # (e.g. a shut-down executor). No future will ever fire
             # _on_transcribed(seq, …), so commit this seq empty now —
             # otherwise _next_commit wedges on it permanently and every
-            # later result stops committing.
+            # later result stops committing — and release the count.
             logger.error(f"Failed to submit transcription for {speaker.user}: {e}")
             self._record_result(seq, speaker, "")
+            self._inflight_done()
+
+    def _inflight_done(self):
+        with self._inflight_cv:
+            self._inflight -= 1
+            self._inflight_cv.notify_all()
 
     def _on_transcribed(self, seq, speaker, future):
         """Done-callback for a detached transcription future. Runs on an
@@ -734,14 +751,17 @@ class WhisperSink(Sink):
         Must not touch self.speakers (owned by the insert_voice thread); it
         only reads the speaker object handed to it and writes the result.
         """
-        with self._inflight_lock:
-            self._inflight.discard(future)
         try:
-            transcription = future.result()
-        except Exception as e:
-            logger.warning(f"Error in transcription future for {speaker.user}: {e}")
-            transcription = ""
-        self._record_result(seq, speaker, transcription)
+            try:
+                transcription = future.result()
+            except Exception as e:
+                logger.warning(f"Error in transcription future for {speaker.user}: {e}")
+                transcription = ""
+            self._record_result(seq, speaker, transcription)
+        finally:
+            # Only now has the text reached the session file; this is what
+            # _wait_for_inflight waits on.
+            self._inflight_done()
 
     def _record_result(self, seq, speaker, transcription):
         """Store a result under its submission sequence, then commit every

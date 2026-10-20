@@ -932,8 +932,9 @@ def test_stop_voice_thread_bounded_when_transcription_wedged(tmp_path, monkeypat
     sink = _make_sink(tmp_path, monkeypatch)
     sink.DRAIN_TIMEOUT_S = 0.1
     never = threading.Event()
-    f = sink.executor.submit(never.wait, 5)
-    sink._inflight.add(f)
+    sink.executor.submit(never.wait, 5)
+    with sink._inflight_cv:
+        sink._inflight += 1  # as _submit_speaker would; never released
     t0 = time.time()
     sink.stop_voice_thread()  # must return promptly, not hang
     assert time.time() - t0 < 2
@@ -946,3 +947,63 @@ def test_close_shuts_down_executor(tmp_path, monkeypatch):
     sink.close()
     with pytest.raises(RuntimeError):
         sink.executor.submit(lambda: None)
+
+
+def test_stop_voice_thread_waits_for_the_commit_not_just_the_future(
+    tmp_path, monkeypatch
+):
+    """roborev #6410: CPython wakes concurrent.futures.wait() BEFORE the
+    done-callbacks run, so waiting on the future alone can return while
+    _on_transcribed is still writing — and close() then refuses the write.
+    Teardown must wait for the callback to finish."""
+    sink = _make_sink(tmp_path, monkeypatch)
+    sink.SILENCE_GAP_S = 1000
+    sink.MAX_SEGMENT_S = 0.0
+    monkeypatch.setattr(sink, "transcribe", lambda spk: "committed late")
+    real_write = sink.write_transcription_log
+    written = []
+
+    def slow_write(spk, text):
+        time.sleep(0.3)  # the callback is still running after the future finished
+        real_write(spk, text)
+        written.append(text)
+
+    monkeypatch.setattr(sink, "write_transcription_log", slow_write)
+    t = time.time()
+    sink.voice_queue.put_nowait([1, b"aa", t])
+    sink.voice_queue.put_nowait([1, b"bb", t])
+    sink.running = True
+    th = threading.Thread(target=sink.insert_voice, daemon=True)
+    th.start()
+    deadline = time.time() + 2
+    while not sink._inflight and time.time() < deadline:
+        time.sleep(0.01)
+    sink.voice_thread = th
+    sink.stop_voice_thread()
+    assert written == ["committed late"], "teardown returned before the commit"
+    sink.close()
+    with open(sink.session_file, encoding="utf-8") as fh:
+        assert "committed late" in fh.read()
+
+
+def test_failed_submit_releases_the_inflight_count(tmp_path, monkeypatch):
+    sink = _make_sink(tmp_path, monkeypatch)
+    sink.SILENCE_GAP_S = 1000
+    sink.MAX_SEGMENT_S = 0.0
+    monkeypatch.setattr(sink, "write_transcription_log", lambda spk, text: None)
+
+    class _BoomExecutor:
+        def submit(self, *a, **k):
+            raise RuntimeError("executor is shut down")
+
+    monkeypatch.setattr(sink, "executor", _BoomExecutor())
+    t = time.time()
+    sink.voice_queue.put_nowait([9, b"aa", t])
+    sink.voice_queue.put_nowait([9, b"bb", t])
+    _run_insert_voice(sink, until=lambda: sink._submit_seq > 0)
+    assert sink._inflight == 0
+    sink.DRAIN_TIMEOUT_S = 0.2
+    t0 = time.time()
+    sink._wait_for_inflight()  # must not wait on a count that was never released
+    assert time.time() - t0 < 0.15
+    sink.close()
