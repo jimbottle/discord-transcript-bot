@@ -47,7 +47,7 @@ Setup: `python -m venv venv && source venv/bin/activate && pip install -r requir
 
 ## Environment Variables
 
-Required in `.env`:
+Required in `.env` (a derived copy; 1Password is the source of truth for the secret ones, see "Secrets" below):
 - `DISCORD_BOT_TOKEN` — bot token
 - `TRANSCRIPTION_METHOD` — `local` (default) or `openai`
 - `OPENAI_API_KEY` — only if using openai method
@@ -98,6 +98,30 @@ The draft manifest's `reference` fields are **machine output, not ground truth**
 **Marginal clips are order-dependent** (discord-transcript-bot-adg): on near-unintelligible audio the MLX decode depends on what ran earlier in the same process, so those clips add order-dependent noise to the corpus WER. Bake-off methodology: `ab_transcribe.py --order-trials 3 --stable-manifest <out>` flags clips whose hypothesis changes between shuffled-order runs and writes the manifest without them; delete near-unintelligible clips from the reference rather than guessing their text; then score with `--isolate` (one subprocess per config). Per-clip WER and hypotheses are always in `--json-out`.
 
 Capture is best-effort by construction: `SessionCapture` swallows its own errors and the sink wraps its calls again, so no capture bug can cost a live session its transcription.
+
+## Secrets
+
+**Every credential an agent uses lives in 1Password.** API keys, tokens, DSNs, OAuth client secrets, webhook URLs, signing keys: if Claude Code, a cron job, an MCP server, or CI needs it, 1Password is the source of truth, and anything else (a local `.env`, SSM, GitHub Secrets, a server-side env file) is a derived copy seeded from it. This applies to the credentials this repo already uses, not only to new ones.
+
+- **Reference, don't copy.** Tracked files carry env var *names* and `op://<vault>/<item>/<field>` references, never values. Load at run time with `op run --env-file=op.env -- <cmd>` (an `op.env` of `op://` lines, gitignored) or `op read "op://..."` piped straight into the consumer.
+- **Name items `<repo>-<service>`** (for example `mc-epn`), one item per service, fields named after the env vars. Use the 1Password account that owns the work (personal `my.1password.com`, VisionWrights, or Newtack) and pass `--account` when more than one is signed in.
+- **A literal `.env` is debt, not a pattern.** It must be gitignored and `chmod 600`, and the inventory below marks it as pending migration. Move the values into 1Password the next time you touch them.
+- **Never print a secret.** Prove a key works by calling the API. Don't `cat` env files, echo variables, or paste values into transcripts, commit messages, or this file.
+- **Found a literal secret in a tracked file or in history?** Stop and tell the owner. It needs rotating and purging, and that is their call.
+- **Adding a credential:** create the 1Password item, add the `op://` line to `op.env.example` (or this repo's equivalent template), add a row below, and confirm the local copy is ignored.
+
+`main.py` calls `load_dotenv()`, which does not override variables already in the process, so `op run --env-file=op.env -- ./venv/bin/python main.py` works unchanged and the literal `.env` can shrink to the non-secret settings. `.env.sample` is this repo's template until an `op.env.example` exists.
+
+### Credentials this repo uses
+
+| Env var | Used by / purpose | Where it lives today | 1Password item |
+|---|---|---|---|
+| `DISCORD_BOT_TOKEN` | bot login (`src/bot/`, checked by `health.py`) | gitignored `.env`, literal value (migrate) | `dtb-discord` (to create) |
+| `OPENROUTER_API_KEY` | `/ask` primary tier (`src/llm/config.py`) | not set in the local `.env` today (tier skipped); when set, same `.env` (migrate) | `dtb-openrouter` (to create) |
+| `CEREBRAS_PAID_API_KEY` (fallback name `CEREBRAS_API_KEY`) | `/ask` fallback tier | not set in the local `.env` today; when set, same `.env` (migrate) | `dtb-cerebras` (to create) |
+| `OPENAI_API_KEY` | transcription only when `TRANSCRIPTION_METHOD=openai` | not set today; when set, same `.env` (migrate) | `dtb-openai` (to create) |
+
+Not secrets, so not in the table: `DISCORD_CHANNEL_ID`, `PLAYER_MAP_FILE_PATH`, `TRANSCRIPTION_METHOD`, `ASK_OLLAMA_MODEL`, `OPENROUTER_MODEL`, `OPENROUTER_BASE_URL`, `CEREBRAS_MODEL`, `CEREBRAS_BASE_URL`, `ASK_DISABLE_OLLAMA`, `ASR_BACKEND`, `WHISPER_*`, `MLX_WHISPER_MODEL`, `CAPTURE_*`, `BIAS_PROMPT_WITH_ROSTER`, `HF_HOME`, `HF_HUB_CACHE`, `FLASK_DEBUG`.
 
 ## Code Style
 
