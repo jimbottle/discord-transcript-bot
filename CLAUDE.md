@@ -101,7 +101,7 @@ Capture is best-effort by construction: `SessionCapture` swallows its own errors
 | Env var | Used by / purpose | Where it lives today | 1Password item |
 |---|---|---|---|
 | `DISCORD_BOT_TOKEN` | bot login (`src/bot/`, checked by `health.py`) | gitignored `.env`, literal value (migrate) | `dtb-discord` (to create) |
-| `ANTHROPIC_API_KEY` | `/ask` (`src/llm/claude.py`, presence checked by `health.py`) | `op.env` → 1Password (the pattern); a literal `.env` value is a stopgap | `dtb-anthropic` (field `ANTHROPIC_API_KEY`) |
+| `ANTHROPIC_API_KEY` | `/ask` (`src/llm/claude.py`, presence checked by `health.py`) | `op.env` → 1Password (the pattern); a literal `.env` value is a stopgap | `Anthropic - evan.j.ray@gmail.com - Discord Transcript Bot` (id `4dslv3wu23yu45xzgtpjenfoci`, field `key`) |
 | `OPENAI_API_KEY` | transcription only when `TRANSCRIPTION_METHOD=openai` | not set today; when set, same `.env` (migrate) | `dtb-openai` (to create) |
 
 Not secrets, so not in the table: `DISCORD_CHANNEL_ID`, `PLAYER_MAP_FILE_PATH`, `TRANSCRIPTION_METHOD`, `ASK_MODEL`, `ASK_EFFORT`, `ASR_BACKEND`, `WHISPER_*`, `MLX_WHISPER_MODEL`, `CAPTURE_*`, `BIAS_PROMPT_WITH_ROSTER`, `HF_HOME`, `HF_HUB_CACHE`, `FLASK_DEBUG`.
