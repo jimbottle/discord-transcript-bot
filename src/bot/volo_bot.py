@@ -424,6 +424,15 @@ class VoloBot(discord.Bot):
             ok = True
         except Exception as e:
             logger.error(f"Error starting whisper sink: {e}")
+            # Undo whatever got started. If vc.start_recording succeeded and
+            # the voice thread then failed to start, Pycord's recorder would
+            # keep feeding a sink nobody drains, and every later /scribe
+            # would hit "Already recording" until a /disconnect
+            # (roborev #6411). stop_recording guards the not-recording case.
+            try:
+                self.stop_recording(ctx)
+            except Exception as stop_err:  # noqa: BLE001 - best-effort undo
+                logger.error(f"Error undoing a failed recording start: {stop_err}")
             # A half-built sink (constructed but vc.start_recording raised)
             # must not linger as "already active" for the next /scribe.
             self._close_and_clean_sink_for_guild(ctx.guild_id)

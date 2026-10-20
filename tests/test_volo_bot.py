@@ -583,6 +583,7 @@ def _rec_self(start_sink):
         guild_is_recording={},
         guild_whisper_sinks={},
         start_whisper_sink=start_sink,
+        stop_recording=MagicMock(),
         _close_and_clean_sink_for_guild=MagicMock(),
         _write_runtime_state=MagicMock(),
     )
@@ -601,8 +602,19 @@ def test_start_recording_returns_false_and_cleans_up_when_sink_fails():
     ctx = SimpleNamespace(guild_id=5)
     assert VoloBot.start_recording(fake, ctx) is False
     assert 5 not in fake.guild_is_recording, "no recording flag for a failed start"
+    # Pycord's recorder may already be running (vc.start_recording succeeded
+    # before the voice thread failed): it must be stopped, not orphaned.
+    fake.stop_recording.assert_called_once_with(ctx)
     fake._close_and_clean_sink_for_guild.assert_called_once_with(5)
     fake._write_runtime_state.assert_called_once()
+
+
+def test_start_recording_failure_cleanup_survives_a_stop_error():
+    fake = _rec_self(MagicMock(side_effect=RuntimeError("thread start failed")))
+    fake.stop_recording = MagicMock(side_effect=RecordingException("not recording"))
+    ctx = SimpleNamespace(guild_id=5)
+    assert VoloBot.start_recording(fake, ctx) is False  # must not raise
+    fake._close_and_clean_sink_for_guild.assert_called_once_with(5)
 
 
 # ── on_voice_state_update owns the bot-left cleanup (discord-transcript-bot-xnj)
