@@ -19,3 +19,6 @@ captures/
 .dolt/
 *.db
 .beads-credential-key
+
+# beads tracker state is local-only (decision 2026-10-20): never commit the export
+.beads/
