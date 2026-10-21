@@ -201,7 +201,15 @@ def _failure(e: Exception) -> AskFailed:
     if isinstance(e, openai.APIConnectionError):
         return AskFailed(unreachable_msg(), e)
     if isinstance(e, openai.NotFoundError):
-        return AskFailed(missing_model_msg(), e)
+        if "model" in _status_detail(e).lower():
+            return AskFailed(missing_model_msg(), e)
+        # Usually LOCAL_LLM_URL without /v1 (roborev #6541).
+        return AskFailed(
+            f"The local model server at {url()} has no such endpoint (HTTP "
+            "404). Check that LOCAL_LLM_URL ends in /v1, for example "
+            "http://localhost:11434/v1.",
+            e,
+        )
     if isinstance(e, openai.APIStatusError):
         detail = _status_detail(e)
         if "not found" in detail.lower() and "model" in detail.lower():
@@ -446,7 +454,15 @@ def _tool_messages(message, notes, used: list) -> list:
         except (TypeError, ValueError):
             args = None
         ids = args.get("ids") if isinstance(args, dict) else None
-        if c.function.name != campaign.TOOL_NAME or not isinstance(ids, list):
+        if isinstance(ids, list):
+            # Local servers don't enforce the schema: drop anything that is
+            # not a plain id rather than crash on it (roborev #6541).
+            ids = [str(i).strip() for i in ids if isinstance(i, (str, int))]
+        if (
+            c.function.name != campaign.TOOL_NAME
+            or not isinstance(ids, list)
+            or not ids
+        ):
             text = f"Error: unknown tool call or bad arguments: {c.function.name}"
         else:
             text, is_error = campaign.read_notes(ids, notes)

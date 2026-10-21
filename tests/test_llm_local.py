@@ -246,7 +246,15 @@ def _status(cls, code, body=None):
     [
         (openai.APIConnectionError(request=_REQ), "Is Ollama"),
         (openai.APITimeoutError(request=_REQ), "took longer than"),
-        (_status(openai.NotFoundError, 404), "ollama pull gemma4:26b"),
+        (
+            _status(
+                openai.NotFoundError,
+                404,
+                {"error": {"message": "model 'gemma4:26b' not found"}},
+            ),
+            "ollama pull gemma4:26b",
+        ),
+        (_status(openai.NotFoundError, 404, {"error": "404 page not found"}), "/v1"),
         (
             _status(
                 openai.BadRequestError,
@@ -439,3 +447,22 @@ def test_a_broken_server_during_the_gm_check_says_so(monkeypatch):
     with pytest.raises(local.AskFailed) as e:
         local.ask("t", "What happened?")
     assert "server failed" in e.value.user_message
+
+
+def test_malformed_tool_arguments_are_an_error_the_model_reads(monkeypatch, notes_dir):
+    """roborev #6541: local servers don't enforce the schema."""
+    bad = SimpleNamespace(
+        id="c1",
+        function=SimpleNamespace(
+            name=local.campaign.TOOL_NAME,
+            arguments=json.dumps({"ids": [{"id": "npcs"}]}),
+        ),
+    )
+    fake = _use(
+        monkeypatch,
+        _Fake(_response("", [bad], "tool_calls"), _response("Couldn't read that.")),
+    )
+    r = local.ask("t", "Who?", note_dirs=[notes_dir])
+    assert r.answer == "Couldn't read that." and r.notes_used == []
+    tool = [m for m in fake.calls[1]["messages"] if m["role"] == "tool"][0]
+    assert tool["content"].startswith("Error")
