@@ -23,7 +23,7 @@ Setup: `python -m venv venv && source venv/bin/activate && pip install -r requir
 - **Web dashboard** (`web/app.py`): Flask app that manages the bot subprocess and displays transcripts. Runs independently.
 
 **Key flow — voice transcription:**
-1. `/connect` joins voice channel, creates a `BotHelper` per guild
+1. `/connect` joins voice channel, creates a `GuildVoice` (`src/bot/guild_voice.py`) per guild
 2. `/scribe` creates a `WhisperSink` (extends Pycord's `Sink`) that receives raw audio per user
 3. `WhisperSink.write()` receives audio bytes from Discord, queues them per-speaker
 4. A background thread (`insert_voice`) monitors speakers, waits for 1.5s silence gap, then submits audio to a `ThreadPoolExecutor` for transcription
@@ -32,7 +32,7 @@ Setup: `python -m venv venv && source venv/bin/activate && pip install -r requir
 7. `/stop` (or `/disconnect`, or the bot being kicked) stops the loop, which then flushes every still-buffered speaker, and `stop_voice_thread` waits up to `DRAIN_TIMEOUT_S` for the in-flight transcriptions before `close()` finalizes the session file — so the last thing said before `/stop` is not lost. `start_recording` returns `False` when the sink could not start and `/scribe` reports that instead of claiming to record.
 
 **State is tracked per-guild on the `VoloBot` instance:**
-- `guild_to_helper` — `BotHelper` (voice client wrapper)
+- `guild_to_helper` — `GuildVoice` (the cached voice client)
 - `guild_is_recording` — recording state flag
 - `guild_whisper_sinks` — active `WhisperSink` per guild
 

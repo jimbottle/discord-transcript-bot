@@ -1,26 +1,17 @@
-#Discord Voice
-# Pinned to fix/voice-rec-2 branch for DAVE receive support (PR #3159).
-# Switch back to a released version once 2.8.0 ships with the receive PR merged.
+# Discord client with voice receive. Pinned to the fix/voice-rec-2 branch for
+# DAVE receive support (PR #3159); move to a released version once that PR is
+# merged and shipped (see DAVE_MIGRATION.md).
 py-cord[voice] @ git+https://github.com/Pycord-Development/pycord@fix/voice-rec-2
 
-aio-pika
+# Configuration: .env loading and the roster / library YAML files.
+python-dotenv
 pyyaml
 
-# Envinroment file .env
-python-dotenv
-
-# Report Generators
-reportlab
-
-# Lets keep our code clean
-black
-pylint
-pytest
-
-#openai and speech recognition
-openai
+# Transcription. faster-whisper is the portable engine; the OpenAI SDK serves
+# both the optional Whisper API transcription and the local /ask backend
+# (any OpenAI-compatible server, e.g. Ollama).
 faster_whisper
-speechrecognition
+openai
 
 # Apple Silicon GPU (Metal) transcription backend (discord-transcript-bot-d8g).
 # Selected automatically on Darwin/arm64 (ASR_BACKEND=auto); elsewhere the bot
@@ -30,18 +21,22 @@ speechrecognition
 mlx-whisper; sys_platform == 'darwin' and platform_machine == 'arm64'
 scipy; sys_platform == 'darwin' and platform_machine == 'arm64'
 
-# /ask is answered by Claude (src/llm/claude.py). >=1.16: build_request sends
+# /ask on the Anthropic API (src/llm/claude.py). >=1.16: build_request sends
 # output_config.effort, which older SDKs reject with a TypeError at call time.
 anthropic>=1.16
 
-# torch support of cuda 12
-#--extra-index-url https://download.pytorch.org/whl/cu121
-#torch
-
-# torch cpu only support
+# torch, CPU build. For CUDA 12 swap the index for
+# https://download.pytorch.org/whl/cu121.
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch
 
-# Web UI
+# /generate_pdf
+reportlab
+
+# Web dashboard
 flask
 
+# Development: formatter, linter, tests
+black
+pylint
+pytest

@@ -4,11 +4,13 @@ RUN = $(shell [ -f op.env ] && echo "op run --env-file=$(CURDIR)/op.env --")
 
 # Every target is a command, not a file; without this `make web` says
 # "`web' is up to date" because the web/ directory exists.
-.PHONY: help start web test test-integration preflight prewarm capture-session verify-session rabbitmq
+.PHONY: help start web test test-integration preflight prewarm capture-session verify-session
 
+# The bot's command-line options (-v/--verbose).
 help:
-	python main.py --help
+	./venv/bin/python main.py --help
 
+# Run the bot. Secrets are injected by $(RUN) when op.env exists.
 start:
 	$(RUN) ./venv/bin/python main.py
 
@@ -35,9 +37,3 @@ capture-session:
 verify-session:
 	./scripts/post_session_verify.sh
 
-rabbitmq:
-	podman run --rm -d \
-			--hostname heybilly-rabbit \
-            --name heybilly-rabbit \
-            -p 15672:15672 -p 5672:5672 \
-            rabbitmq:3-management

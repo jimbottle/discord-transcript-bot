@@ -6,7 +6,6 @@
 .beads-credential-key
 .dolt
 *.db
-Sessions/
 .pytest_cache
 .roborev
 .claude
@@ -26,6 +25,5 @@ library/*
 player_map.yml
 player_map.yaml
 *.meta.json
-*.mp3
 *.wav
 .DS_Store

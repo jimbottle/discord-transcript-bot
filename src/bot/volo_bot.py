@@ -3,11 +3,9 @@ import json
 import logging
 import os
 import time
-from collections import defaultdict
 from typing import Optional
 
 import discord
-import yaml
 from discord.sinks.errors import RecordingException
 
 from src import library, player_map_store, sessions
@@ -15,8 +13,10 @@ from src.bot import command_errors
 from src.bot.health import HealthCheck
 from src.sinks.whisper_sink import WhisperSink
 
-TRANSCRIPTION_METHOD = os.getenv("TRANSCRIPTION_METHOD")
-PLAYER_MAP_FILE_PATH = os.getenv("PLAYER_MAP_FILE_PATH")
+# "openai" sends audio to the Whisper API; anything else means the local
+# engine chosen in src/asr/selection.py.
+TRANSCRIPTION_METHOD = os.environ.get("TRANSCRIPTION_METHOD")
+PLAYER_MAP_FILE_PATH = os.environ.get("PLAYER_MAP_FILE_PATH")
 
 # Runtime state the web dashboard reads for true connected-guild /
 # recording / uptime (vs. its file-freshness heuristic). Written
@@ -51,6 +51,20 @@ CPU_SAMPLE_MIN_WINDOW_S = 1.0
 logger = logging.getLogger(__name__)
 
 
+def transcriber_from_env(method=TRANSCRIPTION_METHOD) -> str:
+    """``"openai"`` or ``"local"``; unknown or unset values mean local."""
+    return "openai" if (method or "").strip().lower() == "openai" else "local"
+
+
+def load_player_map(path=PLAYER_MAP_FILE_PATH) -> dict:
+    """The roster file as a dict keyed by Discord user id.
+
+    ``{}`` when no path is configured or the file does not exist yet
+    (``/update_player_map`` creates it). A file that is not a mapping raises,
+    so a hand-edit gone wrong is reported rather than silently ignored."""
+    return player_map_store.load(path)
+
+
 def _sample_cpu_pct(obj):
     """Process CPU% since ``obj``'s previous sample, or None until a window
     of at least CPU_SAMPLE_MIN_WINDOW_S has elapsed. Shorter gaps return the
@@ -72,24 +86,30 @@ def _sample_cpu_pct(obj):
 
 
 class VoloBot(discord.Bot):
-    def __init__(self, loop):
+    """The Discord client plus everything tracked per guild.
 
+    The per-guild registries below are keyed by guild id. A guild appears in
+    ``guild_to_helper`` while the bot is in one of its voice channels, in
+    ``guild_whisper_sinks`` while a recording is active, and in
+    ``guild_is_recording`` with ``True`` for the same span (the flag is what
+    the slash commands consult; the sink is what does the work).
+    """
+
+    def __init__(self, loop):
         super().__init__(
             command_prefix="!",
             loop=loop,
             activity=discord.CustomActivity(name="Monitoring voice subnets"),
         )
-        self.guild_to_helper = {}
-        self.guild_is_recording = {}
-        self.guild_whisper_sinks = {}
+        self.guild_to_helper = {}  # guild_id -> GuildVoice
+        self.guild_is_recording = {}  # guild_id -> bool
+        self.guild_whisper_sinks = {}  # guild_id -> WhisperSink
         # guild_id -> the .txt of the guild's latest recording; outlives the
         # sink so /generate_pdf works after /stop and /disconnect.
         self.guild_last_session_file = {}
         # guild_id -> token of a pending voice-thread restart; /stop and
         # /disconnect cancel it (cancel_voice_recovery).
         self._voice_recovery = {}
-        self.guild_whisper_message_tasks = {}
-        self.player_map = {}
         self._is_ready = False
         self._heartbeat_task = None
         self._gateway_latency = None
@@ -100,16 +120,13 @@ class VoloBot(discord.Bot):
         self._started_at = time.time()
         self._connecting_guilds = set()
         self.health = HealthCheck()
-        if TRANSCRIPTION_METHOD == "openai":
-            self.transcriber_type = "openai"
-        else:
-            self.transcriber_type = "local"
-        if PLAYER_MAP_FILE_PATH:
-            with open(PLAYER_MAP_FILE_PATH, "r", encoding="utf-8") as file:
-                self.player_map = yaml.safe_load(file) or {}
+        self.transcriber_type = transcriber_from_env()
+        # Discord user id -> {"player", "character"}. Shared by reference
+        # with every sink, so /add_player takes effect mid-session.
+        self.player_map = load_player_map()
 
     async def on_ready(self):
-        logger.info(f"Logged in as {self.user} to Discord.")
+        logger.info(f"Discord session open as {self.user}.")
 
         # on_ready can fire multiple times (Discord reconnection).
         # Only skip if the bot previously passed all health checks.
@@ -267,10 +284,6 @@ class VoloBot(discord.Bot):
         await asyncio.to_thread(self._close_and_clean_sink_for_guild, guild_id)
         self._write_runtime_state()
 
-    async def close_consumers(self):
-        if hasattr(self, "consumer_manager"):
-            await self.consumer_manager.close()
-
     def _write_runtime_state(self):
         """Best-effort snapshot of connected guilds / recording / uptime
         for the web dashboard. ENTIRELY guarded: this runs on lifecycle
@@ -399,44 +412,41 @@ class VoloBot(discord.Bot):
         return stalled_gids
 
     def _close_and_clean_sink_for_guild(self, guild_id: int):
-        # Pop first so the sink is untracked even if a teardown step
-        # raises — otherwise a failure here leaks the sink AND a later
-        # /scribe sees a stale entry. Each step is independently guarded
-        # so one failure can't skip the next or propagate into the
-        # /stop|/disconnect command.
-        whisper_sink: WhisperSink | None = self.guild_whisper_sinks.pop(guild_id, None)
-        if not whisper_sink:
-            return
+        """Untrack and tear down the guild's sink: stop its voice thread
+        (which drains the in-flight transcriptions), then close it.
 
-        logger.debug(f"Stopping whisper sink, requested by {guild_id}.")
-        try:
-            whisper_sink.stop_voice_thread()
-        except Exception as e:
-            logger.error(f"Error stopping voice thread for {guild_id}: {e}")
-        try:
-            whisper_sink.close()
-        except Exception as e:
-            logger.error(f"Error closing whisper sink for {guild_id}: {e}")
+        The sink is popped from the registry before anything else so that a
+        failing step cannot leak it or leave a stale entry for the next
+        /scribe to trip over. Each step is guarded on its own, so one
+        failure neither skips the next nor reaches the /stop or /disconnect
+        command."""
+        sink: Optional[WhisperSink] = self.guild_whisper_sinks.pop(guild_id, None)
+        if sink is None:
+            return
+        logger.debug(f"Tearing down the sink for guild {guild_id}.")
+        for label, step in (
+            ("stop_voice_thread", sink.stop_voice_thread),
+            ("close", sink.close),
+        ):
+            try:
+                step()
+            except Exception as e:  # noqa: BLE001 - teardown continues
+                logger.error(f"Sink {label} failed for guild {guild_id}: {e}")
 
     def start_recording(self, ctx: discord.context.ApplicationContext) -> bool:
-        """
-        Start recording audio from the voice channel. Create a whisper sink
-        and start sending transcripts to the queue.
+        """Begin transcribing the guild's voice channel.
 
         Returns True when recording is on, False when the sink could not be
         started — the caller must tell the user, because nothing is being
         transcribed (discord-transcript-bot-vjm). Never raises.
-
-        Since this is a critical function, this is where we should handle
-        subscription checks and limits.
         """
         ok = False
         try:
             self.start_whisper_sink(ctx)
             self.guild_is_recording[ctx.guild_id] = True
             ok = True
-        except Exception as e:
-            logger.error(f"Error starting whisper sink: {e}")
+        except Exception as e:  # noqa: BLE001 - reported via the return value
+            logger.error(f"Could not start the sink: {e}")
             # Undo whatever got started. If vc.start_recording succeeded and
             # the voice thread then failed to start, Pycord's recorder would
             # keep feeding a sink nobody drains, and every later /scribe
@@ -452,51 +462,52 @@ class VoloBot(discord.Bot):
         self._write_runtime_state()  # recording state changed
         return ok
 
+    # Per-speaker buffer cap handed to the sink: the most recent bytes kept
+    # when Discord delivers one large block after a silence.
+    SINK_DATA_LENGTH = 50000
+    # How many people the sink buffers at once; a table never nears it.
+    SINK_MAX_SPEAKERS = 10
+
     def start_whisper_sink(self, ctx: discord.context.ApplicationContext):
-        guild_voice_sink = self.guild_whisper_sinks.get(ctx.guild_id, None)
-        if guild_voice_sink:
-            logger.debug(f"Sink is already active for guild {ctx.guild_id}.")
+        """Build the guild's sink, tag the session, and hand the sink to
+        Pycord's recorder; then start the sink's own voice thread."""
+        guild_id = ctx.guild_id
+        if guild_id in self.guild_whisper_sinks:
+            logger.debug(f"Guild {guild_id} already has a sink; not starting another.")
             return
 
-        async def on_stop_record_callback(sink: WhisperSink, ctx):
-            logger.debug(f"{ctx.channel.guild.id} -> on_stop_record_callback")
-            # Pycord schedules this on the loop; _close_and_clean_sink
-            # does the blocking voice-thread join, so offload it or it
-            # freezes the event loop. Idempotent (pop-first) with the
-            # explicit cleanup_sink in end_recording_session.
-            await asyncio.to_thread(self._close_and_clean_sink_for_guild, ctx.guild_id)
-
-        transcript_queue = asyncio.Queue()
-
-        whisper_sink = WhisperSink(
-            transcript_queue,
+        sink = WhisperSink(
+            asyncio.Queue(),
             self.loop,
-            data_length=50000,
-            max_speakers=10,
+            data_length=self.SINK_DATA_LENGTH,
+            max_speakers=self.SINK_MAX_SPEAKERS,
             transcriber_type=self.transcriber_type,
             player_map=self.player_map,
         )
+        self._tag_session(ctx, sink)
+        self.guild_last_session_file[guild_id] = sink.session_file
 
-        self._tag_session(ctx, whisper_sink)
-        self.guild_last_session_file[ctx.guild_id] = whisper_sink.session_file
+        async def recorder_stopped(_sink: WhisperSink, ctx):
+            # Pycord schedules this on the loop when the recorder stops.
+            # The teardown joins the voice thread, so it runs off-loop;
+            # pop-first makes it idempotent with end_recording_session.
+            logger.debug(f"Guild {ctx.guild_id}: recorder stopped.")
+            await asyncio.to_thread(self._close_and_clean_sink_for_guild, ctx.guild_id)
 
-        # Registered before vc.start_recording so a failure there (e.g.
-        # RecordingException) leaves a sink start_recording can find and
-        # close, rather than an orphaned executor + open capture.
-        self.guild_whisper_sinks[ctx.guild_id] = whisper_sink
-        self.guild_to_helper[ctx.guild_id].vc.start_recording(
-            whisper_sink, on_stop_record_callback, ctx
-        )
-
-        def on_thread_exception(e):
+        def voice_thread_died(exc):
             # Runs on the dying voice thread. Everything else (the teardown,
             # which joins this very thread, and the restart) belongs on the
             # loop, and only run_coroutine_threadsafe may hand it there.
             asyncio.run_coroutine_threadsafe(
-                self._recover_voice_thread(ctx, whisper_sink, e), self.loop
+                self._recover_voice_thread(ctx, sink, exc), self.loop
             )
 
-        whisper_sink.start_voice_thread(on_exception=on_thread_exception)
+        # Registered before vc.start_recording so a failure there (e.g.
+        # RecordingException) leaves a sink start_recording can find and
+        # close, rather than an orphaned executor + open capture.
+        self.guild_whisper_sinks[guild_id] = sink
+        self.guild_to_helper[guild_id].vc.start_recording(sink, recorder_stopped, ctx)
+        sink.start_voice_thread(on_exception=voice_thread_died)
 
     VOICE_RESTART_DELAY_S = 5
 
@@ -576,29 +587,25 @@ class VoloBot(discord.Bot):
             logger.warning(f"Could not tag session: {e}")
 
     def stop_recording(self, ctx: discord.context.ApplicationContext):
+        """Ask Pycord's recorder to stop and clear the recording flag.
+        Without a voice client there is nothing to do and nothing changes."""
         vc = ctx.guild.voice_client
-        if vc:
-            self.guild_is_recording[ctx.guild_id] = False
-            # vc can exist without an active recorder: a stale-True flag,
-            # or Pycord recreated the reader after a voice reconnect.
-            # vc.stop_recording() raises RecordingException then; guard
-            # and swallow so teardown (and the /stop|/disconnect command)
-            # continues instead of aborting mid-cleanup.
-            try:
-                if vc.is_recording():
-                    vc.stop_recording()
-            except RecordingException as e:
-                logger.debug(f"stop_recording: nothing to stop ({e}); continuing.")
-        guild_id = ctx.guild_id
-        whisper_message_task = self.guild_whisper_message_tasks.get(guild_id, None)
-        if whisper_message_task:
-            logger.debug("Cancelling whisper message task.")
-            whisper_message_task.cancel()
-            del self.guild_whisper_message_tasks[guild_id]
+        if vc is None:
+            return
+        self.guild_is_recording[ctx.guild_id] = False
+        # vc can exist without an active recorder: a stale-True flag, or
+        # Pycord recreated the reader after a voice reconnect.
+        # vc.stop_recording() raises RecordingException then; guard and
+        # swallow so teardown (and the /stop|/disconnect command) continues
+        # instead of aborting mid-cleanup.
+        try:
+            if vc.is_recording():
+                vc.stop_recording()
+        except RecordingException as e:
+            logger.debug(f"stop_recording: nothing to stop ({e}); continuing.")
 
     def cleanup_sink(self, ctx: discord.context.ApplicationContext):
-        guild_id = ctx.guild_id
-        self._close_and_clean_sink_for_guild(guild_id)
+        self._close_and_clean_sink_for_guild(ctx.guild_id)
 
     async def end_recording_session(self, ctx: discord.context.ApplicationContext):
         """Tear down an active recording for ctx's guild: stop the voice
@@ -670,31 +677,26 @@ class VoloBot(discord.Bot):
         )
         return str(found) if found else None
 
-    async def update_player_map(self, ctx: discord.context.ApplicationContext):
-        # Load existing file to preserve entries from other guilds and manual edits
-        existing_map = {}
-        if PLAYER_MAP_FILE_PATH:
-            try:
-                with open(PLAYER_MAP_FILE_PATH, "r", encoding="utf-8") as file:
-                    existing_map = yaml.safe_load(file) or {}
-            except FileNotFoundError:
-                pass
-
-        # Only add new members that don't already have entries (preserve manual edits)
+    async def update_player_map(self, ctx: discord.context.ApplicationContext) -> int:
+        """Add every guild member missing from the roster, keeping the
+        entries that exist (other guilds' and hand-edited ones). Returns the
+        number of members added. Starts from the file on disk when one is
+        configured, so edits made since startup are not undone."""
+        roster = load_player_map(PLAYER_MAP_FILE_PATH)
+        added = 0
         for member in ctx.guild.members:
-            if member.id not in existing_map:
-                existing_map[member.id] = {
-                    "player": member.name,
-                    "character": member.display_name,
-                }
-
-        self.player_map = existing_map
-        logger.info(f"{str(self.player_map)}")
+            if member.id in roster:
+                continue
+            roster[member.id] = {
+                "player": member.name,
+                "character": member.display_name,
+            }
+            added += 1
+        self.player_map = roster
+        logger.info(f"Roster synced: {added} added, {len(roster)} entries in all.")
         if PLAYER_MAP_FILE_PATH:
-            with open(PLAYER_MAP_FILE_PATH, "w", encoding="utf-8") as file:
-                yaml.dump(
-                    self.player_map, file, default_flow_style=False, allow_unicode=True
-                )
+            player_map_store.save(PLAYER_MAP_FILE_PATH, roster)
+        return added
 
     def upsert_player_entry(self, user_id, player, character):
         """Add or update one Discord-user → player/character mapping.
@@ -727,36 +729,32 @@ class VoloBot(discord.Bot):
         return True
 
     async def stop_and_cleanup(self):
+        """Process shutdown: leave every voice channel, then drain and
+        close every sink. Never raises; a failure is logged and the rest of
+        the teardown still runs."""
         try:
             # Stop the liveness heartbeat so it doesn't rewrite state mid-
             # teardown or outlive the shutdown.
-            task = getattr(self, "_heartbeat_task", None)
-            if task is not None:
-                task.cancel()
-            # Disconnect from all voice channels first so Discord knows we left
-            for vc in self.voice_clients:
+            if self._heartbeat_task is not None:
+                self._heartbeat_task.cancel()
+            # Leave voice first so Discord shows the bot gone straight away.
+            for vc in list(self.voice_clients):
                 try:
                     await vc.disconnect(force=True)
-                except Exception:
+                except Exception:  # noqa: BLE001 - best effort on the way out
                     pass
-            for sink in self.guild_whisper_sinks.values():
-                # stop_voice_thread() BEFORE close(): the join drains an
-                # in-flight transcription while the file is still
-                # writable (running False, _closed False). close() then
-                # sets _closed and finalizes. Reversing this (the old
-                # order) drops the last transcription on the shutdown
-                # path — roborev #791.
+            # stop_voice_thread() BEFORE close(): the join drains an in-flight
+            # transcription while the file is still writable (running False,
+            # _closed False). close() then sets _closed and finalizes.
+            # Reversing this drops the last transcription on the shutdown
+            # path — roborev #791.
+            for guild_id, sink in list(self.guild_whisper_sinks.items()):
                 sink.stop_voice_thread()
                 sink.close()
-                gid = None
-                try:
-                    gid = sink.vc.channel.guild.id
-                except AttributeError:
-                    pass
-                logger.debug(f"Stopped whisper sink for guild {gid} in cleanup.")
+                logger.debug(f"Sink for guild {guild_id} closed at shutdown.")
             self.guild_whisper_sinks.clear()
             self.guild_to_helper.clear()
-        except Exception as e:
-            logger.error(f"Error during cleanup: {e}")
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Shutdown cleanup hit an error: {e}")
         finally:
-            logger.info("Cleanup completed.")
+            logger.info("Shutdown cleanup finished.")

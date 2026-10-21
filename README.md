@@ -1,63 +1,48 @@
+# Discord Transcript Bot
 
-# V.O.L.O Discord Transcription Bot
+A Discord bot that sits in a voice channel and writes down what everyone says, as they say it. Built for tabletop sessions over Discord: the transcript is kept per session, speakers are labelled with player and character names, and you can ask questions about the game afterwards.
 
-This project is a Discord bot that transcribes voice channel audio into text in real-time. It uses Whisper for audio transcription and is capable of handling multiple users in a voice channel.
+Transcription runs on your own machine with Whisper (MLX-Whisper on Apple Silicon, faster-whisper elsewhere), or through OpenAI's Whisper API if you prefer.
 
-> **This is a fork of [joshinryz/volo_discord_bot](https://github.com/joshinryz/volo_discord_bot)** by Josh Robinett, with additional contributions from Noah Feinberg. It diverged in March 2025 and has been substantially extended since — see [Attribution](#attribution) and [License](#license).
+> This project began in March 2025 as a fork of another Discord transcription bot. The code from that project has since been replaced in full; see [Attribution](#attribution).
 
 ## Features
 
-- This project uses Pycord (see [Pycord Github](https://github.com/Pycord-Development/pycord))
-- This project uses Faster Whisper (see [Faster Whisper Github](https://github.com/SYSTRAN/faster-whisper))
-- Transcribes voice channel audio to text.
-- Supports multiple users.
-- Thread-safe operations for concurrent transcriptions.
+- Live transcription of a voice channel, one speaker at a time, with names from a roster file.
+- Per-session transcript files, a JSON log, a text download and a PDF export.
 - Web dashboard for managing the bot and viewing transcripts.
 - Startup health checks with auto-fix (verifies ffmpeg/opus/the Whisper model, creates directories).
 - `/ask`, `/recap` and a dashboard ask box that answer questions about the session. They run on **a local model on your own machine by default** (Ollama or any OpenAI-compatible server: free, and transcripts never leave the machine), or on Claude through the Anthropic API if you add a key.
 
 ## Setup
 
-To set up and run this Discord bot, follow these steps:
-
 ### Prerequisites
 
-- Python 3.8 or higher.
-- Discord bot token (see [Discord Developer Portal](https://discord.com/developers/applications)).
-- `ffmpeg` installed and added to your system's PATH.
+- Python 3.10 or newer.
+- A bot token from the [Discord Developer Portal](https://discord.com/developers/applications), with the voice and message-content intents enabled.
+- `ffmpeg` and `libopus` on the `PATH` (the startup health check tells you if either is missing).
 - For `/ask` (optional; transcription works without it), one of:
   - **Recommended:** [Ollama](https://ollama.com) (or another OpenAI-compatible server) and a tool-capable model. See [Questions about the session](#questions-about-the-session-ask).
   - An Anthropic API key.
 
 ### Installation
 
-1. **Clone the Repository:**
+1. **Get the code and a virtual environment.** The Makefile targets expect the venv at `./venv`.
 
    ```bash
    git clone https://github.com/jimbottle/discord-transcript-bot.git
    cd discord-transcript-bot
-   ```
-
-2. **Create a Virtual Environment (optional but recommended):**
-
-   ```bash
-   python -m venv venv
-   # Activate the virtual environment
-   # On Windows: venv\Scripts\activate
-   # On macOS/Linux: source venv/bin/activate
-   ```
-
-3. **Install Dependencies:**
-
-   ```bash
+   python -m venv venv && source venv/bin/activate
    pip install -r requirements.txt
    ```
 
-4. **Environment Variables:**
+2. **Warm the model.** Whisper weights are downloaded on first use (about 3 GB); do it now rather than when the first person speaks.
 
-   Create a `.env` file in the root directory:
+   ```bash
+   make prewarm
+   ```
 
-   Copy `.env.sample` to `.env` and fill it in. The essentials:
+3. **Configure.** Copy `.env.sample` to `.env` and fill it in. The essentials:
 
    ```
    DISCORD_BOT_TOKEN=your_discord_bot_token
@@ -114,9 +99,9 @@ If `ASK_PROVIDER` is not set, the bot uses Anthropic when `ANTHROPIC_API_KEY` is
 
 **The GM check.** Before answering, every question is classified on the same provider (strategy, min-maxing, secrets and plot predictions are refused). On a local model it uses the same model, so nothing extra is loaded. `TABLE_GUARD=off` turns it off.
 
-### Configuration
+### The roster
 
-- Create a `player_map.yml` to map Discord user IDs to player and character names, or use `/update_player_map` to auto-generate it from the server roster.
+`player_map.yml` (the path in `PLAYER_MAP_FILE_PATH`) maps Discord user ids to a player name and a character name; transcript lines are labelled from it. `/update_player_map` fills it from the server's members, `/add_player` names one person mid-session, and the dashboard has an editor.
 
 ## Usage
 
@@ -124,7 +109,7 @@ If `ASK_PROVIDER` is not set, the bot uses Anthropic when `ANTHROPIC_API_KEY` is
 
    ```bash
    make start
-   # or: python main.py
+   # or: python main.py        (add -v for debug logging)
    ```
 
 2. **Start the Web Dashboard:**
@@ -161,27 +146,17 @@ If `ASK_PROVIDER` is not set, the bot uses Anthropic when `ANTHROPIC_API_KEY` is
 
 ## Contributing
 
-Contributions to this project are welcome. Please ensure to follow the project's coding style and submit pull requests for any new features or bug fixes.
+Pull requests are welcome. Run `make preflight` (the health checks and the test suite) before opening one, and add a test for anything you change; `black` and `pylint` are the formatter and linter.
 
 ## Attribution
 
-This project is a fork of [joshinryz/volo_discord_bot](https://github.com/joshinryz/volo_discord_bot) (Josh Robinett, 2023–2025; additional contributions by Noah Feinberg). The fork point is upstream commit `5e610b2` (2025-03-17); the full upstream commit history is preserved in this repository's git log.
+This repository started in March 2025 as a fork of [joshinryz/volo_discord_bot](https://github.com/joshinryz/volo_discord_bot) by Josh Robinett, with contributions from Noah Feinberg. That project publishes no license, and its authors were asked and could not grant one, so in October 2026 every remaining line and asset inherited from it was rewritten or replaced: the voice-connection record, the command-line parser, the PDF export and its background image, and the inherited parts of `main.py`, the bot class and the transcription sink. `git blame` on the current tree attributes nothing to the upstream authors.
 
-Code originating upstream and still present here, in whole or in part:
-
-- `src/bot/helper.py`, `src/utils/pdf_generator.py`, `src/utils/commandline.py`, `src/config/cliargs.py` — substantially unchanged from upstream
-- `main.py`, `src/sinks/whisper_sink.py`, `src/bot/volo_bot.py` — derived from upstream and substantially rewritten and extended
-- `assets/parchment_background.jpg` — inherited from upstream; its own provenance is not documented there
-
-Everything else — the ASR backend selection layer, reference-audio capture, the A/B transcription harness, the health-check system, the web dashboard, the player-map store, and the test suite — is original to this fork.
+The commit history before that point still contains the upstream code as it was received, and the upstream project remains the origin of this one's shape: a Pycord recording sink feeding Whisper, with slash commands for connect, scribe and stop.
 
 ## License
 
-**No license is granted yet, because the upstream grant is unresolved.**
-
-The upstream project publishes no LICENSE file and never has — its README states "MIT License" but links to a file that has never existed in that repository, so the upstream grant is unresolved. This fork therefore cannot pass on rights it has not clearly received, and makes no license claim of its own.
-
-If you want to use, copy, or redistribute this code, open an issue. Resolving the upstream grant with the original author is tracked as pending work; this section will be replaced with a real license once that is settled.
+**No license file yet.** The code in the current tree is the repository owner's own work (see [Attribution](#attribution)), and a license will be added once one is chosen. Until then, open an issue if you want to use or redistribute it.
 
 ## Architecture
 
@@ -191,7 +166,7 @@ If you want to use, copy, or redistribute this code, open an issue. Resolving th
 
 ## Acknowledgments
 
-- Originally created by [Josh Robinett](https://github.com/joshinryz) as [volo_discord_bot](https://github.com/joshinryz/volo_discord_bot), with contributions from [Noah Feinberg](https://github.com/NoahFeinberg). This fork builds directly on that work.
+- [Josh Robinett](https://github.com/joshinryz)'s [volo_discord_bot](https://github.com/joshinryz/volo_discord_bot), with contributions from [Noah Feinberg](https://github.com/NoahFeinberg), is where this project started; see [Attribution](#attribution).
 - This project uses [Faster Whisper](https://github.com/SYSTRAN/faster-whisper) for audio transcription.
 - Built with [Pycord](https://github.com/Pycord-Development/pycord) for Discord integration.
 - Uses Claude (Anthropic API) for transcript queries; the transcript is sent as a cached system block.

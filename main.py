@@ -6,26 +6,23 @@ import time
 from datetime import datetime
 
 import discord
-import yaml
 from dotenv import load_dotenv
 
+from src import cli, library, question_log, sessions
 from src.bot import command_errors
-from src.bot.helper import BotHelper
-from src.config.cliargs import CLIArgs
-from src import library, question_log, sessions
+from src.bot.guild_voice import GuildVoice
 from src.llm.provider import AskBlocked, AskFailed, ask as llm_ask
 from src.session_capture import scribe_notice
 from src.utils.answer import answer_budget, clean_answer, discord_messages
 from src.utils.discord_send import send_followups
-from src.utils.commandline import CommandLine
 from src.utils.pdf_generator import pdf_generator
 from src.transcript_lines import parse_transcript_text
 from src.utils import bot_log, timefmt
 from src.utils.voice import disconnect_targets
 
-load_dotenv()
-DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-PLAYER_MAP_FILE_PATH = os.getenv("PLAYER_MAP_FILE_PATH")
+load_dotenv()  # fills in anything the environment did not already set
+DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
+PLAYER_MAP_FILE_PATH = os.environ.get("PLAYER_MAP_FILE_PATH")
 # /ask is answered by a local model or the Anthropic API (src/llm/provider.py);
 # the choice and the model are resolved there so main.py and
 # src/bot/health.py cannot disagree.
@@ -38,70 +35,102 @@ RECAP_QUESTION = (
     "Recap this session for the players: the main events in order, the "
     "decisions the party made, the NPCs they met, and the threads left open."
 )
+# What /help lists, in the order shown. Keep in step with the commands below.
+COMMAND_SUMMARY = (
+    ("connect", "Join your voice channel."),
+    ("disconnect", "Leave the voice channel."),
+    ("scribe", "Start transcribing."),
+    ("stop", "Stop transcribing."),
+    ("ask", "Ask about the transcript (private to you)."),
+    ("ask-public", "Ask about the transcript (answer shown to everyone)."),
+    ("session", "Show the group, game, campaign and session being recorded."),
+    ("recap", "Summarise the session."),
+    ("transcript", "Download the session as text."),
+    ("generate_pdf", "Export transcript as PDF."),
+    ("update_player_map", "Sync player names with roster."),
+    ("add_player", "Name one person on the call (works mid-session)."),
+    ("health", "Show system health status."),
+    ("help", "Show this menu."),
+)
 
-logger = logging.getLogger()  # root logger
+
+def command_mention(ctx, name):
+    """A clickable ``</name:id>`` mention of one of our slash commands, or
+    plain ``/name`` in backticks when Discord has not registered it yet."""
+    for cmd in ctx.bot.application_commands:
+        if cmd.name == name and getattr(cmd, "id", None):
+            return f"</{name}:{cmd.id}>"
+    return f"`/{name}`"
 
 
-def configure_logging():
-    logging.getLogger("discord").setLevel(logging.WARNING)
-    logging.getLogger("asyncio").setLevel(logging.WARNING)
-    logging.getLogger("faster_whisper").setLevel(logging.WARNING)
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
+logger = logging.getLogger()  # the root logger: main.py speaks for the process
 
-    # Ensure the directory exists
-    log_directory = ".logs/transcripts"
-    pdf_directory = ".logs/pdfs"
-    os.makedirs(log_directory, exist_ok=True)
-    os.makedirs(pdf_directory, exist_ok=True)
+# Libraries whose INFO output is noise at our level.
+QUIET_LOGGERS = ("discord", "asyncio", "faster_whisper", "httpx", "httpcore")
+LOG_FORMAT = "%(asctime)s %(name)s: %(message)s"
+LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+TRANSCRIPT_LOG_DIR = os.path.join(".logs", "transcripts")
 
-    # Get the current date for the log file name
-    current_date = datetime.now().strftime("%Y-%m-%d")
-    log_filename = os.path.join(log_directory, f"{current_date}-transcription.log")
 
-    # Custom logging format (date with milliseconds, message)
-    log_format = "%(asctime)s %(name)s: %(message)s"
-    date_format = "%Y-%m-%d %H:%M:%S.%f"[:-3]  # Trim to milliseconds
+def _attach_transcript_log(directory):
+    """Route the ``transcription`` logger to today's JSON-lines file.
 
-    if CLIArgs.verbose:
-        logger.setLevel(logging.DEBUG)
-        logging.basicConfig(level=logging.DEBUG, format=log_format, datefmt=date_format)
-    else:
-        logger.setLevel(logging.INFO)
-        logging.basicConfig(level=logging.INFO, format=log_format, datefmt=date_format)
+    WhisperSink.write_transcription_log emits one JSON object per utterance
+    on that logger. The file gets the message and nothing else: the record
+    carries its own timestamps, and the dashboard parses the lines as JSON.
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    handler = logging.FileHandler(
+        os.path.join(directory, f"{today}-transcription.log"), mode="a"
+    )
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    transcript_logger = logging.getLogger("transcription")
+    transcript_logger.setLevel(logging.INFO)
+    transcript_logger.addHandler(handler)
+
+
+def configure_logging(verbose=False):
+    """Console + on-disk bot log, plus the per-day transcript log."""
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(level=level, format=LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
+    logger.setLevel(level)
+    for name in QUIET_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+    for directory in (TRANSCRIPT_LOG_DIR, os.path.join(".logs", "pdfs")):
+        os.makedirs(directory, exist_ok=True)
 
     # The bot's own log, kept on disk so a problem in a session can be
     # diagnosed after the terminal is gone (discord-transcript-bot-309).
-    bot_log.install(
-        level=logging.DEBUG if CLIArgs.verbose else logging.INFO,
-        fmt=log_format,
-        datefmt=date_format,
-    )
+    bot_log.install(level=level, fmt=LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
+    _attach_transcript_log(TRANSCRIPT_LOG_DIR)
 
-    # Set up the transcription logger
-    transcription_logger = logging.getLogger("transcription")
-    transcription_logger.setLevel(logging.INFO)
 
-    # File handler for transcription logs (append mode)
-    file_handler = logging.FileHandler(log_filename, mode="a")
-    file_handler.setLevel(logging.INFO)
+def run_until_interrupted(bot, loop, token):
+    """Run the bot on ``loop`` until Ctrl-C, then shut it down cleanly.
 
-    # Custom formatter WITHOUT the automatic timestamp
-    file_handler.setFormatter(
-        logging.Formatter(
-            "%(message)s"  # Only log the custom message, no automatic timestamp
-        )
-    )
-
-    # Add the handler to the transcription logger
-    transcription_logger.addHandler(file_handler)
+    Shutdown order: the bot's own teardown (leave voice, flush the sinks),
+    then every task still pending on the loop is cancelled and awaited, then
+    the Discord client and the loop are closed.
+    """
+    try:
+        loop.run_until_complete(bot.start(token))
+    except KeyboardInterrupt:
+        logger.info("Interrupted; shutting down.")
+        loop.run_until_complete(bot.stop_and_cleanup())
+    finally:
+        pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        loop.run_until_complete(bot.close())
+        loop.close()
 
 
 if __name__ == "__main__":
-    args = CommandLine.read_command_line()
-    CLIArgs.update_from_args(args)
-
-    configure_logging()
+    options = cli.parse_args()
+    configure_logging(verbose=options.verbose)
     loop = asyncio.get_event_loop()
 
     # `kill -USR1 <pid>` writes a sampled all-thread stack dump to .logs/ —
@@ -131,7 +160,7 @@ if __name__ == "__main__":
 
     @bot.slash_command(name="connect", description="Join your voice channel.")
     async def connect(ctx: discord.context.ApplicationContext):
-        if bot._is_ready is False:
+        if not bot._is_ready:
             await ctx.respond(
                 "System's still booting up, choom. Try again in a sec.", ephemeral=True
             )
@@ -145,8 +174,8 @@ if __name__ == "__main__":
                 "Gateway connection is unstable. Try again in a moment, or run `/health` for details.",
             )
             return
-        author_vc = ctx.author.voice
-        if not author_vc:
+        caller_voice = ctx.author.voice
+        if caller_voice is None:
             await ctx.followup.send(
                 "You're not in a voice channel. Jack in first, then call me."
             )
@@ -173,7 +202,7 @@ if __name__ == "__main__":
                     pass
                 await asyncio.sleep(1)
 
-            vc = await author_vc.channel.connect(reconnect=False, timeout=15)
+            vc = await caller_voice.channel.connect(reconnect=False, timeout=15)
             if not vc.is_connected():
                 try:
                     await vc.disconnect(force=True)
@@ -187,10 +216,7 @@ if __name__ == "__main__":
                     "Voice connection failed — could not establish a stable connection. Try again."
                 )
                 return
-            helper = bot.guild_to_helper.get(guild_id, BotHelper(bot))
-            helper.guild_id = guild_id
-            helper.set_vc(vc)
-            bot.guild_to_helper[guild_id] = helper
+            bot.guild_to_helper[guild_id] = GuildVoice(bot, guild_id, vc)
             bot._write_runtime_state()  # connected (best-effort, never raises)
             await ctx.followup.send(
                 "Jacked in. Connected to the voice channel and standing by."
@@ -199,11 +225,11 @@ if __name__ == "__main__":
             # just reported as working (the except below would).
             try:
                 await ctx.guild.change_voice_state(
-                    channel=author_vc.channel, self_mute=True
+                    channel=caller_voice.channel, self_mute=True
                 )
             except Exception as e:
                 logger.warning(f"/connect: self-mute failed: {e}")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - every failure must leave the channel
             # Force-leave at the gateway level. The bot appears in the
             # channel as soon as OP 4 is sent (before voice WS connects),
             # so we must send channel=None to leave even if VoiceClient
@@ -229,20 +255,13 @@ if __name__ == "__main__":
     @bot.slash_command(name="scribe", description="Start transcribing voice to text.")
     async def ink(ctx: discord.context.ApplicationContext):
         await ctx.trigger_typing()
-        connect_command = next(
-            (cmd for cmd in ctx.bot.application_commands if cmd.name == "connect"), None
-        )
-        if not connect_command:
-            connect_text = "`/connect`"
-        else:
-            connect_text = f"</connect:{connect_command.id}>"
-        if not bot.guild_to_helper.get(ctx.guild_id, None):
+        if ctx.guild_id not in bot.guild_to_helper:
             await ctx.respond(
-                f"Not connected yet. Use {connect_text} first.", ephemeral=True
+                f"Not connected yet. Use {command_mention(ctx, 'connect')} first.",
+                ephemeral=True,
             )
             return
-        # check if we are already scribing
-        if bot.guild_is_recording.get(ctx.guild_id, False):
+        if bot.guild_is_recording.get(ctx.guild_id):
             await ctx.respond(
                 "Already recording. Can't run two taps at once.", ephemeral=True
             )
@@ -267,22 +286,14 @@ if __name__ == "__main__":
     @bot.slash_command(name="stop", description="Stop transcribing.")
     async def stop(ctx: discord.context.ApplicationContext):
         guild_id = ctx.guild_id
-        helper = bot.guild_to_helper.get(guild_id, None)
-        if not helper:
+        voice = bot.guild_to_helper.get(guild_id)
+        if voice is None or voice.vc is None:
             await ctx.respond(
                 "Not connected to a channel. Nothing to stop.", ephemeral=True
             )
             return
 
-        bot_vc = helper.vc
-
-        if not bot_vc:
-            await ctx.respond(
-                "Not connected to a channel. Nothing to stop.", ephemeral=True
-            )
-            return
-
-        if not bot.guild_is_recording.get(guild_id, False):
+        if not bot.guild_is_recording.get(guild_id):
             if bot.cancel_voice_recovery(guild_id):
                 await ctx.respond(
                     "Recording stopped. (It was restarting after an error; "
@@ -339,17 +350,13 @@ if __name__ == "__main__":
     @bot.slash_command(name="disconnect", description="Leave the voice channel.")
     async def disconnect(ctx: discord.context.ApplicationContext):
         guild_id = ctx.guild_id
-        id_exists = bot.guild_to_helper.get(guild_id, None)
-        if not id_exists:
+        voice = bot.guild_to_helper.get(guild_id)
+        if voice is None:
             await ctx.respond(
                 "Not connected to anything on this server.", ephemeral=True
             )
             return
-
-        helper = bot.guild_to_helper[guild_id]
-        bot_vc = helper.vc
-
-        if not bot_vc:
+        if voice.vc is None:
             await ctx.respond(
                 "Lost the connection somehow. Try reconnecting.", ephemeral=True
             )
@@ -365,7 +372,7 @@ if __name__ == "__main__":
         bot.cancel_voice_recovery(guild_id)
         # Guarded so a teardown failure can't skip the disconnect.
         teardown_ok = True
-        if bot.guild_is_recording.get(guild_id, False):
+        if bot.guild_is_recording.get(guild_id):
             try:
                 # Keeps vc.stop_recording() on the loop thread (safe
                 # after-callback scheduling; bounded ~ms/≤5s router
@@ -376,13 +383,13 @@ if __name__ == "__main__":
                 logger.error(f"/disconnect end_recording_session error: {e}")
                 teardown_ok = False
 
-        # helper.vc can be a STALE voice client after a voice reconnect,
-        # so disconnecting it alone leaves the bot in the channel while
-        # still reporting success. Disconnect the live client and any
-        # others bound to this guild too (see disconnect_targets).
+        # The cached voice client can be STALE after a voice reconnect, so
+        # disconnecting it alone leaves the bot in the channel while still
+        # reporting success. Disconnect the live client and any others bound
+        # to this guild too (see disconnect_targets).
         for vc in disconnect_targets(
             ctx.guild.voice_client if ctx.guild else None,
-            bot_vc,
+            voice.vc,
             list(bot.voice_clients),
             guild_id,
         ):
@@ -391,8 +398,7 @@ if __name__ == "__main__":
             except Exception as e:
                 logger.error(f"/disconnect: error disconnecting a voice client: {e}")
 
-        helper.guild_id = None
-        helper.set_vc(None)
+        voice.clear()
         bot.guild_to_helper.pop(guild_id, None)
         # Clear the flag even if it was stale-True, so a later /scribe
         # after reconnecting starts clean.
@@ -452,16 +458,21 @@ if __name__ == "__main__":
         description="Sync player names with the server roster.",
     )
     async def update_player_map(ctx: discord.context.ApplicationContext):
-        if bot.guild_is_recording.get(ctx.guild_id, False):
+        # The running sink reads the roster; swapping it mid-recording would
+        # relabel speakers part-way through a session.
+        if bot.guild_is_recording.get(ctx.guild_id):
             await ctx.respond(
                 "Can't update the roster while recording. Stop the session first.",
                 ephemeral=True,
             )
             return
         try:
-            await bot.update_player_map(ctx)
-            await ctx.respond("Roster synced. All player handles are up to date.")
-        except Exception as e:
+            added = await bot.update_player_map(ctx)
+            await ctx.respond(
+                f"Roster synced: {added} new "
+                f"{'entry' if added == 1 else 'entries'}, existing names kept."
+            )
+        except Exception as e:  # noqa: BLE001 - reported to the caller
             logger.exception("/update_player_map failed")
             await ctx.respond(
                 f"Roster sync failed. {command_errors.user_message(e)}", ephemeral=True
@@ -854,64 +865,13 @@ if __name__ == "__main__":
 
     @bot.slash_command(name="help", description="Show available commands.")
     async def help(ctx: discord.context.ApplicationContext):
-        embed_fields = [
-            discord.EmbedField(
-                name="/connect", value="Join your voice channel.", inline=True
-            ),
-            discord.EmbedField(
-                name="/disconnect", value="Leave the voice channel.", inline=True
-            ),
-            discord.EmbedField(
-                name="/scribe", value="Start transcribing.", inline=True
-            ),
-            discord.EmbedField(name="/stop", value="Stop transcribing.", inline=True),
-            discord.EmbedField(
-                name="/ask",
-                value="Ask about the transcript (private to you).",
-                inline=True,
-            ),
-            discord.EmbedField(
-                name="/ask-public",
-                value="Ask about the transcript (answer shown to everyone).",
-                inline=True,
-            ),
-            discord.EmbedField(
-                name="/session",
-                value="Show the group, game, campaign and session being recorded.",
-                inline=True,
-            ),
-            discord.EmbedField(
-                name="/recap", value="Summarise the session.", inline=True
-            ),
-            discord.EmbedField(
-                name="/transcript", value="Download the session as text.", inline=True
-            ),
-            discord.EmbedField(
-                name="/generate_pdf", value="Export transcript as PDF.", inline=True
-            ),
-            discord.EmbedField(
-                name="/update_player_map",
-                value="Sync player names with roster.",
-                inline=True,
-            ),
-            discord.EmbedField(
-                name="/add_player",
-                value="Name one person on the call (works mid-session).",
-                inline=True,
-            ),
-            discord.EmbedField(
-                name="/health", value="Show system health status.", inline=True
-            ),
-            discord.EmbedField(name="/help", value="Show this menu.", inline=True),
-        ]
-
         embed = discord.Embed(
             title="// TRANSCRIPT-BOT",
-            description="""Realtime voice-to-text. All comms logged.""",
+            description="Realtime voice-to-text. All comms logged.",
             color=discord.Color.from_rgb(0, 255, 136),
-            fields=embed_fields,
         )
-
+        for name, what in COMMAND_SUMMARY:
+            embed.add_field(name=f"/{name}", value=what, inline=True)
         await ctx.respond(embed=embed, ephemeral=True)
 
     @bot.slash_command(name="health", description="Show system health status.")
@@ -927,20 +887,4 @@ if __name__ == "__main__":
         )
         await ctx.followup.send(f"**{status}**\n```\n{bot.health.summary()}\n```")
 
-    try:
-        loop.run_until_complete(bot.start(DISCORD_BOT_TOKEN))
-    except KeyboardInterrupt:
-        logger.info("^C received, shutting down...")
-        asyncio.run(bot.stop_and_cleanup())
-    finally:
-        # Close all connections
-        loop.run_until_complete(bot.close_consumers())
-
-        tasks = [t for t in asyncio.all_tasks(loop) if not t.done()]
-        for task in tasks:
-            task.cancel()
-        loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
-
-        # Close the loop
-        loop.run_until_complete(bot.close())
-        loop.close()
+    run_until_interrupted(bot, loop, DISCORD_BOT_TOKEN)

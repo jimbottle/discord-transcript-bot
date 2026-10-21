@@ -1,3 +1,15 @@
+"""Transcript PDF export for ``/generate_pdf``.
+
+The input is the parsed transcript (``src.transcript_lines``): one dict per
+line with ``time``, ``player``, ``character`` and ``text``; a line the parser
+did not recognise (a restart marker, say) has ``time`` set to None and is
+printed as-is. The layout is a title, a column header, then one paragraph per
+line in a monospaced face so the time and speaker columns line up. Pages
+get a thin frame drawn in code, so the export needs no image assets.
+"""
+
+from __future__ import annotations
+
 import asyncio
 import os
 import tempfile
@@ -5,25 +17,47 @@ from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import inch
-from reportlab.platypus import (
-    Frame,
-    Paragraph,
-    Preformatted,
-    SimpleDocTemplate,
-    Spacer,
-    Table,
-    TableStyle,
-)
+from reportlab.platypus import Paragraph, Preformatted, SimpleDocTemplate, Spacer
 
 from src.utils.timefmt import clock
 
+OUTPUT_DIR = os.path.join(".logs", "pdfs")
+PAGE_MARGIN = 0.5 * inch
+TITLE = "Session Transcript"
 
-def add_parchment_background(c, doc):
-    """Draw the parchment background on each page."""
-    background_path = os.path.join("assets", "parchment_background.jpg")
-    c.drawImage(background_path, 0, 0, width=A4[0], height=A4[1], mask="auto")
+TITLE_STYLE = ParagraphStyle(
+    "TranscriptTitle",
+    fontName="Helvetica-Bold",
+    fontSize=22,
+    leading=26,
+    alignment=1,  # centred
+    textColor=colors.HexColor("#3b2f2f"),
+)
+LINE_STYLE = ParagraphStyle(
+    "TranscriptLine",
+    fontName="Courier",
+    fontSize=9.5,
+    leading=12,
+)
+HEADER_TEXT = f"{'Time':<10} {'Speaker':<30} Said"
+RULE = "-" * 92
+
+
+def draw_page_frame(canvas, doc) -> None:
+    """Page decoration: a hairline border inside the margins and the page
+    number at the foot. Registered for every page."""
+    width, height = A4
+    inset = PAGE_MARGIN / 2
+    canvas.saveState()
+    canvas.setStrokeColor(colors.HexColor("#b9a98a"))
+    canvas.setLineWidth(0.6)
+    canvas.rect(inset, inset, width - 2 * inset, height - 2 * inset)
+    canvas.setFont("Helvetica", 8)
+    canvas.setFillColor(colors.HexColor("#6b6b6b"))
+    canvas.drawCentredString(width / 2, inset + 6, str(doc.page))
+    canvas.restoreState()
 
 
 def speaker_label(entry) -> str:
@@ -34,91 +68,54 @@ def speaker_label(entry) -> str:
     return player or character or ""
 
 
-async def pdf_generator(entries, logo_path=None):
-    """Build the transcript PDF off the event loop and return its path.
+def format_line(entry) -> str:
+    """The text for one transcript entry, escaped for reportlab markup.
 
-    :param entries: parsed transcript lines
-        (``src.transcript_lines.parse_transcript_text``), oldest first.
-    :param logo_path: unused; kept for callers.
-    :return: Path to the generated PDF file.
-    """
-    return await asyncio.to_thread(build_pdf, entries)
+    ``Paragraph`` parses its input as XML, so a transcribed ``<`` or ``&``
+    has to be escaped or the build raises."""
+    text = entry.get("text", "")
+    if entry.get("time") is None:
+        return escape(text)
+    return escape(f"{clock(entry['time']):<10} {speaker_label(entry):<30} {text}")
+
+
+def _new_output_path() -> str:
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    handle, path = tempfile.mkstemp(suffix=".pdf", dir=OUTPUT_DIR)
+    os.close(handle)
+    return path
 
 
 def build_pdf(entries) -> str:
-    """Write the PDF (blocking; reportlab) and return its path."""
-    # Ensure the logs directory exists
-    logs_dir = "./.logs/pdfs"
-    os.makedirs(logs_dir, exist_ok=True)
-
-    # Create a temporary file in the logs directory
-    with tempfile.NamedTemporaryFile(
-        delete=False, suffix=".pdf", dir=logs_dir
-    ) as tmp_file:
-        pdf_file_path = tmp_file.name
-
-    # Set up the PDF document with reduced margins
+    """Lay out and write the PDF (blocking: reportlab). Returns its path."""
+    path = _new_output_path()
     doc = SimpleDocTemplate(
-        pdf_file_path,
+        path,
         pagesize=A4,
-        leftMargin=0.5 * inch,
-        rightMargin=0.5 * inch,
-        topMargin=1 * inch,
-        bottomMargin=1 * inch,
+        leftMargin=PAGE_MARGIN,
+        rightMargin=PAGE_MARGIN,
+        topMargin=2 * PAGE_MARGIN,
+        bottomMargin=2 * PAGE_MARGIN,
+        title=TITLE,
     )
-    elements = []
-
-    # Title style with a medieval font
-    title_style = ParagraphStyle(
-        name="Title",
-        fontName="Helvetica-Bold",  # Change to a medieval font if available
-        fontSize=24,
-        alignment=1,  # Center the title
-        textColor=colors.darkred,
-    )
-
-    # Content text style (monospaced for alignment)
-    content_style = ParagraphStyle(
-        name="Content",
-        fontName="Courier",  # Monospaced font for alignment
-        fontSize=10,
-        leading=12,
-    )
-
-    # Title of the document
-    title = Paragraph("Transcription Report", title_style)
-    elements.append(title)
-    elements.append(Spacer(1, 24))  # Add more space after the title
-
-    # Column headers
-    header_text = f"{'Time':<10} {'Speaker':<30} {'Said':<50}\n"
-    elements.append(Preformatted(header_text, content_style))
-
-    # Divider line
-    divider = "-" * 90 + "\n"
-    elements.append(Preformatted(divider, content_style))
-    elements.append(Spacer(1, 12))  # Add space after the header
-
-    # One paragraph per line. Paragraph parses its text as markup, so a
-    # transcribed "<" or "&" must be escaped or reportlab raises.
+    story = [
+        Paragraph(TITLE, TITLE_STYLE),
+        Spacer(1, 20),
+        Preformatted(HEADER_TEXT, LINE_STYLE),
+        Preformatted(RULE, LINE_STYLE),
+        Spacer(1, 8),
+    ]
     for entry in entries:
-        text = entry.get("text", "")
-        if entry.get("time") is None:
-            # A line the parser didn't recognise, e.g. a restart marker.
-            formatted_entry = escape(text)
-        else:
-            formatted_entry = escape(
-                f"{clock(entry['time']):<10} {speaker_label(entry):<30} {text}"
-            )
-        elements.append(Paragraph(formatted_entry, content_style))
-        elements.append(Spacer(1, 12))
+        story.append(Paragraph(format_line(entry), LINE_STYLE))
+        story.append(Spacer(1, 6))
+    doc.build(story, onFirstPage=draw_page_frame, onLaterPages=draw_page_frame)
+    return path
 
-    # Add a watermark or subtle background elements (optional)
-    watermark_text = "Generated by V.O.L.O"
-    doc.build(
-        elements,
-        onFirstPage=add_parchment_background,
-        onLaterPages=add_parchment_background,
-    )
 
-    return pdf_file_path
+async def pdf_generator(entries, logo_path=None) -> str:
+    """Build the transcript PDF off the event loop and return its path.
+
+    :param entries: parsed transcript lines, oldest first.
+    :param logo_path: unused; kept so existing callers need not change.
+    """
+    return await asyncio.to_thread(build_pdf, entries)

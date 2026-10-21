@@ -11,8 +11,6 @@ from src.utils import pdf_generator as pg
 
 def test_pdf_builds_from_parsed_lines_and_escapes_markup(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    # The parchment background lives in the repo's assets/; draw nothing here.
-    monkeypatch.setattr(pg, "add_parchment_background", lambda c, doc: None)
     entries = parse_transcript_text(
         "[19:40:00] Jim (Rook) [1]: I roll <3 & pray\n"
         "--- recording restarted at 20:15:26 ---\n"
@@ -22,6 +20,18 @@ def test_pdf_builds_from_parsed_lines_and_escapes_markup(tmp_path, monkeypatch):
     assert os.path.getsize(path) > 0
     with open(path, "rb") as f:
         assert f.read(5) == b"%PDF-"
+
+
+def test_format_line_escapes_markup_and_passes_markers_through():
+    line = pg.format_line(
+        {"time": "19:40:00", "player": "Jim", "character": "Rook", "text": "a < b & c"}
+    )
+    assert line.startswith("7:40 PM")
+    assert "Jim (Rook)" in line and "a &lt; b &amp; c" in line
+    assert (
+        pg.format_line({"time": None, "text": "--- restarted ---"})
+        == "--- restarted ---"
+    )
 
 
 def test_speaker_label():

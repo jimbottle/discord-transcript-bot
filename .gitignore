@@ -1,12 +1,18 @@
+# Secrets and local settings (op.env holds 1Password references; .env is a
+# derived copy and must never be committed).
 /.env
 /op.env
-*.mp3
+
+# Python
 __pycache__/
-Sessions/
+venv/
+.venv/
+
+# The roster maps Discord ids to real names: keep it off the public repo.
 player_map.yml
 player_map.yaml
-.venv/
-venv/
+
+# Everything the bot writes at run time.
 .logs/
 transcripts/
 # Captured session audio: multi-GB of recorded voices, never committed

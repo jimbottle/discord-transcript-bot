@@ -402,7 +402,7 @@ def test_prompt_echo_noop_without_roster(tmp_path, monkeypatch):
 def test_transcribe_audio_drops_prompt_echo_end_to_end(tmp_path, monkeypatch):
     pm = {1: {"player": "Sovereign Lord GM", "character": "Noah"}}
     sink = _make_sink(tmp_path, monkeypatch, player_map=pm)
-    monkeypatch.setattr(sink, "check_audio_length", lambda _f: 1.0)  # pass length gate
+    monkeypatch.setattr(ws, "wav_seconds", lambda _f: 1.0)  # pass the length gate
     seg = SimpleNamespace(text=" Sovereign Lord GM says,")
     sink._backend = _fake_backend([seg])
     assert sink.transcribe_audio(io.BytesIO()) == ""
@@ -470,7 +470,7 @@ def test_accept_segment_filters_by_metrics(tmp_path, monkeypatch):
 
 def test_transcribe_audio_keeps_only_good_segments(tmp_path, monkeypatch):
     sink = _make_sink(tmp_path, monkeypatch, player_map={})
-    monkeypatch.setattr(sink, "check_audio_length", lambda _f: 1.0)
+    monkeypatch.setattr(ws, "wav_seconds", lambda _f: 1.0)
     segs = [
         _Seg(" Real line.", no_speech_prob=0.1, avg_logprob=-0.3),
         _Seg(" Subtitles by the Amara.org community", avg_logprob=-0.3),
@@ -610,7 +610,7 @@ def test_submit_failure_does_not_wedge_commit_pointer(tmp_path, monkeypatch):
 
     t = time.time()
     sink.voice_queue.put_nowait([9, b"aa", t])
-    sink.voice_queue.put_nowait([9, b"bb", t])  # new_bytes > 1
+    sink.voice_queue.put_nowait([9, b"bb", t])  # chunk_count > 1
 
     _run_insert_voice(sink, until=lambda: bool(written))
     assert written == [(9, "")], "a failed submit must commit its seq empty"
@@ -649,7 +649,7 @@ def test_buffer_force_flushed_past_duration_cap(tmp_path, monkeypatch):
 
     t = time.time()
     sink.voice_queue.put_nowait([5, b"aa", t])
-    sink.voice_queue.put_nowait([5, b"bb", t])  # new_bytes > 1
+    sink.voice_queue.put_nowait([5, b"bb", t])  # chunk_count > 1
 
     _run_insert_voice(sink, until=lambda: bool(submitted))
     assert submitted == [
@@ -858,7 +858,7 @@ def test_loop_exit_flushes_buffered_speakers(tmp_path, monkeypatch):
 
     t = time.time()
     sink.voice_queue.put_nowait([7, b"aa", t])
-    sink.voice_queue.put_nowait([7, b"bb", t])  # new_bytes > 1
+    sink.voice_queue.put_nowait([7, b"bb", t])  # chunk_count > 1
 
     # Run one pass so the speaker is buffered, then stop.
     _run_insert_voice(sink, until=lambda: bool(sink.speakers))
@@ -1055,3 +1055,35 @@ def test_sink_uses_the_configured_worker_count(tmp_path, monkeypatch):
     sink = _make_sink(tmp_path, monkeypatch)
     assert sink.executor._max_workers == 3
     sink.close()
+
+
+# ── WAV framing and the Speaker buffer ───────────────────────────────────
+
+
+def test_pcm_to_wav_round_trips_discord_pcm():
+    import wave
+
+    pcm = b"\x01\x02" * 48000  # 0.5 s of 48 kHz 16-bit stereo
+    buf = ws.pcm_to_wav(pcm)
+    assert buf.tell() == 0, "rewound for the next reader"
+    with wave.open(buf, "rb") as w:
+        assert (w.getnchannels(), w.getsampwidth(), w.getframerate()) == (2, 2, 48000)
+        assert w.readframes(w.getnframes()) == pcm
+    assert ws.wav_seconds(buf) == pytest.approx(0.5)
+    assert buf.tell() == 0
+
+
+def test_transcribe_audio_skips_clips_shorter_than_min(tmp_path, monkeypatch):
+    sink = _make_sink(tmp_path, monkeypatch)
+    sink._backend = _fake_backend([SimpleNamespace(text="never called")])
+    tiny = ws.pcm_to_wav(b"\x00\x00" * 100)  # ~1 ms
+    assert sink.transcribe_audio(tiny) == ""
+    sink.close()
+
+
+def test_speaker_accumulates_chunks_and_span():
+    spk = Speaker(user=1, player="p", character="c", data=b"aa", time=10.0)
+    assert spk.chunk_count == 1 and spk.span_s == 0.0 and spk.data == [b"aa"]
+    spk.add_chunk(b"bb", 12.5)
+    assert spk.chunk_count == 2 and spk.span_s == 2.5 and spk.data == [b"aa", b"bb"]
+    assert spk.first_word == 10.0 and spk.last_word == 12.5

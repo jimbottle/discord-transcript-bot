@@ -12,7 +12,6 @@ from datetime import datetime
 from queue import Queue
 from typing import List
 
-import speech_recognition as sr
 from discord.opus import Decoder
 from discord.sinks.core import Filters, Sink, default_filters
 from openai import OpenAI
@@ -22,7 +21,7 @@ from src.session_capture import SessionCapture
 
 # Model id + device/precision + engine selection now live in src/asr/selection.py
 # (configurable via WHISPER_MODEL / ASR_BACKEND; default large-v3, accuracy-first).
-WHISPER_LANGUAGE = "en"
+WHISPER_LANGUAGE = "en"  # language hint for every engine; no auto-detect
 
 # Decode params. beam_size was 10 / best_of 3 — unusually high and a major
 # CPU cost for marginal accuracy; 5 is faster-whisper's own default. Made
@@ -129,21 +128,44 @@ _now = time.time  # Speaker's default timestamp; the parameter shadows the modul
 
 
 class Speaker:
-    """
-    A class to store the audio data and transcription for each user.
+    """One person's audio since they last went quiet.
+
+    The sink keeps one of these per user who is currently talking; it
+    collects the PCM chunks Discord delivers for them and the span they
+    cover. When the person pauses (or the span grows too long) the whole
+    thing is handed to the transcriber as a single segment and a fresh
+    Speaker starts on their next chunk.
+
+    :param user: Discord user id.
+    :param player: name from the roster, or None.
+    :param character: character name from the roster, or None.
+    :param data: the first PCM chunk.
+    :param time: when that chunk arrived (defaults to now).
     """
 
+    __slots__ = (
+        "user",
+        "player",
+        "character",
+        "data",
+        "first_word",
+        "last_word",
+        "chunk_count",
+        "seq",
+        "clip_name",
+    )
+
     def __init__(self, user: int, player: str, character: str, data, time=None):
-        if time is None:
-            # Not a default argument: that would be evaluated once at import.
-            time = _now()
+        # ``time`` is resolved here rather than as a default argument, which
+        # would be evaluated once at import.
+        arrived = _now() if time is None else time
         self.user = user
         self.player = player
         self.character = character
-        self.data = [data]
-        self.first_word = time
-        self.last_word = time
-        self.new_bytes = 1
+        self.data = [data]  # PCM chunks, in arrival order
+        self.first_word = arrived
+        self.last_word = arrived
+        self.chunk_count = 1
         # Submission sequence, assigned by insert_voice when this segment is
         # handed to the executor. Used to name the captured clip so the
         # capture directory sorts in the same order as the manifest.
@@ -153,17 +175,66 @@ class Speaker:
         # the manifest pairs each clip with its text.
         self.clip_name = None
 
+    def add_chunk(self, pcm: bytes, arrived: float) -> None:
+        self.data.append(pcm)
+        self.chunk_count += 1
+        self.last_word = arrived
+
+    @property
+    def span_s(self) -> float:
+        """Seconds between the first and the latest chunk."""
+        return self.last_word - self.first_word
+
+
+def pcm_to_wav(pcm: bytes) -> io.BytesIO:
+    """Wrap raw Discord PCM (48 kHz, 16-bit, stereo) in a WAV container,
+    rewound to the start, ready for the transcriber or the capture."""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as out:
+        out.setnchannels(Decoder.CHANNELS)
+        out.setsampwidth(Decoder.SAMPLE_SIZE // Decoder.CHANNELS)
+        out.setframerate(Decoder.SAMPLING_RATE)
+        out.writeframes(pcm)
+    buf.seek(0)
+    return buf
+
+
+def wav_seconds(buf) -> float:
+    """Duration of the WAV data in ``buf``; leaves it rewound."""
+    buf.seek(0)
+    with wave.open(buf, "rb") as src:
+        seconds = src.getnframes() / float(src.getframerate())
+    buf.seek(0)
+    return seconds
+
+
+# Shorter clips than this are not worth a decode and never carry a word.
+MIN_CLIP_S = 0.1
+
 
 class WhisperSink(Sink):
-    """A sink for discord that takes audio in a voice channel and transcribes it for each user.
+    """Pycord recording sink that turns each person's speech into text.
 
-    Uses faster whisper for transcription. can be swapped out for other audio transcription libraries pretty easily.
+    Pycord calls ``write`` with every decoded audio chunk and the user it
+    came from. The chunks go onto ``voice_queue``; the sink's own thread
+    (``insert_voice``) sorts them into per-user ``Speaker`` buffers, and
+    when a person pauses their buffer is handed to a worker thread for
+    transcription. Results are committed in submission order to the
+    per-session ``transcripts/<ts>.txt`` and the JSON transcript log.
 
-    :param transcript_queue: The queue to send the transcription output to
-    :param filters: Some discord thing I'm not sure about
-    :param data_length: The amount of data to save when user is silent but their mic is still active
-
-    :param max_speakers: The amount of users to transcribe when all speakers are talking at once.
+    :param transcript_queue: asyncio queue the loop side may consume;
+        ``None`` is put on it at close.
+    :param loop: the bot's event loop.
+    :param transcriber_type: ``"local"`` (the engine chosen by
+        ``src.asr.selection``) or ``"openai"`` (the Whisper API).
+    :param filters: Pycord ``Sink`` filters; the defaults when omitted.
+    :param player_map: Discord user id -> ``{"player", "character"}``, shared
+        by reference with the bot so roster changes apply mid-session.
+    :param data_length: cap on one incoming chunk, in bytes; a larger chunk
+        keeps only its tail (Discord can deliver a long block of silence
+        in one go after a pause).
+    :param max_speakers: how many people may be buffered at once; negative
+        means no limit.
     """
 
     def __init__(
@@ -173,16 +244,13 @@ class WhisperSink(Sink):
         transcriber_type="local",
         *,
         filters=None,
-        player_map={},
+        player_map=None,
         data_length=50000,
         max_speakers=-1,
     ):
         self.queue = transcript_queue
         self.loop = loop
-
-        if filters is None:
-            filters = default_filters
-        self.filters = filters
+        self.filters = default_filters if filters is None else filters
         Filters.__init__(self, **self.filters)
         self.data_length = data_length
         self.max_speakers = max_speakers
@@ -193,13 +261,15 @@ class WhisperSink(Sink):
             # Resolve the local transcription backend once (memoized across
             # sinks + the health check so the model loads a single time).
             self._backend = selection.get_backend()
-        self.vc = None
+        self.vc = None  # set by Pycord when recording starts
+        # Pycord's Sink.cleanup() iterates this; we never put anything in it
+        # because audio is handled as it arrives, not buffered per file.
         self.audio_data = {}
-        self.running = True
-        self.speakers: List[Speaker] = []
-        self.voice_queue = Queue()
+        self.running = True  # cleared to stop the voice thread
+        self.speakers: List[Speaker] = []  # people with buffered audio
+        self.voice_queue = Queue()  # (user_id, pcm, arrival time) from write()
         self.executor = ThreadPoolExecutor(max_workers=transcribe_workers())
-        self.player_map = player_map
+        self.player_map = {} if player_map is None else player_map
         # Biased Whisper prompt built once from the roster's proper nouns;
         # player_map is fixed for this sink's lifetime. discord-transcript-bot-cul.
         # _prompt_names is the exact name list put in the prompt, used to
@@ -305,14 +375,20 @@ class WhisperSink(Sink):
         thread's) and nothing ever restored it (discord-transcript-bot-7g8).
         The handler is now scoped to this sink's own thread.
         """
-        logger.debug(
-            f"Starting whisper sink thread for guild {self.vc.channel.guild.id}."
-        )
+        logger.debug(f"Voice thread starting for guild {self._guild_id()}.")
         self._on_thread_exception = on_exception
         self.voice_thread = threading.Thread(
-            target=self._voice_thread_main, args=(), daemon=True
+            target=self._voice_thread_main, name="whisper-sink-voice", daemon=True
         )
         self.voice_thread.start()
+
+    def _guild_id(self):
+        """The recording guild's id for log lines, or None once the voice
+        client is gone (this must never raise on the teardown path)."""
+        try:
+            return self.vc.channel.guild.id
+        except AttributeError:
+            return None
 
     def _voice_thread_main(self):
         try:
@@ -340,6 +416,8 @@ class WhisperSink(Sink):
     DRAIN_TIMEOUT_S = 60
 
     def stop_voice_thread(self):
+        """Stop the voice thread (it flushes every buffered speaker on the
+        way out) and wait for the transcriptions that flush submitted."""
         self.running = False
         try:
             thread = getattr(self, "voice_thread", None)
@@ -352,8 +430,8 @@ class WhisperSink(Sink):
                         "thread, will not block process exit)."
                     )
             self._wait_for_inflight()
-        except Exception as e:
-            logger.error(f"Unexpected error during thread join: {e}")
+        except Exception as e:  # noqa: BLE001 - teardown must finish
+            logger.error(f"Stopping the voice thread failed: {e}")
         finally:
             # self.vc (and its .channel) can already be torn down after a
             # /disconnect, so resolving the guild id here must never raise
@@ -388,17 +466,6 @@ class WhisperSink(Sink):
                 f"{self.DRAIN_TIMEOUT_S}s; their text will reach the JSON log "
                 "but not the per-session .txt."
             )
-
-    def check_audio_length(self, temp_file):
-        # Ensure the BytesIO is at the start
-        temp_file.seek(0)
-
-        # Open the BytesIO object as a WAV file
-        with wave.open(temp_file, "rb") as wave_file:
-            frames = wave_file.getnframes()
-            frame_rate = wave_file.getframerate()
-            duration = frames / float(frame_rate)
-        return duration
 
     # Conservative character budget for initial_prompt. Whisper's prompt is
     # ~224-token capped; at ~4 chars/token that's ~900 chars, so this leaves
@@ -537,74 +604,62 @@ class WhisperSink(Sink):
             return False
         return True
 
-    def transcribe_audio(self, temp_file):
+    def _transcribe_openai(self, wav) -> str:
+        """One Whisper API call; the prompt biases it toward the roster."""
+        response = self.client.audio.transcriptions.create(
+            file=("segment.wav", wav),
+            model="whisper-1",
+            language=WHISPER_LANGUAGE,
+            prompt=self.initial_prompt,
+        )
+        logger.info(f"OpenAI transcription: {response.text}")
+        return response.text
+
+    def _transcribe_local(self, wav) -> str:
+        """The selected local engine (faster-whisper CPU/CUDA, or MLX-Whisper
+        on Apple Silicon). It returns NormalizedSegments carrying the quality
+        metrics _accept_segment inspects, so the hallucination filtering is
+        the same whichever engine is underneath."""
+        result = self._backend.transcribe(
+            wav,
+            language=WHISPER_LANGUAGE,
+            beam_size=WHISPER_BEAM_SIZE,
+            best_of=WHISPER_BEST_OF,
+            vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=150, threshold=0.8),
+            no_speech_threshold=0.6,
+            initial_prompt=self.initial_prompt,
+        )
+        # Keep only the segments that pass the per-segment filter
+        # (silence / low confidence / repetition / known artifact) rather
+        # than everything the engine emitted.
+        text = "".join(s.text for s in result.segments if self._accept_segment(s))
+        logger.info(f"Transcription: {text}")
+        return text
+
+    def transcribe_audio(self, wav) -> str:
+        """Text for one WAV buffer, or ``""`` when it is too short, the
+        engine failed, or the result was a prompt echo. Never raises: a bad
+        segment must not take the worker down."""
         try:
-            # Ensure that the audio is long enough to transcribe. If not, return an empty string
-            if self.check_audio_length(temp_file) <= 0.1:
+            if wav_seconds(wav) <= MIN_CLIP_S:
                 return ""
-
             if self.transcriber_type == "openai":
-                temp_file.seek(0)
-                openai_transcription = self.client.audio.transcriptions.create(
-                    file=("foobar.wav", temp_file),
-                    model="whisper-1",
-                    language=WHISPER_LANGUAGE,
-                    prompt=self.initial_prompt,
-                )
-                logger.info(f"OpenAI Transcription: {openai_transcription.text}")
-                return self._drop_if_prompt_echo(openai_transcription.text)
+                text = self._transcribe_openai(wav)
             else:
-                # The selected local engine (faster-whisper CPU/CUDA, or
-                # MLX-Whisper on Apple Silicon). It returns NormalizedSegments
-                # carrying the quality metrics _accept_segment inspects, so the
-                # accuracy pipeline below is identical regardless of backend.
-                temp_file.seek(0)
-                result_obj = self._backend.transcribe(
-                    temp_file,
-                    language=WHISPER_LANGUAGE,
-                    beam_size=WHISPER_BEAM_SIZE,
-                    best_of=WHISPER_BEST_OF,
-                    vad_filter=True,
-                    vad_parameters=dict(min_silence_duration_ms=150, threshold=0.8),
-                    no_speech_threshold=0.6,
-                    initial_prompt=self.initial_prompt,
-                )
-
-                # Keep only segments that pass the per-segment hallucination
-                # filter (silence/low-confidence/repetition/known-artifact),
-                # instead of concatenating everything the engine emitted.
-                result = "".join(
-                    seg.text for seg in result_obj.segments if self._accept_segment(seg)
-                )
-
-                logger.info(f"Transcription: {result}")
-                # Final whole-utterance backstop for prompt-echo / artifacts
-                # that slipped through the per-segment metrics.
-                return self._drop_if_prompt_echo(result)
-        except Exception as e:
-            logger.error(f"Error transcribing audio: {e}")
+                text = self._transcribe_local(wav)
+            # Whole-utterance backstop for prompt echoes and artifacts that
+            # slipped past the per-segment metrics.
+            return self._drop_if_prompt_echo(text)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Transcription failed for a segment: {e}")
             return ""
 
-    def transcribe(self, speaker: Speaker):
-        # Discord voice PCM is a fixed format (48kHz, 16-bit, stereo).
-        # The new voice-receive client no longer exposes self.vc.decoder,
-        # so read the constants off discord.opus.Decoder directly.
-        audio_data = sr.AudioData(
-            bytes().join(speaker.data),
-            Decoder.SAMPLING_RATE,
-            Decoder.SAMPLE_SIZE // Decoder.CHANNELS,
-        )
-
-        wav_data = io.BytesIO(audio_data.get_wav_data())
-
-        wav_io = io.BytesIO()
-        with wave.open(wav_io, "wb") as wave_writer:
-            wave_writer.setnchannels(Decoder.CHANNELS)
-            wave_writer.setsampwidth(Decoder.SAMPLE_SIZE // Decoder.CHANNELS)
-            wave_writer.setframerate(Decoder.SAMPLING_RATE)
-            wave_writer.writeframes(wav_data.getvalue())
-
-        wav_io.seek(0)
+    def transcribe(self, speaker: Speaker) -> str:
+        """Transcribe everything buffered for ``speaker``. Runs on a worker
+        thread. Discord PCM is always 48 kHz 16-bit stereo, so the WAV
+        header is fixed (``pcm_to_wav``)."""
+        wav = pcm_to_wav(b"".join(speaker.data))
 
         # Persist the EXACT bytes about to be transcribed, before doing it, so
         # a reference clip survives even if transcription then fails.
@@ -616,16 +671,12 @@ class WhisperSink(Sink):
         if self.capture is not None:
             try:
                 speaker.clip_name = self.capture.save_clip(
-                    wav_io.getvalue(), speaker.seq, speaker
+                    wav.getvalue(), speaker.seq, speaker
                 )
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.warning(f"Session audio capture failed for this segment: {e}")
 
-        # Check if the audio is long enough to transcribe, else return empty string
-
-        transcription = self.transcribe_audio(wav_io)
-
-        return transcription
+        return self.transcribe_audio(wav)
 
     # A speaker's buffer is submitted for transcription once they've gone
     # quiet for this long...
@@ -654,14 +705,11 @@ class WhisperSink(Sink):
                 # the result in submission order (see _on_transcribed).
                 now = time.time()
                 for speaker in self.speakers[:]:
-                    silent = (now - speaker.last_word) >= self.SILENCE_GAP_S
-                    too_long = (
-                        speaker.last_word - speaker.first_word
-                    ) >= self.MAX_SEGMENT_S
-                    if silent or too_long:
+                    paused = (now - speaker.last_word) >= self.SILENCE_GAP_S
+                    if paused or speaker.span_s >= self.MAX_SEGMENT_S:
                         self._submit_speaker(speaker)
-            except Exception as e:
-                logger.error(f"Error in insert_voice: {e}")
+            except Exception as e:  # noqa: BLE001 - the loop must keep going
+                logger.error(f"Voice loop iteration failed: {e}")
             finally:
                 # Idle nap so this loop doesn't busy-spin. In `finally`, NOT at
                 # the end of the try: an exception raised each pass would
@@ -693,26 +741,26 @@ class WhisperSink(Sink):
         on a transcription (see the detached submit in _submit_speaker) or
         the queue backs up and segments snowball."""
         while not self.voice_queue.empty():
-            item = self.voice_queue.get()
-            # Find or create a speaker
-            speaker = next((s for s in self.speakers if s.user == item[0]), None)
-            if speaker:
-                speaker.data.append(item[1])
-                speaker.new_bytes += 1
-                speaker.last_word = item[2]
+            user_id, pcm, arrived = self.voice_queue.get()
+            speaker = next((s for s in self.speakers if s.user == user_id), None)
+            if speaker is not None:
+                speaker.add_chunk(pcm, arrived)
             elif self.max_speakers < 0 or len(self.speakers) <= self.max_speakers:
-                user_id = item[0]
-                user_map = self.player_map.get(user_id, {})
-                player = user_map.get("player")
-                character = user_map.get("character")
+                names = self.player_map.get(user_id, {})
                 self.speakers.append(
-                    Speaker(user_id, player, character, item[1], item[2])
+                    Speaker(
+                        user_id,
+                        names.get("player"),
+                        names.get("character"),
+                        pcm,
+                        arrived,
+                    )
                 )
 
     def _submit_speaker(self, speaker):
         """Hand one speaker's buffer to the executor (detached) and remove it
         from the active list. Only the insert_voice thread calls this."""
-        if speaker.new_bytes <= 1:
+        if speaker.chunk_count <= 1:
             return
         self.speakers.remove(speaker)
         seq = self._submit_seq
@@ -792,41 +840,31 @@ class WhisperSink(Sink):
                 except Exception as e:
                     logger.error(f"Error writing transcription log: {e}")
 
-    def check_speaker_timeouts(self, current_speaker, transcription):
-
-        # Copy the list to avoid modification during iteration
-        for speaker in self.speakers[:]:
-            if current_speaker.user == speaker.user:
-                self.write_transcription_log(speaker, transcription)
-                self.speakers.remove(speaker)
+    @staticmethod
+    def _split_stamp(unix_time):
+        """``("YYYY-MM-DD", "HH:MM:SS.mmm")`` for a Unix timestamp."""
+        stamp = datetime.fromtimestamp(unix_time)
+        return stamp.strftime("%Y-%m-%d"), stamp.strftime("%H:%M:%S.%f")[:-3]
 
     def write_transcription_log(self, speaker, transcription):
-        # Convert first_word and last_word Unix timestamps to datetime
-        first_word_time = datetime.fromtimestamp(speaker.first_word).strftime(
-            "%Y-%m-%d %H:%M:%S.%f"
-        )[:-3]
-        last_word_time = datetime.fromtimestamp(speaker.last_word).strftime(
-            "%Y-%m-%d %H:%M:%S.%f"
-        )[:-3]
-        # Prepare the log data as a dictionary
-        log_data = {
-            "date": first_word_time[:10],  # Date (from first_word)
-            "begin": first_word_time[11:],  # First word time (HH:MM:SS.ss)
-            "end": last_word_time[11:],  # Last word time (HH:MM:SS.ss)
-            "user_id": speaker.user,  # User ID
+        """Commit one transcribed segment: a JSON record on the
+        ``transcription`` logger (the per-day log the dashboard reads), the
+        capture manifest line when capture is on, and a human-readable line
+        in the per-session ``.txt``. The record's keys are a file format
+        (``src.transcript_lines``, ``web/transcript_service.py``)."""
+        date, begin = self._split_stamp(speaker.first_word)
+        _, end = self._split_stamp(speaker.last_word)
+        record = {
+            "date": date,
+            "begin": begin,
+            "end": end,
+            "user_id": speaker.user,
             "player": speaker.player,
             "character": speaker.character,
-            "event_source": "Discord",  # Event source
-            "data": transcription,  # Transcription text
+            "event_source": "Discord",
+            "data": transcription,
         }
-
-        # Convert the log data to JSON
-        log_message = json.dumps(log_data)
-
-        # Get the transcription logger
-        transcription_logger = logging.getLogger("transcription")
-        # Log the message
-        transcription_logger.info(log_message)
+        logging.getLogger("transcription").info(json.dumps(record))
 
         # Pair this segment's captured clip with the text the engine produced,
         # as the draft a human corrects into reference data. Deliberately
@@ -838,7 +876,7 @@ class WhisperSink(Sink):
                     getattr(speaker, "clip_name", None),
                     speaker,
                     transcription,
-                    begin=first_word_time[11:],
+                    begin=begin,
                 )
             except Exception as e:
                 logger.warning(f"Session capture manifest write failed: {e}")
@@ -881,7 +919,8 @@ class WhisperSink(Sink):
 
     @Filters.container
     def write(self, data, user):
-        """Gets audio data from discord for each user talking"""
+        """Pycord's entry point: one decoded audio chunk from one user.
+        Queued for the voice thread; nothing is decoded here."""
         # Empty buffers (b"") — no audio, or a frame not yet attributable
         # to a user — are dropped below, not queued. Discord's first
         # non-empty buffer after a silence gap can be a large block of
@@ -903,14 +942,17 @@ class WhisperSink(Sink):
         if user_id is None or not pcm:
             return
 
+        # Keep the tail: that is where the speech is when Discord delivers
+        # a long silent block followed by words.
         if len(pcm) > self.data_length:
             pcm = pcm[-self.data_length :]
-        write_time = time.time()
-        # Send bytes to be transcribed
-        self.voice_queue.put_nowait([user_id, pcm, write_time])
+        self.voice_queue.put_nowait((user_id, pcm, time.time()))
 
     def close(self):
-        logger.debug("Closing whisper sink.")
+        """Finalize the sink: tell the loop side we are done (``None`` on
+        the queue), release Pycord's buffers, close the capture and the
+        session file, and shut the worker pool down. Never raises."""
+        logger.debug(f"Closing the sink for guild {self._guild_id()}.")
         self.running = False
         self.queue.put_nowait(None)
         super().cleanup()

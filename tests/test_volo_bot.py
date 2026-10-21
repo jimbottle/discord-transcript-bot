@@ -102,21 +102,21 @@ def test_stop_recording_swallows_recording_exception():
     vc = _FakeVC(
         recording=True, raise_on_stop=RecordingException("You are not recording")
     )
-    fake = SimpleNamespace(guild_is_recording={5: True}, guild_whisper_message_tasks={})
+    fake = SimpleNamespace(guild_is_recording={5: True})
     VoloBot.stop_recording(fake, _ctx_with_vc(5, vc))
     assert fake.guild_is_recording[5] is False
 
 
 def test_stop_recording_skips_when_not_recording():
     vc = _FakeVC(recording=False)
-    fake = SimpleNamespace(guild_is_recording={5: True}, guild_whisper_message_tasks={})
+    fake = SimpleNamespace(guild_is_recording={5: True})
     VoloBot.stop_recording(fake, _ctx_with_vc(5, vc))
     assert vc.stopped is False  # stop_recording() not invoked
     assert fake.guild_is_recording[5] is False
 
 
 def test_stop_recording_no_vc_is_safe():
-    fake = SimpleNamespace(guild_is_recording={}, guild_whisper_message_tasks={})
+    fake = SimpleNamespace(guild_is_recording={})
     VoloBot.stop_recording(fake, _ctx_with_vc(5, None))  # must not raise
 
 
@@ -451,8 +451,9 @@ def test_upsert_player_entry_atomic_no_orphan_on_write_failure(tmp_path, monkeyp
         yaml.dump({1: {"player": "Keep", "character": "Keep"}}), encoding="utf-8"
     )
     monkeypatch.setattr(vb_mod, "PLAYER_MAP_FILE_PATH", str(pm))
+    # player_map_store does the writing and uses this same yaml module.
     monkeypatch.setattr(
-        vb_mod.yaml, "dump", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full"))
+        yaml, "dump", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full"))
     )
     fake = SimpleNamespace(player_map={})
     with pytest.raises(OSError):
@@ -784,3 +785,55 @@ def test_stop_during_the_restart_window_wins():
     fake.start_recording.assert_not_called()
     assert sent == []
     assert VoloBot.cancel_voice_recovery(fake, 1) is False
+
+
+# ── settings read from the environment and the roster sync ──────────────
+
+
+def test_transcriber_from_env_defaults_to_local():
+    assert vb_mod.transcriber_from_env(None) == "local"
+    assert vb_mod.transcriber_from_env("") == "local"
+    assert vb_mod.transcriber_from_env("whatever") == "local"
+    assert vb_mod.transcriber_from_env(" OpenAI ") == "openai"
+
+
+def test_load_player_map_handles_unset_and_missing(tmp_path):
+    assert vb_mod.load_player_map(None) == {}
+    assert vb_mod.load_player_map(str(tmp_path / "nope.yml")) == {}
+    pm = tmp_path / "player_map.yml"
+    pm.write_text(yaml.dump({1: {"player": "A", "character": "B"}}), encoding="utf-8")
+    assert vb_mod.load_player_map(str(pm)) == {1: {"player": "A", "character": "B"}}
+
+
+def test_update_player_map_adds_missing_members_and_keeps_edits(tmp_path, monkeypatch):
+    pm = tmp_path / "player_map.yml"
+    pm.write_text(
+        yaml.dump({1: {"player": "Hand", "character": "Edited"}}), encoding="utf-8"
+    )
+    monkeypatch.setattr(vb_mod, "PLAYER_MAP_FILE_PATH", str(pm))
+    members = [
+        SimpleNamespace(id=1, name="one", display_name="One"),
+        SimpleNamespace(id=2, name="two", display_name="Two"),
+    ]
+    fake = SimpleNamespace(player_map={})
+    ctx = SimpleNamespace(guild=SimpleNamespace(members=members))
+    added = asyncio.run(VoloBot.update_player_map(fake, ctx))
+    assert added == 1
+    assert fake.player_map == {
+        1: {"player": "Hand", "character": "Edited"},
+        2: {"player": "two", "character": "Two"},
+    }
+    assert yaml.safe_load(pm.read_text()) == fake.player_map
+    assert not (tmp_path / "player_map.yml.tmp").exists()
+
+
+def test_update_player_map_without_a_file_is_in_memory_only(monkeypatch):
+    monkeypatch.setattr(vb_mod, "PLAYER_MAP_FILE_PATH", None)
+    fake = SimpleNamespace(player_map={})
+    ctx = SimpleNamespace(
+        guild=SimpleNamespace(
+            members=[SimpleNamespace(id=5, name="n", display_name="d")]
+        )
+    )
+    assert asyncio.run(VoloBot.update_player_map(fake, ctx)) == 1
+    assert fake.player_map == {5: {"player": "n", "character": "d"}}

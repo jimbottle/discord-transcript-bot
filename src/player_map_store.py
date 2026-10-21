@@ -70,6 +70,13 @@ def load(path):
     return data
 
 
+def save(path, mapping):
+    """Replace the on-disk roster with ``mapping`` (atomic, see
+    ``_atomic_dump``). Used by ``/update_player_map`` after it has merged the
+    guild's members into what was already there."""
+    _atomic_dump(path, dict(mapping))
+
+
 def upsert(path, user_id, player, character):
     """Merge one ``user_id -> {player, character}`` entry into the on-disk
     roster, preserving every other entry, and write it atomically.
