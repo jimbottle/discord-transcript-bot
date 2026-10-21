@@ -36,11 +36,13 @@ def transcribe_workers(raw=None) -> int:
     """How many transcriptions run at once (discord-transcript-bot-4uk).
 
     Measured 2026-10-21 on 96 clips of the 2026-10-20 session
-    (scripts/bench_concurrency.py, MLX large-v3, M-series GPU): 1 worker
-    1.49 clips/s, 2 workers 1.63, 4 and 8 no better; texts identical at every
-    count, so concurrent MLX decoding is safe but the GPU serialises it.
-    More workers only add threads and memory. On faster-whisper (CPU) each
-    call already uses every core. Invalid values fall back to 2.
+    (scripts/bench_concurrency.py, MLX large-v3, M-series GPU), two runs:
+    1.45-1.65 clips/s at every count from 1 to 8, within the 9% spread
+    between two 1-worker runs; texts identical and no backend errors. So
+    concurrent MLX decoding is safe but the GPU serialises it, and more
+    workers only add threads and memory. 2 keeps a slow clip from holding
+    up the next. On faster-whisper (CPU) each call already uses every core.
+    Invalid values fall back to 2.
     """
     raw = os.getenv("TRANSCRIBE_WORKERS", "2") if raw is None else raw
     try:

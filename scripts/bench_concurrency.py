@@ -25,10 +25,12 @@ USAGE
 import argparse
 import io
 import json
+import logging
 import os
 import statistics
 import sys
 import tempfile
+import threading
 import time
 import wave
 from concurrent.futures import ThreadPoolExecutor
@@ -69,8 +71,34 @@ def wav_seconds(data: bytes) -> float:
         return w.getnframes() / float(w.getframerate())
 
 
+class _ErrorCounter(logging.Handler):
+    """transcribe_audio catches backend exceptions, logs 'Error transcribing
+    audio' and returns "", so errors are counted from the log, not caught."""
+
+    def __init__(self):
+        super().__init__(logging.ERROR)
+        self.count = 0
+        self._lock = threading.Lock()
+
+    def emit(self, record):
+        if "Error transcribing audio" in record.getMessage():
+            with self._lock:
+                self.count += 1
+
+
 def run(sink, clips, workers):
-    """Submit every clip at once; return per-clip (text, latency, error)."""
+    """Submit every clip at once; return (wall, per-clip results, errors)."""
+    counter = _ErrorCounter()
+    sink_logger = logging.getLogger("src.sinks.whisper_sink")
+    sink_logger.addHandler(counter)
+    try:
+        wall, results = _run(sink, clips, workers)
+    finally:
+        sink_logger.removeHandler(counter)
+    return wall, results, counter.count
+
+
+def _run(sink, clips, workers):
     results = [None] * len(clips)
 
     def job(i):
@@ -93,7 +121,7 @@ def run(sink, clips, workers):
     return wall, results
 
 
-def summarize(label, wall, results, audio_s, baseline):
+def summarize(label, wall, results, errors, audio_s, baseline):
     lat = sorted(r["done"] for r in results)
     q = statistics.quantiles(lat, n=20) if len(lat) > 1 else lat * 19
     diffs = (
@@ -110,7 +138,7 @@ def summarize(label, wall, results, audio_s, baseline):
         "latency_p95_s": round(q[18], 2),
         "latency_max_s": round(lat[-1], 2),
         "text_diffs_vs_1_worker": diffs,
-        "errors": sum(1 for r in results if r["err"]),
+        "errors": errors + sum(1 for r in results if r["err"]),
     }
 
 
@@ -144,15 +172,17 @@ def main():
         sink.transcribe_audio(io.BytesIO(clips[0]["bytes"]))  # load + warm
 
         rows = []
-        wall, baseline = run(sink, clips, 1)
-        rows.append(summarize("1 worker", wall, baseline, audio_s, None))
-        wall, control = run(sink, clips, 1)
-        rows.append(summarize("1 worker (control)", wall, control, audio_s, baseline))
+        wall, baseline, errs = run(sink, clips, 1)
+        rows.append(summarize("1 worker", wall, baseline, errs, audio_s, None))
+        wall, control, errs = run(sink, clips, 1)
+        rows.append(
+            summarize("1 worker (control)", wall, control, errs, audio_s, baseline)
+        )
         for w in [int(x) for x in args.workers.split(",") if x.strip()]:
             if w == 1:
                 continue
-            wall, res = run(sink, clips, w)
-            rows.append(summarize(f"{w} workers", wall, res, audio_s, baseline))
+            wall, res, errs = run(sink, clips, w)
+            rows.append(summarize(f"{w} workers", wall, res, errs, audio_s, baseline))
         sink.close()
     finally:
         os.chdir(cwd)
