@@ -225,6 +225,9 @@ def ask_session():
     started = time.perf_counter()
     try:
         result = claude.ask(transcript, question, header=header, note_dirs=note_dirs)
+    except claude.AskBlocked as e:
+        _log(question_log.BLOCKED, started, error=e.user_message, verdict=e.verdict)
+        return jsonify(_blocked_body(question, e))
     except claude.AskFailed as e:
         app.logger.error("ask failed: %s (%r)", e.user_message, e.__cause__)
         _log(question_log.FAILED, started, error=e.user_message)
@@ -294,6 +297,17 @@ def bot_stop():
 @app.route("/bot/status")
 def bot_status():
     return jsonify(bot.status())
+
+
+def _blocked_body(question, e):
+    """200, not an error: the request worked and the GM check said no. The
+    ask box shows it as a refusal, not in error red."""
+    return {
+        "question": question,
+        "blocked": True,
+        "answer": e.user_message,
+        "category": e.verdict.category,
+    }
 
 
 @app.route("/lore")
@@ -372,6 +386,9 @@ def lore_ask():
             note_dirs=lib.note_dirs(game=c.game, group=c.group, campaign=c.id),
             include_gm=include_gm,
         )
+    except claude.AskBlocked as e:
+        _log(question_log.BLOCKED, started, error=e.user_message, verdict=e.verdict)
+        return jsonify(_blocked_body(question, e))
     except claude.AskFailed as e:
         status = (
             question_log.REJECTED

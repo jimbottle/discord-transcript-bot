@@ -30,6 +30,7 @@ DEFAULT_FILE = PROJECT_ROOT / "history" / "questions.jsonl"
 ANSWERED = "answered"  # the model answered
 FAILED = "failed"  # the API call failed or the model gave no usable answer
 REJECTED = "rejected"  # never sent: no transcript yet, no API key, ...
+BLOCKED = "blocked"  # the GM check refused it (strategy, min-maxing, secrets)
 
 SOURCES = ("discord", "discord-public", "dashboard", "dashboard-lore")
 
@@ -84,6 +85,7 @@ def record(
     latency_s: Optional[float] = None,
     campaign: Optional[str] = None,
     include_gm: Optional[bool] = None,
+    verdict=None,
 ) -> Optional[dict]:
     """Append one question to the history. Returns the entry, or None if it
     could not be written (logged, never raised)."""
@@ -115,6 +117,15 @@ def record(
             logger.warning("question log: could not read session tags: %s", e)
         if include_gm is not None:
             entry["include_gm"] = bool(include_gm)
+        if verdict is None and result is not None:
+            verdict = getattr(result, "guard", None)
+        if verdict is not None:
+            entry["guard"] = {
+                "allowed": verdict.allowed,
+                "category": verdict.category,
+                "reason": verdict.reason,
+                "model": verdict.model,
+            }
         path = history_file()
         path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(entry, ensure_ascii=False) + "\n"

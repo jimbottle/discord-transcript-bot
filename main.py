@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from src.bot.helper import BotHelper
 from src.config.cliargs import CLIArgs
 from src import library, question_log, sessions
-from src.llm.claude import AskFailed, ask as llm_ask
+from src.llm.claude import AskBlocked, AskFailed, ask as llm_ask
 from src.session_capture import scribe_notice
 from src.utils.answer import clamp_message, clean_answer
 from src.utils.commandline import CommandLine
@@ -648,6 +648,16 @@ if __name__ == "__main__":
                 f"**Q:** {question}\n\n{answer}", DISCORD_MESSAGE_LIMIT
             )
             await ctx.followup.send(message)
+        except AskBlocked as e:
+            # The GM check refused it (strategy, min-maxing, secrets). Polite
+            # refusal; it went through the same deferred response, so
+            # /ask-public refusals are visible like answers would be.
+            _log(question_log.BLOCKED, started, error=e.user_message, verdict=e.verdict)
+            await ctx.followup.send(
+                clamp_message(
+                    f"**Q:** {question}\n\n{e.user_message}", DISCORD_MESSAGE_LIMIT
+                )
+            )
         except AskFailed as e:
             # claude.ask has already chosen the message that fits the reason
             # (bad key, rate limit, out of credit, unreachable, refusal), so

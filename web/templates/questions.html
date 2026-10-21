@@ -28,7 +28,7 @@
     </select>
     <select name="status" aria-label="Status">
         <option value="">Any outcome</option>
-        {% for st in ["answered", "failed", "rejected"] %}
+        {% for st in ["answered", "blocked", "failed", "rejected"] %}
         <option value="{{ st }}" {% if filters.status == st %}selected{% endif %}>{{ st }}</option>
         {% endfor %}
     </select>
@@ -48,7 +48,10 @@
         {% if e.answer %}
         <div class="qa-a">{{ e.answer|answer_md }}</div>
         {% endif %}
-        {% if e.error %}
+        {% if e.error and e.status == "blocked" %}
+        <div class="qa-a qa-blocked-text">{{ e.error }}</div>
+        {% if e.guard %}<div class="qa-meta">GM check: {{ e.guard.category }}{% if e.guard.reason %} · {{ e.guard.reason }}{% endif %}</div>{% endif %}
+        {% elif e.error %}
         <div class="qa-err">{{ e.error }}</div>
         {% endif %}
         {% if e.model %}

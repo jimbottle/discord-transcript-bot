@@ -25,7 +25,7 @@ from typing import Optional
 
 import anthropic
 
-from src.llm import campaign
+from src.llm import campaign, guard
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,14 @@ DEFAULT_EFFORT = "medium"
 MAX_ANSWER_TOKENS = 8192
 TIMEOUT_S = 120
 
+TABLE_RULES = (
+    " Table rules from the GM: do not give tactical or strategic advice on "
+    "beating a scenario, do not help optimise (min-max) characters, and do "
+    "not reveal or speculate about anything the characters have not learned "
+    "or where the plot is going. If asked, decline in one sentence and offer "
+    "to recall what happened instead."
+)
+
 SYSTEM_PROMPT = (
     "You are an assistant that answers questions about a voice chat "
     "transcript of a tabletop RPG session (the SESSION line, when present, names the game and campaign; follow its STYLE line if there is one). Be concise and direct. Answer from "
@@ -45,6 +53,7 @@ SYSTEM_PROMPT = (
     "INDEX is provided you may read campaign notes with the read_campaign_notes "
     "tool, but only when the question needs background the transcript lacks, "
     "and say when an answer comes from the notes rather than the transcript."
+    + TABLE_RULES
 )
 # Tool rounds per question. One is the norm (the model asks for the notes it
 # needs in a single call); the cap keeps a confused model from spending money.
@@ -100,6 +109,35 @@ class AskFailed(Exception):
         self.__cause__ = cause
 
 
+class AskBlocked(Exception):
+    """The GM check refused the question before any answer was generated.
+    Not an AskFailed, so callers record it as ``blocked``, not a failure.
+    ``user_message`` is safe to post as-is."""
+
+    def __init__(self, user_message: str, verdict):
+        super().__init__(user_message)
+        self.user_message = user_message
+        self.verdict = verdict
+
+
+def _gate(question: str, *, context: str = "", gm: bool = False):
+    """Run the GM check; raise AskBlocked, or AskFailed when it can't run
+    (fail closed). Returns the verdict (None when TABLE_GUARD is off)."""
+    if not guard.enabled():
+        return None
+    try:
+        verdict = guard.check(question, api_key=api_key(), context=context, gm=gm)
+    except guard.GuardUnavailable as e:
+        logger.error(f"GM check unavailable, refusing to answer: {e}")
+        raise AskFailed(guard.GUARD_ERROR_MSG, e) from e
+    if not verdict.allowed:
+        logger.info(
+            f"GM check blocked a question ({verdict.category}): {verdict.reason}"
+        )
+        raise AskBlocked(guard.block_message(verdict), verdict)
+    return verdict
+
+
 @dataclass
 class AskResult:
     answer: str
@@ -111,6 +149,8 @@ class AskResult:
     # from the transcript alone. Token counts above are summed over rounds.
     notes_used: list = field(default_factory=list)
     rounds: int = 1
+    # The GM check that let the question through (None when disabled).
+    guard: Optional[object] = None
 
 
 def _api_error_message(error: anthropic.APIStatusError) -> str:
@@ -230,11 +270,14 @@ def ask(transcript: str, question: str, *, header: str = "", note_dirs=()) -> As
     answered from the transcript alone."""
     if not configured():
         raise AskFailed(NO_KEY_MSG)
+    verdict = _gate(question, context=header.split("\n")[0] if header else "")
     notes = campaign.load_notes(note_dirs)
     request = build_request(
         transcript, question, campaign.index_text(notes), header=header
     )
-    return _run(request, notes)
+    result = _run(request, notes)
+    result.guard = verdict
+    return result
 
 
 LORE_SYSTEM_PROMPT = (
@@ -245,7 +288,7 @@ LORE_SYSTEM_PROMPT = (
     "relevant note in one call) and answer only from them. If the notes "
     "don't cover the question, say so plainly rather than inventing "
     "campaign facts; you may add general knowledge of the game's published "
-    "rules or setting if you label it as such. Be concise and direct."
+    "rules or setting if you label it as such. Be concise and direct." + TABLE_RULES
 )
 NO_NOTES_MSG = (
     "This campaign has no reference notes yet, so there is nothing to answer from."
@@ -285,7 +328,14 @@ def ask_lore(
     notes = campaign.load_notes(note_dirs, include_gm=include_gm)
     if not notes:
         raise AskFailed(NO_NOTES_MSG)
-    return _run(build_lore_request(question, campaign.index_text(notes), header), notes)
+    verdict = _gate(
+        question, context=header.split("\n")[0] if header else "", gm=include_gm
+    )
+    result = _run(
+        build_lore_request(question, campaign.index_text(notes), header), notes
+    )
+    result.guard = verdict
+    return result
 
 
 def _run(request: dict, notes: list) -> AskResult:

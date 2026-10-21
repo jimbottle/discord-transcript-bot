@@ -217,6 +217,23 @@
     margin-top: 0.3rem;
 }
 
+.qa-blocked .qa-a {
+    color: var(--pico-muted-color);
+    font-style: italic;
+}
+
+.qa-blocked .qa-q::after {
+    content: " · held back by the GM check";
+    font-weight: 400;
+    font-size: 0.75rem;
+    color: var(--pico-muted-color);
+}
+
+.qa-entry.status-blocked .qa-status {
+    color: var(--pico-muted-color);
+    font-weight: 600;
+}
+
 .qa-earlier {
     opacity: 0.8;
 }

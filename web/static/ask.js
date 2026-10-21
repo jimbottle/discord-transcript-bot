@@ -79,7 +79,8 @@
             // textContent only: the question is user input and the answer
             // is model output; neither may be parsed as HTML.
             const block = document.createElement("div");
-            block.className = "qa" + (errorText ? " qa-failed" : "");
+            const blocked = !!(result && (result.blocked || result.status === "blocked"));
+            block.className = "qa" + (errorText ? " qa-failed" : "") + (blocked ? " qa-blocked" : "");
 
             const q = document.createElement("div");
             q.className = "qa-q";
@@ -136,7 +137,11 @@
                 });
                 let body = null;
                 try { body = await res.json(); } catch (e) { body = null; }
-                if (res.ok && body && body.answer) {
+                if (res.ok && body && body.blocked) {
+                    addQA(question, body, null);
+                    input.value = "";
+                    status.textContent = "Held back by the GM check";
+                } else if (res.ok && body && body.answer) {
                     addQA(question, body, null);
                     input.value = "";
                     status.textContent =
@@ -184,7 +189,10 @@
                 const entries = await res.json();
                 for (const e of entries) {  // newest first
                     if (e.status === "rejected") continue;
-                    const block = buildQA(e.question, e.answer ? e : null, e.answer ? null : e.error);
+                    const isBlocked = e.status === "blocked";
+                    const block = isBlocked
+                        ? buildQA(e.question, { blocked: true, answer: e.error }, null)
+                        : buildQA(e.question, e.answer ? e : null, e.answer ? null : e.error);
                     block.classList.add("qa-earlier");
                     const m = document.createElement("div");
                     m.className = "qa-meta";

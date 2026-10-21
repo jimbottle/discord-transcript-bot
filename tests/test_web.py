@@ -1172,3 +1172,62 @@ def test_questions_page_renders_answer_markdown(client):
     body = client.get("/questions").get_data(as_text=True)
     assert "<strong>Kane</strong> runs it." in body
     assert "<li>a</li>" in body and "&lt;b&gt;b&lt;/b&gt;" in body
+
+
+# ── GM check outcomes on the dashboard ───────────────────────────────────
+
+
+def _blocked(*a, **k):
+    from src.llm import guard
+
+    v = guard.Verdict(False, "strategy", "That asks for tactics.", model="g")
+    raise web_app.claude.AskBlocked(guard.block_message(v), v)
+
+
+def test_blocked_dashboard_question_is_a_200_refusal_and_recorded(
+    client, live_transcript, ask_configured, monkeypatch
+):
+    from src import question_log
+
+    monkeypatch.setattr(web_app.claude, "ask", _blocked)
+    r = client.post(
+        "/ask", json={"question": "best approach to beat this?"}, headers=_XHR
+    )
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["blocked"] is True and body["category"] == "strategy"
+    assert "coaching the play" in body["answer"]
+    (e,) = question_log.read()
+    assert e["status"] == "blocked"
+    assert e["guard"] == {
+        "allowed": False,
+        "category": "strategy",
+        "reason": "That asks for tactics.",
+        "model": "g",
+    }
+
+
+def test_blocked_lore_question(client, lore_library, ask_configured, monkeypatch):
+    from src import question_log
+
+    monkeypatch.setattr(web_app.claude, "ask_lore", _blocked)
+    r = client.post(
+        "/lore/ask", json={"question": "best build?", "campaign": "rtnc"}, headers=_XHR
+    )
+    assert r.status_code == 200 and r.get_json()["blocked"] is True
+    assert question_log.read()[0]["status"] == "blocked"
+
+
+def test_questions_page_shows_blocked_entries(client):
+    from src import question_log
+    from src.llm import guard
+
+    question_log.record(
+        source="discord",
+        question="how do we win the fight?",
+        status="blocked",
+        error="The GM wouldn't want me coaching the play on that one.",
+        verdict=guard.Verdict(False, "strategy", "Tactics.", model="g"),
+    )
+    body = client.get("/questions?status=blocked").get_data(as_text=True)
+    assert "how do we win the fight?" in body and "GM check: strategy" in body

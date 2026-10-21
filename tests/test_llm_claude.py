@@ -21,6 +21,13 @@ def _key(monkeypatch, tmp_path):
     monkeypatch.delenv("ASK_MODEL", raising=False)
     monkeypatch.delenv("ASK_EFFORT", raising=False)
     monkeypatch.delenv("CAMPAIGN_GM_NOTES", raising=False)
+    # The GM check is its own API call; these tests are about the answer
+    # path, so it allows everything here (tests/test_guard.py covers it).
+    monkeypatch.setattr(
+        claude.guard,
+        "check",
+        lambda q, **kw: claude.guard.Verdict(True, "ok", "", model="guard-stub"),
+    )
 
 
 def _response(
@@ -462,3 +469,73 @@ def test_lore_is_not_exposed_to_discord():
     root = Path(__file__).resolve().parent.parent
     for path in [root / "main.py", *(root / "src" / "bot").glob("*.py")]:
         assert "ask_lore" not in path.read_text(encoding="utf-8"), path
+
+
+# ── the GM check gates every answer ──────────────────────────────────────
+
+
+def _blocking(monkeypatch, category="strategy"):
+    seen = []
+
+    def check(q, **kw):
+        seen.append((q, kw))
+        return claude.guard.Verdict(False, category, "That's tactics.", model="g")
+
+    monkeypatch.setattr(claude.guard, "check", check)
+    return seen
+
+
+def test_blocked_question_never_reaches_the_answer_model(monkeypatch):
+    seen = _blocking(monkeypatch)
+    client = _use(monkeypatch, _FakeClient(_response()))
+    with pytest.raises(claude.AskBlocked) as e:
+        claude.ask(
+            "t",
+            "what is my best approach to beating this scenario?",
+            header="SESSION: Game: Cyberpunk RED\nSTYLE: x",
+        )
+    assert client.calls == []
+    assert e.value.verdict.category == "strategy"
+    assert "coaching the play" in e.value.user_message
+    assert e.value.verdict.reason == "That's tactics."
+    # the guard sees the question and the SESSION line, not the STYLE line
+    assert seen[0][1]["context"] == "SESSION: Game: Cyberpunk RED"
+    assert not isinstance(e.value, claude.AskFailed)
+
+
+def test_lore_is_gated_too_and_gm_mode_is_passed(monkeypatch, notes_dir):
+    seen = _blocking(monkeypatch, "optimization")
+    client = _use(monkeypatch, _FakeClient(_response()))
+    with pytest.raises(claude.AskBlocked):
+        claude.ask_lore("best cyberware build?", note_dirs=[notes_dir], include_gm=True)
+    assert client.calls == [] and seen[0][1]["gm"] is True
+
+
+def test_guard_unavailable_fails_closed(monkeypatch):
+    def broken(q, **kw):
+        raise claude.guard.GuardUnavailable("boom")
+
+    monkeypatch.setattr(claude.guard, "check", broken)
+    client = _use(monkeypatch, _FakeClient(_response()))
+    with pytest.raises(claude.AskFailed) as e:
+        claude.ask("t", "q")
+    assert e.value.user_message == claude.guard.GUARD_ERROR_MSG
+    assert client.calls == []
+
+
+def test_guard_can_be_switched_off(monkeypatch):
+    _blocking(monkeypatch)
+    monkeypatch.setenv("TABLE_GUARD", "off")
+    _use(monkeypatch, _FakeClient(_response("fine")))
+    r = claude.ask("t", "q")
+    assert r.answer == "fine" and r.guard is None
+
+
+def test_allowed_verdict_is_attached_to_the_result(monkeypatch):
+    _use(monkeypatch, _FakeClient(_response()))
+    assert claude.ask("t", "q").guard.model == "guard-stub"
+
+
+def test_both_system_prompts_carry_the_table_rules():
+    assert claude.TABLE_RULES in claude.SYSTEM_PROMPT
+    assert claude.TABLE_RULES in claude.LORE_SYSTEM_PROMPT
