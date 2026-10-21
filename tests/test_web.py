@@ -19,6 +19,7 @@ import yaml
 import app as web_app
 import roster_service
 import transcript_service
+from src.llm.claude import RATE_LIMIT_MSG
 
 
 class FakeBotManager:
@@ -629,7 +630,7 @@ def test_get_unmapped_speakers_excludes_mapped_includes_members(
 
 
 # ── /ask: question the live session from the dashboard ──────────────────
-# Same module as Discord's /ask (src.llm.claude); these tests stub it so no
+# Same module as Discord's /ask (src.llm.provider); these tests stub it so no
 # API call is ever made and check the HTTP contract the Live page relies on.
 
 
@@ -647,13 +648,13 @@ def live_transcript(tmp_path, monkeypatch):
 
 @pytest.fixture
 def ask_configured(monkeypatch):
-    monkeypatch.setattr(web_app.claude, "configured", lambda: True)
+    monkeypatch.setattr(web_app.provider, "configured", lambda: True)
 
 
 def _fake_ask(calls, answer="They decided to head for the keep."):
     def ask(transcript, question, header="", note_dirs=()):
         calls.append((transcript, question))
-        return web_app.claude.AskResult(
+        return web_app.provider.AskResult(
             answer=answer,
             model="claude-opus-5-5",
             input_tokens=120,
@@ -685,12 +686,12 @@ def test_ask_rejects_oversized_question(client, live_transcript, ask_configured)
 
 
 def test_ask_without_key_is_503(client, live_transcript, monkeypatch):
-    monkeypatch.setattr(web_app.claude, "configured", lambda: False)
+    monkeypatch.setattr(web_app.provider, "configured", lambda: False)
     called = []
-    monkeypatch.setattr(web_app.claude, "ask", _fake_ask(called))
+    monkeypatch.setattr(web_app.provider, "ask", _fake_ask(called))
     r = client.post("/ask", json={"question": "Why?"}, headers=_XHR)
     assert r.status_code == 503
-    assert r.get_json()["error"] == web_app.claude.NO_KEY_MSG
+    assert r.get_json()["error"] == web_app.provider.not_configured_message()
     assert called == []  # never reaches the API without a key
 
 
@@ -724,7 +725,7 @@ def test_ask_answers_from_the_live_session(
     client, live_transcript, ask_configured, monkeypatch
 ):
     calls = []
-    monkeypatch.setattr(web_app.claude, "ask", _fake_ask(calls))
+    monkeypatch.setattr(web_app.provider, "ask", _fake_ask(calls))
     r = client.post("/ask", json={"question": "Where next?"}, headers=_XHR)
     assert r.status_code == 200
     body = r.get_json()
@@ -739,11 +740,11 @@ def test_ask_answers_from_the_live_session(
         "notes_used": [],
         "recordings": 1,
     }
-    # The model saw the session file with 12-hour line stamps.
-    from src.utils.timefmt import for_model
+    # The model saw the session file with 12-hour line stamps, no ids.
+    from src.sessions import model_text
 
     assert calls == [
-        (for_model(live_transcript.read_text(encoding="utf-8")), "Where next?")
+        (model_text(live_transcript.read_text(encoding="utf-8")), "Where next?")
     ]
 
 
@@ -753,7 +754,7 @@ def test_ask_picks_the_newest_session_by_default(
     newer = live_transcript.parent / "2026-10-21_09-00-00.txt"
     newer.write_text("[09:00:01] A (B) [1]: newer session\n", encoding="utf-8")
     calls = []
-    monkeypatch.setattr(web_app.claude, "ask", _fake_ask(calls))
+    monkeypatch.setattr(web_app.provider, "ask", _fake_ask(calls))
     r = client.post("/ask", json={"question": "q"}, headers=_XHR)
     assert r.status_code == 200
     assert r.get_json()["filename"] == newer.name
@@ -762,7 +763,7 @@ def test_ask_picks_the_newest_session_by_default(
 
 def test_ask_named_transcript(client, live_transcript, ask_configured, monkeypatch):
     calls = []
-    monkeypatch.setattr(web_app.claude, "ask", _fake_ask(calls))
+    monkeypatch.setattr(web_app.provider, "ask", _fake_ask(calls))
     r = client.post(
         "/ask",
         json={"question": "q", "filename": live_transcript.name},
@@ -776,25 +777,25 @@ def test_ask_failed_maps_to_502_with_user_message(
     client, live_transcript, ask_configured, monkeypatch
 ):
     def boom(transcript, question, **kw):
-        raise web_app.claude.AskFailed(web_app.claude.RATE_LIMIT_MSG)
+        raise web_app.provider.AskFailed(RATE_LIMIT_MSG)
 
-    monkeypatch.setattr(web_app.claude, "ask", boom)
+    monkeypatch.setattr(web_app.provider, "ask", boom)
     r = client.post("/ask", json={"question": "q"}, headers=_XHR)
     assert r.status_code == 502
-    assert r.get_json()["error"] == web_app.claude.RATE_LIMIT_MSG
+    assert r.get_json()["error"] == RATE_LIMIT_MSG
 
 
 def test_ask_empty_answer_is_502(client, live_transcript, ask_configured, monkeypatch):
-    monkeypatch.setattr(web_app.claude, "ask", _fake_ask([], answer="  "))
+    monkeypatch.setattr(web_app.provider, "ask", _fake_ask([], answer="  "))
     r = client.post("/ask", json={"question": "q"}, headers=_XHR)
     assert r.status_code == 502
-    assert r.get_json()["error"] == web_app.claude.EMPTY_MSG
+    assert r.get_json()["error"] == web_app.provider.EMPTY_MSG
 
 
 def test_live_data_reports_ask_configured(client, monkeypatch):
-    monkeypatch.setattr(web_app.claude, "configured", lambda: False)
+    monkeypatch.setattr(web_app.provider, "configured", lambda: False)
     assert client.get("/live/data").get_json()["ask_configured"] is False
-    monkeypatch.setattr(web_app.claude, "configured", lambda: True)
+    monkeypatch.setattr(web_app.provider, "configured", lambda: True)
     assert client.get("/live/data").get_json()["ask_configured"] is True
 
 
@@ -908,9 +909,9 @@ def test_ask_covers_every_recording_of_the_session(
 
     def ask(transcript, question, header="", note_dirs=()):
         seen.update(transcript=transcript, header=header)
-        return web_app.claude.AskResult(answer="ok", model="m")
+        return web_app.provider.AskResult(answer="ok", model="m")
 
-    monkeypatch.setattr(web_app.claude, "ask", ask)
+    monkeypatch.setattr(web_app.provider, "ask", ask)
     r = client.post("/ask", json={"question": "q"}, headers=_XHR)
     assert r.status_code == 200
     assert r.get_json()["recordings"] == 2
@@ -953,7 +954,7 @@ def test_ask_records_answered_questions(
 ):
     from src import question_log
 
-    monkeypatch.setattr(web_app.claude, "ask", _fake_ask([]))
+    monkeypatch.setattr(web_app.provider, "ask", _fake_ask([]))
     client.post("/ask", json={"question": "Where next?"}, headers=_XHR)
     (e,) = question_log.read()
     assert e["source"] == "dashboard" and e["status"] == "answered"
@@ -967,23 +968,23 @@ def test_ask_records_answered_questions(
 def test_ask_records_failures_and_rejections(client, live_transcript, monkeypatch):
     from src import question_log
 
-    monkeypatch.setattr(web_app.claude, "configured", lambda: False)
+    monkeypatch.setattr(web_app.provider, "configured", lambda: False)
     client.post("/ask", json={"question": "no key"}, headers=_XHR)
-    monkeypatch.setattr(web_app.claude, "configured", lambda: True)
+    monkeypatch.setattr(web_app.provider, "configured", lambda: True)
 
     def boom(transcript, question, **kw):
-        raise web_app.claude.AskFailed(web_app.claude.RATE_LIMIT_MSG)
+        raise web_app.provider.AskFailed(RATE_LIMIT_MSG)
 
-    monkeypatch.setattr(web_app.claude, "ask", boom)
+    monkeypatch.setattr(web_app.provider, "ask", boom)
     client.post("/ask", json={"question": "limited"}, headers=_XHR)
     failed, rejected = question_log.read()
     assert (failed["status"], failed["error"]) == (
         "failed",
-        web_app.claude.RATE_LIMIT_MSG,
+        RATE_LIMIT_MSG,
     )
     assert (rejected["status"], rejected["error"]) == (
         "rejected",
-        web_app.claude.NO_KEY_MSG,
+        web_app.provider.not_configured_message(),
     )
 
 
@@ -1075,11 +1076,11 @@ def test_lore_ask_answers_from_notes_and_records_history(
 
     def ask_lore(question, header="", note_dirs=(), include_gm=False):
         seen.update(header=header, dirs=list(note_dirs), include_gm=include_gm)
-        return web_app.claude.AskResult(
+        return web_app.provider.AskResult(
             answer="A fixer, choom.", model="m", notes_used=["npcs"]
         )
 
-    monkeypatch.setattr(web_app.claude, "ask_lore", ask_lore)
+    monkeypatch.setattr(web_app.provider, "ask_lore", ask_lore)
     r = client.post(
         "/lore/ask", json={"question": "who is kane?", "campaign": "rtnc"}, headers=_XHR
     )
@@ -1106,9 +1107,9 @@ def test_lore_ask_passes_the_gm_toggle(
 
     def ask_lore(question, **kw):
         seen.update(kw)
-        return web_app.claude.AskResult(answer="x", model="m")
+        return web_app.provider.AskResult(answer="x", model="m")
 
-    monkeypatch.setattr(web_app.claude, "ask_lore", ask_lore)
+    monkeypatch.setattr(web_app.provider, "ask_lore", ask_lore)
     client.post(
         "/lore/ask",
         json={"question": "q", "campaign": "rtnc", "include_gm": True},
@@ -1185,7 +1186,7 @@ def _blocked(*a, **k):
     from src.llm import guard
 
     v = guard.Verdict(False, "strategy", "That asks for tactics.", model="g")
-    raise web_app.claude.AskBlocked(guard.block_message(v), v)
+    raise web_app.provider.AskBlocked(guard.block_message(v), v)
 
 
 def test_blocked_dashboard_question_is_a_200_refusal_and_recorded(
@@ -1193,7 +1194,7 @@ def test_blocked_dashboard_question_is_a_200_refusal_and_recorded(
 ):
     from src import question_log
 
-    monkeypatch.setattr(web_app.claude, "ask", _blocked)
+    monkeypatch.setattr(web_app.provider, "ask", _blocked)
     r = client.post(
         "/ask", json={"question": "best approach to beat this?"}, headers=_XHR
     )
@@ -1214,7 +1215,7 @@ def test_blocked_dashboard_question_is_a_200_refusal_and_recorded(
 def test_blocked_lore_question(client, lore_library, ask_configured, monkeypatch):
     from src import question_log
 
-    monkeypatch.setattr(web_app.claude, "ask_lore", _blocked)
+    monkeypatch.setattr(web_app.provider, "ask_lore", _blocked)
     r = client.post(
         "/lore/ask", json={"question": "best build?", "campaign": "rtnc"}, headers=_XHR
     )

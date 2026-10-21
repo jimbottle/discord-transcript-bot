@@ -305,11 +305,11 @@ def test_ask_context_gives_the_model_12_hour_times(lib, tmp_path):
     )
     _rec(t, "2026-10-20_20-15-26", "[20:16:00] A (B) [1]: second\n", lib, guild_id=111)
     text, *_ = sessions.ask_context(a, lib)
-    assert "[7:40 PM] A (B) [1]: first" in text
+    assert "[7:40 PM] A (B): first" in text  # 12-hour, no Discord id
     assert "--- recording restarted at 8:15 PM ---" in text
     assert "19:40" not in text and "20:15" not in text
-    # the files themselves keep 24-hour stamps
-    assert a.read_text().startswith("[19:40:00]")
+    # the files themselves keep 24-hour stamps and ids
+    assert a.read_text().startswith("[19:40:00] A (B) [1]:")
 
 
 # ── retag (dashboard tag editor) ─────────────────────────────────────
@@ -391,3 +391,16 @@ def test_latest_for_guild_picks_the_newest_tagged_recording(lib, tmp_path):
     assert sessions.latest_for_guild(333, tmp_path) is None
     assert sessions.latest_for_guild(None, tmp_path) is None
     assert sessions.latest_for_guild(111, tmp_path / "missing") is None
+
+
+def test_model_text_drops_discord_ids_and_uses_12_hour_times():
+    t = (
+        "[21:12:05] Reiko Tanaka (Gus) [254468368969629697]: I'll call Fixie [later].\n"
+        "--- recording restarted at 20:15:26 ---\n"
+        "an unrecognised line [123]: kept as is\n"
+    )
+    assert sessions.model_text(t) == (
+        "[9:12 PM] Reiko Tanaka (Gus): I'll call Fixie [later].\n"
+        "--- recording restarted at 8:15 PM ---\n"
+        "an unrecognised line [123]: kept as is\n"
+    )

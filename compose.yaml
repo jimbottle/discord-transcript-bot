@@ -23,6 +23,11 @@ services:
       # dashboard has no login. Never publish it as "5001:5001".
       DASHBOARD_HOST: 0.0.0.0
       PLAYER_MAP_FILE_PATH: /app/player_map.yml
+      # /ask on a local model (the default): Ollama on the host. Inside the
+      # container "localhost" is the container itself.
+      LOCAL_LLM_URL: ${LOCAL_LLM_URL:-http://host.docker.internal:11434/v1}
+      ASK_PROVIDER:
+      LOCAL_LLM_MODEL:
       # Secrets: passed through from the host only when set there (op run),
       # so an unset one never overrides .env.
       ANTHROPIC_API_KEY:
@@ -36,6 +41,9 @@ services:
       - ./.logs:/app/.logs
       - ./player_map.yml:/app/player_map.yml
       - models:/models
+    # host.docker.internal is built into Docker Desktop; on Linux this maps it.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
 volumes:

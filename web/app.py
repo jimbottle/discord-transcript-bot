@@ -33,7 +33,7 @@ from src import player_map_store  # noqa: E402
 # The Live page's ask box goes through the very module the bot's /ask uses,
 # so the prompt, the transcript cache and the error messages are identical
 # whether the question comes from Discord or from the dashboard.
-from src.llm import claude  # noqa: E402
+from src.llm import provider  # noqa: E402
 from src import question_log, sessions  # noqa: E402
 from src.utils import timefmt  # noqa: E402
 import time  # noqa: E402
@@ -239,7 +239,7 @@ def view_transcript(filename):
         filename=filename,
         entries=entries,
         raw=raw,
-        ask_configured=claude.configured(),
+        ask_configured=provider.configured(),
         session=session_info(filename),
         tag_choices=_tag_choices(),
         has_audio=has_captured_audio(filename),
@@ -265,7 +265,7 @@ def live_data():
     data = get_live_session()
     # Lets the Live page disable its ask box, with the reason, instead of
     # finding out on the first question.
-    data["ask_configured"] = claude.configured()
+    data["ask_configured"] = provider.configured()
     data["session"] = session_info(data["filename"])
     return jsonify(data)
 
@@ -315,9 +315,9 @@ def ask_session():
             **kw,
         )
 
-    if not claude.configured():
-        _log(question_log.REJECTED, error=claude.NO_KEY_MSG)
-        return jsonify({"error": claude.NO_KEY_MSG}), 503
+    if not provider.configured():
+        _log(question_log.REJECTED, error=provider.not_configured_message())
+        return jsonify({"error": provider.not_configured_message()}), 503
 
     # The whole session the file belongs to (every recording of that
     # campaign night), its header line and its note folders.
@@ -331,18 +331,18 @@ def ask_session():
 
     started = time.perf_counter()
     try:
-        result = claude.ask(transcript, question, header=header, note_dirs=note_dirs)
-    except claude.AskBlocked as e:
+        result = provider.ask(transcript, question, header=header, note_dirs=note_dirs)
+    except provider.AskBlocked as e:
         _log(question_log.BLOCKED, started, error=e.user_message, verdict=e.verdict)
         return jsonify(_blocked_body(question, e))
-    except claude.AskFailed as e:
+    except provider.AskFailed as e:
         app.logger.error("ask failed: %s (%r)", e.user_message, e.__cause__)
         _log(question_log.FAILED, started, error=e.user_message)
         return jsonify({"error": e.user_message}), 502
     answer = result.answer.strip()
     if not answer:
-        _log(question_log.FAILED, started, error=claude.EMPTY_MSG, result=result)
-        return jsonify({"error": claude.EMPTY_MSG}), 502
+        _log(question_log.FAILED, started, error=provider.EMPTY_MSG, result=result)
+        return jsonify({"error": provider.EMPTY_MSG}), 502
     _log(question_log.ANSWERED, started, answer=answer, result=result)
     app.logger.info(
         "ask answered by %s (input=%s, cached=%s, output=%s, notes=%s)",
@@ -422,7 +422,7 @@ def _blocked_body(question, e):
 @app.route("/lore")
 def lore():
     """Campaign Q&A from library notes only. Dashboard-only on purpose: no
-    Discord command reaches claude.ask_lore."""
+    Discord command reaches provider.ask_lore."""
     lib = sessions_library()
     campaigns = sorted(lib.campaigns.values(), key=lambda c: c.name.lower())
     chosen = request.args.get("campaign") or next(
@@ -444,7 +444,7 @@ def lore():
         group_name=lib.name("group", c.group) if c else None,
         notes=all_notes,
         table_count=len(table_notes),
-        ask_configured=claude.configured(),
+        ask_configured=provider.configured(),
     )
 
 
@@ -484,24 +484,24 @@ def lore_ask():
             **kw,
         )
 
-    if not claude.configured():
-        _log(question_log.REJECTED, error=claude.NO_KEY_MSG)
-        return jsonify({"error": claude.NO_KEY_MSG}), 503
+    if not provider.configured():
+        _log(question_log.REJECTED, error=provider.not_configured_message())
+        return jsonify({"error": provider.not_configured_message()}), 503
     started = time.perf_counter()
     try:
-        result = claude.ask_lore(
+        result = provider.ask_lore(
             question,
             header=sessions.campaign_header(lib, campaign_id),
             note_dirs=lib.note_dirs(game=c.game, group=c.group, campaign=c.id),
             include_gm=include_gm,
         )
-    except claude.AskBlocked as e:
+    except provider.AskBlocked as e:
         _log(question_log.BLOCKED, started, error=e.user_message, verdict=e.verdict)
         return jsonify(_blocked_body(question, e))
-    except claude.AskFailed as e:
+    except provider.AskFailed as e:
         status = (
             question_log.REJECTED
-            if e.user_message in (claude.NO_NOTES_MSG, claude.ONLY_GM_NOTES_MSG)
+            if e.user_message in (provider.NO_NOTES_MSG, provider.ONLY_GM_NOTES_MSG)
             else question_log.FAILED
         )
         _log(status, started, error=e.user_message)
@@ -510,8 +510,8 @@ def lore_ask():
         )
     answer = result.answer.strip()
     if not answer:
-        _log(question_log.FAILED, started, error=claude.EMPTY_MSG, result=result)
-        return jsonify({"error": claude.EMPTY_MSG}), 502
+        _log(question_log.FAILED, started, error=provider.EMPTY_MSG, result=result)
+        return jsonify({"error": provider.EMPTY_MSG}), 502
     _log(question_log.ANSWERED, started, answer=answer, result=result)
     return jsonify(
         {

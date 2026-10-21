@@ -1,6 +1,6 @@
 // "Ask about this session" box shared by the Live page and the transcript
 // viewer (see templates/_ask.html). Posts to /ask, which runs the same
-// Claude module as Discord's /ask. One question in flight at a time;
+// model provider as Discord's /ask (src/llm/provider.py). One question in flight at a time;
 // answers stack newest-first so a long session's Q&A stays readable.
 //
 // window.AskBox.setAvailability(reason) enables the box when `reason` is
@@ -58,7 +58,7 @@
     }
 
     const NO_KEY_REASON =
-        "ANTHROPIC_API_KEY is not set for the dashboard — start it with `make web` (reads op.env).";
+        "ASK_PROVIDER is anthropic but ANTHROPIC_API_KEY is not set for the dashboard. Start it with `make web` (reads op.env), or use a local model (ASK_PROVIDER=local).";
 
     function init() {
         const form = document.getElementById("ask-form");

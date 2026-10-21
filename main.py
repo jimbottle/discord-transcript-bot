@@ -13,7 +13,7 @@ from src.bot import command_errors
 from src.bot.helper import BotHelper
 from src.config.cliargs import CLIArgs
 from src import library, question_log, sessions
-from src.llm.claude import AskBlocked, AskFailed, ask as llm_ask
+from src.llm.provider import AskBlocked, AskFailed, ask as llm_ask
 from src.session_capture import scribe_notice
 from src.utils.answer import answer_budget, clean_answer, discord_messages
 from src.utils.discord_send import send_followups
@@ -26,8 +26,9 @@ from src.utils.voice import disconnect_targets
 load_dotenv()
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 PLAYER_MAP_FILE_PATH = os.getenv("PLAYER_MAP_FILE_PATH")
-# /ask is answered by Claude (src/llm/claude.py); the model and effort are
-# resolved there so main.py and src/bot/health.py cannot disagree.
+# /ask is answered by a local model or the Anthropic API (src/llm/provider.py);
+# the choice and the model are resolved there so main.py and
+# src/bot/health.py cannot disagree.
 # Discord hard-rejects messages longer than this many characters.
 DISCORD_MESSAGE_LIMIT = 2000
 # Discord's upload limit for a server without boosts (10 MB).
@@ -712,7 +713,7 @@ if __name__ == "__main__":
                 ephemeral=private,
             )
         except AskFailed as e:
-            # claude.ask has already chosen the message that fits the reason
+            # The backend has already chosen the message that fits the reason
             # (bad key, rate limit, out of credit, unreachable, refusal), so
             # pass it straight through rather than guessing here.
             logger.error(f"/ask failed: {e.user_message} ({e.__cause__!r})")

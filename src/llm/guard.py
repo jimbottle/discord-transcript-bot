@@ -13,9 +13,11 @@ Blocked:
 Allowed: recalling what happened or was said at the table, what the
 characters know, summaries, who is who, and how a game rule works.
 
-One small structured-output call to ``GUARD_MODEL`` (Claude Haiku 5.5 by
-default: it only classifies the question, a few hundred tokens). It runs
-inside ``claude.ask`` and ``claude.ask_lore``, so no caller can skip it.
+One small structured-output call (it only classifies the question, a few
+hundred tokens) on the same backend that answers: with a local model, the
+local model itself (``LOCAL_LLM_MODEL``, so no second model is loaded); with
+the Anthropic API, Claude Haiku 5.5. ``GUARD_MODEL`` overrides either. It
+runs inside both backends' ``ask`` and ``ask_lore``, so no caller can skip it.
 It **fails closed**: if the check itself cannot run, the question is not
 answered. The main prompts carry the same rule as a backstop.
 
@@ -101,8 +103,15 @@ def enabled() -> bool:
     )
 
 
-def model() -> str:
-    return os.getenv("GUARD_MODEL", "").strip() or DEFAULT_GUARD_MODEL
+def model(backend: str = "anthropic") -> str:
+    override = os.getenv("GUARD_MODEL", "").strip()
+    if override:
+        return override
+    if backend == "local":
+        from src.llm import local
+
+        return local.model()
+    return DEFAULT_GUARD_MODEL
 
 
 def _client(api_key: str) -> anthropic.Anthropic:
@@ -129,10 +138,30 @@ class GuardUnavailable(Exception):
 
 
 def check(
-    question: str, *, api_key: str, context: str = "", gm: bool = False
+    question: str,
+    *,
+    api_key: str = "",
+    context: str = "",
+    gm: bool = False,
+    backend: str = "anthropic",
 ) -> Verdict:
-    """Classify ``question``. Raises :class:`GuardUnavailable` when no
-    verdict could be produced; the caller fails closed on that."""
+    """Classify ``question`` on ``backend`` ("anthropic" or "local").
+    Raises :class:`GuardUnavailable` when no verdict could be produced; the
+    caller fails closed on that."""
+    if backend == "local":
+        from src.llm import local
+
+        system = GUARD_SYSTEM + (GM_MODE_NOTE if gm else "")
+        content = (f"{context}\n\n" if context else "") + "QUESTION:\n" + question
+        used_model = model("local")
+        try:
+            text, used_model, tokens_in, tokens_out = local.classify(
+                system, content, SCHEMA, model=used_model
+            )
+        except local.LocalError as e:
+            raise GuardUnavailable(str(e)) from e
+        return _parse(text, used_model, tokens_in, tokens_out)
+
     request = build_request(question, context=context, gm=gm)
     try:
         response = _client(api_key).messages.create(**request)
@@ -148,6 +177,18 @@ def check(
         for b in response.content
         if getattr(b, "type", None) == "text"
     )
+    usage = getattr(response, "usage", None)
+    return _parse(
+        text,
+        getattr(response, "model", None) or request["model"],
+        getattr(usage, "input_tokens", 0) or 0,
+        getattr(usage, "output_tokens", 0) or 0,
+    )
+
+
+def _parse(text: str, used_model, tokens_in: int, tokens_out: int) -> Verdict:
+    """A verdict from the classifier's JSON, normalised; GuardUnavailable if
+    it isn't one."""
     try:
         data = json.loads(text)
         allowed = bool(data["allowed"])
@@ -161,14 +202,13 @@ def check(
         allowed = False  # a named violation wins over a contradictory flag
     if not allowed and category == "ok":
         category = "strategy"  # a block needs a blocking category (roborev #6467)
-    usage = getattr(response, "usage", None)
     return Verdict(
         allowed=allowed,
         category=category,
         reason=reason,
-        model=getattr(response, "model", None) or request["model"],
-        input_tokens=getattr(usage, "input_tokens", 0) or 0,
-        output_tokens=getattr(usage, "output_tokens", 0) or 0,
+        model=used_model,
+        input_tokens=tokens_in,
+        output_tokens=tokens_out,
     )
 
 

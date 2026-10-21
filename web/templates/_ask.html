@@ -2,7 +2,8 @@
   Ask-about-this-session box. Included by live.html (follows the newest
   session, availability updated from each poll) and transcript.html (one
   fixed file, availability known at render time). Variables:
-    ask_configured  — bool, ANTHROPIC_API_KEY present in this process
+    ask_configured  — bool, provider.configured(): always true for a local
+                      model; the Anthropic provider needs its key
     ask_filename    — transcript to question; empty/None = newest session
     ask_static      — True when the page has no live poll to update it
     ask_empty       — True when the transcript has nothing to ask about yet
