@@ -638,16 +638,29 @@ if __name__ == "__main__":
                 _log(question_log.FAILED, started, error=empty, result=result)
                 await ctx.followup.send(empty)
                 return
-            # Full answer to the history; Discord only shows a clamped copy.
-            _log(question_log.ANSWERED, started, answer=result.answer, result=result)
-
             # clean_answer only caps the answer; a long /ask
             # question can still push the composed message past Discord's
             # hard limit. clamp_message is the unit-tested final guard.
             message = clamp_message(
                 f"**Q:** {question}\n\n{answer}", DISCORD_MESSAGE_LIMIT
             )
-            await ctx.followup.send(message)
+            # Record exactly once, after delivery is known (roborev #6459):
+            # the full answer goes to the history either way, Discord only
+            # shows a clamped copy, and a failed send is noted, not logged
+            # a second time as a FAILED question by the handler below.
+            try:
+                await ctx.followup.send(message)
+            except Exception as send_err:
+                _log(
+                    question_log.ANSWERED,
+                    started,
+                    answer=result.answer,
+                    result=result,
+                    error=f"answer not delivered to Discord: {send_err!r}",
+                )
+                logger.error(f"/ask answer could not be delivered: {send_err!r}")
+                return
+            _log(question_log.ANSWERED, started, answer=result.answer, result=result)
         except AskBlocked as e:
             # The GM check refused it (strategy, min-maxing, secrets). Polite
             # refusal; it went through the same deferred response, so

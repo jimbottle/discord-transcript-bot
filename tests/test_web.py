@@ -1231,3 +1231,41 @@ def test_questions_page_shows_blocked_entries(client):
     )
     body = client.get("/questions?status=blocked").get_data(as_text=True)
     assert "how do we win the fight?" in body and "GM check: strategy" in body
+
+
+def test_lore_history_query_hides_gm_answers_by_default(client):
+    from src import question_log
+
+    question_log.record(
+        source="dashboard-lore", question="spoiler", status="answered", include_gm=True
+    )
+    question_log.record(
+        source="dashboard-lore", question="safe", status="answered", include_gm=False
+    )
+    default = client.get(
+        "/questions/data?source=dashboard-lore&include_gm=false"
+    ).get_json()
+    assert [e["question"] for e in default] == ["safe"]
+    both = client.get("/questions/data?source=dashboard-lore").get_json()
+    assert [e["question"] for e in both] == ["safe", "spoiler"]
+
+
+def test_lore_gm_badge_follows_the_note_not_its_id(client, lore_library):
+    # roborev #6462: a campaign gm note overriding a group table note with
+    # the same id must still be badged GM only
+    group = lore_library / "groups" / "noah-gm" / "notes"
+    group.mkdir(parents=True)
+    (group / "gm-secrets.md").write_text(
+        "---\nid: gm-secrets\ntitle: Table version\nsummary: s\n---\nx\n"
+    )
+    body = client.get("/lore").get_data(as_text=True)
+    i = body.index("<strong>Secrets</strong>")
+    assert "GM only" in body[i : i + 120]
+    assert "Table version" not in body
+
+
+def test_lore_page_reloads_history_with_the_gm_filter(client, lore_library):
+    body = client.get("/lore").get_data(as_text=True)
+    assert 'data-history-query="source=dashboard-lore&campaign=rtnc"' in body
+    js = client.get("/static/ask.js").get_data(as_text=True)
+    assert '"&include_gm=false"' in js

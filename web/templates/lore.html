@@ -50,7 +50,7 @@
     <summary>{{ notes|length }} note{{ '' if notes|length == 1 else 's' }} available to the model</summary>
     <ul>
     {% for n in notes %}
-        <li><strong>{{ n.title }}</strong>{% if n.id not in table_ids %} <span class="qa-status">GM only</span>{% endif %}
+        <li><strong>{{ n.title }}</strong>{% if n.audience == 'gm' %} <span class="qa-status">GM only</span>{% endif %}
             <br><span class="search-meta">{{ n.summary }}</span></li>
     {% endfor %}
     </ul>

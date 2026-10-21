@@ -265,11 +265,13 @@ def _history_filters():
         v = request.args.get(name, "").strip()
         return v or None
 
+    gm = arg("include_gm")
     return {
         "session_key": arg("session"),
         "campaign": arg("campaign"),
         "source": arg("source"),
         "status": arg("status"),
+        "include_gm": (False if gm and gm.lower() in ("0", "false", "no") else None),
     }
 
 
@@ -334,7 +336,7 @@ def lore():
         game_name=lib.name("game", c.game) if c else None,
         group_name=lib.name("group", c.group) if c else None,
         notes=all_notes,
-        table_ids={n.id for n in table_notes},
+        table_count=len(table_notes),
         ask_configured=claude.configured(),
     )
 
@@ -392,7 +394,7 @@ def lore_ask():
     except claude.AskFailed as e:
         status = (
             question_log.REJECTED
-            if e.user_message == claude.NO_NOTES_MSG
+            if e.user_message in (claude.NO_NOTES_MSG, claude.ONLY_GM_NOTES_MSG)
             else question_log.FAILED
         )
         _log(status, started, error=e.user_message)

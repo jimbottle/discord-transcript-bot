@@ -176,17 +176,28 @@
         // per session key; answers added since stay on top.
         let historyKey = null;
         async function setSession(key) {
-            if (!key || key === historyKey) return;
+            key = key || null;
+            if (key === historyKey) return;
             historyKey = key;
+            if (!key) {  // untagged recording: drop the previous session's Q&A
+                answers.querySelectorAll(".qa-earlier").forEach(function (n) { n.remove(); });
+                return;
+            }
             loadHistory("session=" + encodeURIComponent(key));
         }
 
+        // Each load gets a token; a response for a superseded load is
+        // dropped, so a slow fetch can't append the previous session's Q&A
+        // after the next one cleared it (roborev #6459).
+        let historyToken = 0;
         async function loadHistory(query) {
+            const token = ++historyToken;
             answers.querySelectorAll(".qa-earlier").forEach(function (n) { n.remove(); });
             try {
                 const res = await fetch(form.dataset.historyUrl + "?limit=20&" + query);
-                if (!res.ok) return;
+                if (!res.ok || token !== historyToken) return;
                 const entries = await res.json();
+                if (token !== historyToken) return;
                 for (const e of entries) {  // newest first
                     if (e.status === "rejected") continue;
                     const isBlocked = e.status === "blocked";
@@ -212,8 +223,19 @@
             setSession: setSession,
             NO_KEY_REASON: NO_KEY_REASON,
         };
+        // Lore: answers that used GM-only notes are shown only while the GM
+        // box is ticked, so reopening the page never surfaces a spoiler
+        // (roborev #6462). The server filters; the box toggles the query.
+        const gmBox = document.getElementById("ask-include-gm");
+        function loreHistory() {
+            const q = form.dataset.historyQuery;
+            loadHistory(gmBox && gmBox.checked ? q : q + "&include_gm=false");
+        }
         if (form.dataset.session) setSession(form.dataset.session);
-        else if (form.dataset.historyQuery) loadHistory(form.dataset.historyQuery);
+        else if (form.dataset.historyQuery) {
+            loreHistory();
+            if (gmBox) gmBox.addEventListener("change", loreHistory);
+        }
 
         if (form.dataset.static === "true") {
             if (form.dataset.askConfigured !== "true") setAvailability(NO_KEY_REASON);

@@ -290,6 +290,10 @@ LORE_SYSTEM_PROMPT = (
     "campaign facts; you may add general knowledge of the game's published "
     "rules or setting if you label it as such. Be concise and direct." + TABLE_RULES
 )
+ONLY_GM_NOTES_MSG = (
+    "This campaign only has GM-only notes. Tick 'Include GM-only notes' to "
+    "ask about them."
+)
 NO_NOTES_MSG = (
     "This campaign has no reference notes yet, so there is nothing to answer from."
 )
@@ -327,6 +331,8 @@ def ask_lore(
         raise AskFailed(NO_KEY_MSG)
     notes = campaign.load_notes(note_dirs, include_gm=include_gm)
     if not notes:
+        if not include_gm and campaign.load_notes(note_dirs, include_gm=True):
+            raise AskFailed(ONLY_GM_NOTES_MSG)
         raise AskFailed(NO_NOTES_MSG)
     verdict = _gate(
         question, context=header.split("\n")[0] if header else "", gm=include_gm

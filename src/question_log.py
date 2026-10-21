@@ -148,6 +148,7 @@ def read(
     campaign: Optional[str] = None,
     source: Optional[str] = None,
     status: Optional[str] = None,
+    include_gm: Optional[bool] = None,
     limit: Optional[int] = None,
 ) -> list:
     """History entries, newest first, optionally filtered. Unreadable lines
@@ -175,6 +176,9 @@ def read(
         if source and e.get("source") != source:
             continue
         if status and e.get("status") != status:
+            continue
+        # include_gm=False: hide questions answered with GM-only notes.
+        if include_gm is False and e.get("include_gm"):
             continue
         out.append(e)
         if limit and len(out) >= limit:

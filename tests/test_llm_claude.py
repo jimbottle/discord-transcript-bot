@@ -539,3 +539,16 @@ def test_allowed_verdict_is_attached_to_the_result(monkeypatch):
 def test_both_system_prompts_carry_the_table_rules():
     assert claude.TABLE_RULES in claude.SYSTEM_PROMPT
     assert claude.TABLE_RULES in claude.LORE_SYSTEM_PROMPT
+
+
+def test_ask_lore_with_only_gm_notes_says_so(monkeypatch, tmp_path):
+    # roborev #6462: used to claim the campaign had no notes at all
+    (tmp_path / "secrets.md").write_text(
+        "---\nid: secrets\ntitle: S\nsummary: s\naudience: gm\n---\nTaka.\n"
+    )
+    client = _use(monkeypatch, _FakeClient(_response("x")))
+    with pytest.raises(claude.AskFailed) as e:
+        claude.ask_lore("q", note_dirs=[tmp_path])
+    assert e.value.user_message == claude.ONLY_GM_NOTES_MSG
+    assert client.calls == []
+    assert claude.ask_lore("q", note_dirs=[tmp_path], include_gm=True).answer == "x"

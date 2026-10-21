@@ -112,12 +112,14 @@ def test_game_voice_defaults_override_and_off(tmp_path):
         "games:\n"
         "  cyberpunk-red: {name: Cyberpunk RED}\n"
         "  dnd-5e: {name: D&D 5e, voice: ''}\n"
+        "  nulled: {name: Nulled, voice: }\n"
         "  custom: {name: Custom, voice: Speak like a ship's log.}\n"
         "  unknown: {name: Unknown}\n"
     )
     games = library.load(tmp_path).games
     assert games["cyberpunk-red"].voice == library.DEFAULT_VOICES["cyberpunk-red"]
     assert games["dnd-5e"].voice == ""
+    assert games["nulled"].voice == ""  # roborev #6459: was the string "None"
     assert games["custom"].voice == "Speak like a ship's log."
     assert games["unknown"].voice == ""
 

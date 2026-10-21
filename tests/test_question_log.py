@@ -104,3 +104,27 @@ def test_record_never_raises(monkeypatch, tmp_path):
     assert (
         question_log.record(source="discord", question="q", status="answered") is None
     )
+
+
+def test_include_gm_false_hides_gm_note_answers():
+    # roborev #6462: Lore history must not resurface spoiler answers
+    question_log.record(
+        source="dashboard-lore",
+        question="spoiler",
+        status="answered",
+        campaign="rtnc",
+        include_gm=True,
+    )
+    question_log.record(
+        source="dashboard-lore",
+        question="safe",
+        status="answered",
+        campaign="rtnc",
+        include_gm=False,
+    )
+    question_log.record(source="discord", question="no flag", status="answered")
+    assert [e["question"] for e in question_log.read(include_gm=False)] == [
+        "no flag",
+        "safe",
+    ]
+    assert len(question_log.read()) == 3

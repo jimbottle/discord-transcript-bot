@@ -192,7 +192,11 @@ def load(root: Optional[Path] = None) -> Library:
             id=i,
             name=str(b.get("name") or i),
             voice=(
-                str(b["voice"]).strip() if "voice" in b else DEFAULT_VOICES.get(i, "")
+                # absent -> built-in default; present but empty or null
+                # (`voice:` / `voice: ~` / `voice: ""`) -> off (roborev #6459)
+                (str(b["voice"]).strip() if b["voice"] is not None else "")
+                if "voice" in b
+                else DEFAULT_VOICES.get(i, "")
             ),
         ),
     )
