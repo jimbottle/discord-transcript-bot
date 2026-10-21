@@ -47,6 +47,10 @@ cp -rf source dest          # NOT: cp -r source dest
 - `apt-get` - use `-y` flag
 - `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
 
+## Secrets
+
+Every credential an agent uses (API keys, tokens, DSNs, OAuth secrets, webhook URLs) lives in **1Password**; local `.env` files, CI secrets, and server env files are derived copies, never the source of truth. Tracked files carry env var **names** and `op://<vault>/<item>/<field>` references only. Load secrets at run time with `op run --env-file=op.env -- <cmd>` or `op read`; never print, echo, or paste a value. The Secrets section of `CLAUDE.md` holds this repo's credential inventory.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:7510c1e2 -->
 ## Beads Issue Tracker
 

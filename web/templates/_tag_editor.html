@@ -1,0 +1,46 @@
+{#
+  Session-tag editor for one recording. Variables: filename, session
+  (session_info dict), tag_choices (from app._tag_choices). Needs
+  static/tag-editor.js on the page.
+#}
+<details class="tag-editor">
+    <summary>Edit campaign / game / group</summary>
+    <form class="tag-form" data-url="{{ url_for('retag_transcript', filename=filename) }}">
+        <div class="tag-fields">
+            <label>Campaign
+                <select name="campaign">
+                    <option value="">— none —</option>
+                    {% for c in tag_choices.campaigns %}
+                    <option value="{{ c.id }}" data-group="{{ c.group }}" data-game="{{ c.game }}"
+                        {% if session.campaign_id == c.id %}selected{% endif %}>{{ c.name }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>Game
+                <select name="game">
+                    <option value="">— none —</option>
+                    {% for g in tag_choices.games %}
+                    <option value="{{ g.id }}" {% if session.game_id == g.id %}selected{% endif %}>{{ g.name }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>Group
+                <select name="group">
+                    <option value="">— none —</option>
+                    {% for g in tag_choices.groups %}
+                    <option value="{{ g.id }}" {% if session.group_id == g.id %}selected{% endif %}>{{ g.name }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+        </div>
+        <div class="ask-actions">
+            <button type="submit">Save</button>
+            {% if session.recordings and session.recordings > 1 %}
+            <label class="inline-check"><input type="checkbox" name="whole_session" checked>
+                Apply to all {{ session.recordings }} recordings of this session</label>
+            {% endif %}
+            <span class="tag-status search-meta" aria-live="polite"></span>
+        </div>
+        <p class="search-meta">Choosing a campaign fills in its game and group. Changing the campaign moves the recording to that campaign's session for the same night.</p>
+    </form>
+</details>

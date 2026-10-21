@@ -5,15 +5,16 @@ import time
 from datetime import datetime
 
 import discord
-import ollama
 import yaml
 from dotenv import load_dotenv
 
 from src.bot.helper import BotHelper
 from src.config.cliargs import CLIArgs
-from src.config.ollama_config import get_ask_model
+from src import library, question_log, sessions
+from src.llm.claude import AskBlocked, AskFailed, ask as llm_ask
 from src.session_capture import scribe_notice
-from src.utils.answer import clamp_message, clean_ollama_answer
+from src.utils.answer import answer_budget, clean_answer, discord_messages
+from src.utils.discord_send import send_followups
 from src.utils.commandline import CommandLine
 from src.utils.pdf_generator import pdf_generator
 from src.utils.voice import disconnect_targets
@@ -21,10 +22,8 @@ from src.utils.voice import disconnect_targets
 load_dotenv()
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 PLAYER_MAP_FILE_PATH = os.getenv("PLAYER_MAP_FILE_PATH")
-# Model used by /ask. Resolved via the shared resolver (empty/unset env
-# → default) so main.py and src/bot/health.py can never disagree about
-# which model /ask actually uses.
-ASK_OLLAMA_MODEL = get_ask_model()
+# /ask is answered by Claude (src/llm/claude.py); the model and effort are
+# resolved there so main.py and src/bot/health.py cannot disagree.
 # Discord hard-rejects messages longer than this many characters.
 DISCORD_MESSAGE_LIMIT = 2000
 
@@ -85,6 +84,19 @@ if __name__ == "__main__":
     configure_logging()
     loop = asyncio.get_event_loop()
 
+    # `kill -USR1 <pid>` writes a sampled all-thread stack dump to .logs/ —
+    # the no-root way to name the thread behind a CPU spin
+    # (discord-transcript-bot-309). Must run on the main thread.
+    from src.utils.thread_dump import install_signal_handler
+
+    install_signal_handler(directory=".logs")
+
+    # Guarded workarounds for the pinned Pycord voice-receive branch; each
+    # skips itself with a warning if upstream has changed shape.
+    from src.bot.pycord_patches import apply_all as apply_pycord_patches
+
+    apply_pycord_patches()
+
     from src.bot.volo_bot import VoloBot
 
     bot = VoloBot(loop)
@@ -93,18 +105,9 @@ if __name__ == "__main__":
     # uptime during the restart→on_ready window. Best-effort, never raises.
     bot._write_runtime_state()
 
-    @bot.event
-    async def on_voice_state_update(member, before, after):
-        if member.id == bot.user.id:
-            # If the bot left the "before" channel
-            if after.channel is None:
-                guild_id = before.channel.guild.id
-                helper = bot.guild_to_helper.get(guild_id, None)
-                if helper:
-                    helper.set_vc(None)
-                    bot.guild_to_helper.pop(guild_id, None)
-
-                bot._close_and_clean_sink_for_guild(guild_id)
+    # NOTE: do not register on_voice_state_update here with @bot.event —
+    # that REPLACES VoloBot.on_voice_state_update (bot-left cleanup +
+    # dashboard roster refresh). Use @bot.listen() for any extra handler.
 
     @bot.slash_command(name="connect", description="Join your voice channel.")
     async def connect(ctx: discord.context.ApplicationContext):
@@ -216,7 +219,13 @@ if __name__ == "__main__":
                 "Already recording. Can't run two taps at once.", ephemeral=True
             )
             return
-        bot.start_recording(ctx)
+        if not bot.start_recording(ctx):
+            await ctx.respond(
+                "Couldn't start recording — the transcriber failed to start. "
+                "Check the bot logs, then `/disconnect`, `/connect` and try again.",
+                ephemeral=True,
+            )
+            return
         message = (
             "Recording. Every word in this channel is being transcribed in realtime."
         )
@@ -564,91 +573,125 @@ if __name__ == "__main__":
 
         whisper_sink = bot.guild_whisper_sinks.get(guild_id, None)
 
-        # Try to read the session transcript file
-        transcript_text = None
+        # The whole session, not just this recording: after a bot restart the
+        # earlier recordings of the same campaign night are joined in front
+        # (src/sessions.py). Plus the session's header and note folders.
+        transcript_text, header, note_dirs = None, "", []
         if (
             whisper_sink
             and hasattr(whisper_sink, "session_file")
             and os.path.exists(whisper_sink.session_file)
         ):
-            with open(whisper_sink.session_file, "r", encoding="utf-8") as f:
-                transcript_text = f.read()
+            transcript_text, header, note_dirs, _files = sessions.ask_context(
+                whisper_sink.session_file
+            )
+
+        session_file = getattr(whisper_sink, "session_file", None)
+        source = "discord-public" if public else "discord"
+
+        def _log(status, started=None, **kw):
+            question_log.record(
+                source=source,
+                question=question,
+                status=status,
+                asker=getattr(ctx.author, "display_name", None) or str(ctx.author),
+                asker_id=getattr(ctx.author, "id", None),
+                guild_id=guild_id,
+                transcript_path=session_file,
+                latency_s=(time.perf_counter() - started) if started else None,
+                **kw,
+            )
 
         if not transcript_text or not transcript_text.strip():
-            await ctx.respond(
-                "No transcript data in the current session yet. Start recording first.",
-                ephemeral=True,
+            no_data = (
+                "No transcript data in the current session yet. Start recording first."
             )
+            _log(question_log.REJECTED, error=no_data)
+            await ctx.respond(no_data, ephemeral=True)
             return
 
         # ephemeral=not public: /ask is private to the asker,
-        # /ask-public posts the answer to the whole channel. The
-        # followups below inherit this ephemerality from the defer.
-        await ctx.defer(ephemeral=not public)
+        # /ask-public posts the answer to the whole channel. Only the first
+        # follow-up inherits the defer's visibility, so every send below
+        # passes it explicitly (send_followups; roborev #6486).
+        private = not public
+        await ctx.defer(ephemeral=private)
 
+        started = time.perf_counter()
         try:
-            response = ollama.chat(
-                model=ASK_OLLAMA_MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are an assistant that answers questions about a voice chat transcript. Be concise and direct. Only reference what's actually in the transcript. If the answer isn't in the transcript, say so.",
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Here is the transcript:\n\n{transcript_text}\n\nQuestion: {question}",
-                    },
-                ],
-                # /ask wants a short grounded answer, not chain-of-thought.
-                # think=False disables native thinking (Gemma 4 defaults it
-                # on); clean_ollama_answer strips inline <think> for models
-                # that ignore it. num_predict caps latency — Discord
-                # truncates at ~1900 chars anyway. temperature=0 keeps
-                # answers deterministic and transcript-grounded AND mirrors
-                # the local-models bench harness (bench.py runs think=False,
-                # num_predict=512, temperature=0) so a model that scores
-                # well there behaves the same here.
-                think=False,
-                options={"num_predict": 512, "temperature": 0},
+            # llm_ask is blocking and can take tens of seconds, so it must
+            # not run on the event loop — that would stall voice receive and
+            # the gateway heartbeat, not just this command.
+            result = await asyncio.to_thread(
+                llm_ask,
+                transcript_text,
+                question,
+                header=header,
+                note_dirs=note_dirs,
+                max_chars=answer_budget(question),
             )
-            answer = clean_ollama_answer(response["message"]["content"])
+            # No truncation: anything past Discord's limit is split below.
+            answer = clean_answer(result.answer)
+            logger.info(
+                f"/ask answered by {result.model} (input={result.input_tokens}, "
+                f"cached={result.cached_tokens}, output={result.output_tokens}, "
+                f"rounds={result.rounds}, notes={result.notes_used or '-'})"
+            )
 
             if not answer:
-                await ctx.followup.send(
-                    "The model returned no answer (it may have produced only "
-                    "internal reasoning). Try rephrasing, or set "
-                    "`ASK_OLLAMA_MODEL` to a non-reasoning model."
-                )
+                empty = "The model returned no answer. Try rephrasing the question."
+                _log(question_log.FAILED, started, error=empty, result=result)
+                await send_followups(ctx, [empty], ephemeral=private)
                 return
-
-            # clean_ollama_answer only caps the answer; a long /ask
-            # question can still push the composed message past Discord's
-            # hard limit. clamp_message is the unit-tested final guard.
-            message = clamp_message(
-                f"**Q:** {question}\n\n{answer}", DISCORD_MESSAGE_LIMIT
+            # The model was given a budget (answer_budget) so this is
+            # normally one message; if it ran long, post the rest as
+            # follow-ups instead of cutting it off.
+            messages = discord_messages(question, answer, DISCORD_MESSAGE_LIMIT)
+            if len(messages) > 1:
+                logger.warning(
+                    f"/ask answer ran {len(answer)} chars (budget "
+                    f"{answer_budget(question)}); sent as {len(messages)} messages"
+                )
+            # Record exactly once, after delivery is known (roborev #6459):
+            # the full answer goes to the history either way, and a failed
+            # send is noted, not logged a second time as a FAILED question
+            # by the handler below.
+            try:
+                await send_followups(ctx, messages, ephemeral=private)
+            except Exception as send_err:
+                _log(
+                    question_log.ANSWERED,
+                    started,
+                    answer=result.answer,
+                    result=result,
+                    error=f"answer not delivered to Discord: {send_err!r}",
+                )
+                logger.error(f"/ask answer could not be delivered: {send_err!r}")
+                return
+            _log(question_log.ANSWERED, started, answer=result.answer, result=result)
+        except AskBlocked as e:
+            # The GM check refused it (strategy, min-maxing, secrets). Polite
+            # refusal; it went through the same deferred response, so
+            # /ask-public refusals are visible like answers would be.
+            _log(question_log.BLOCKED, started, error=e.user_message, verdict=e.verdict)
+            await send_followups(
+                ctx,
+                discord_messages(question, e.user_message, DISCORD_MESSAGE_LIMIT),
+                ephemeral=private,
             )
-            await ctx.followup.send(message)
+        except AskFailed as e:
+            # claude.ask has already chosen the message that fits the reason
+            # (bad key, rate limit, out of credit, unreachable, refusal), so
+            # pass it straight through rather than guessing here.
+            logger.error(f"/ask failed: {e.user_message} ({e.__cause__!r})")
+            _log(question_log.FAILED, started, error=e.user_message)
+            await send_followups(ctx, [e.user_message], ephemeral=private)
         except Exception as e:
-            # An ollama client older than 0.5.x rejects the think= kwarg
-            # with `TypeError: chat() got an unexpected keyword argument
-            # 'think'`. Special-case ONLY that exact message so an
-            # unrelated TypeError elsewhere in the block isn't
-            # misattributed to the client version.
-            if isinstance(
-                e, TypeError
-            ) and "unexpected keyword argument 'think'" in str(e):
-                logger.error(f"Ollama client error: {e}")
-                await ctx.followup.send(
-                    "The Ollama Python client is too old for `/ask` "
-                    "(needs the `think` parameter). Upgrade it: "
-                    "`pip install -U 'ollama>=0.5.1'`.\n"
-                    f"`{e}`"
-                )
-            else:
-                logger.error(f"Ollama error: {e}")
-                await ctx.followup.send(
-                    f"Failed to query the model. Make sure Ollama is running.\n`{e}`"
-                )
+            logger.exception("/ask failed unexpectedly")
+            _log(question_log.FAILED, started, error=f"unexpected: {e!r}")
+            await send_followups(
+                ctx, [f"Failed to query the model.\n`{e}`"], ephemeral=private
+            )
 
     @bot.slash_command(
         name="ask",
@@ -690,6 +733,39 @@ if __name__ == "__main__":
     ):
         await _run_ask(ctx, question, server, public=True)
 
+    @bot.slash_command(
+        name="session",
+        description="Show which group, game, campaign and session this recording is tagged with.",
+    )
+    async def session_info(ctx: discord.context.ApplicationContext):
+        sink = bot.guild_whisper_sinks.get(ctx.guild_id)
+        path = getattr(sink, "session_file", None)
+        if not path:
+            await ctx.respond(
+                "Not recording right now. Use /scribe first.", ephemeral=True
+            )
+            return
+        lib = library.load()
+        meta = sessions.read_meta(path)
+        files = [f for f in sessions.session_files(path) if f.exists()]
+        d = sessions.describe(lib, meta, max(1, len(files)))
+        if not d["tagged"] or not d.get("campaign"):
+            await ctx.respond(
+                "This recording isn't tied to a campaign. Add this server to a group "
+                "in `library/library.yml` (or tag it later with "
+                "`scripts/tag_session.py`).",
+                ephemeral=True,
+            )
+            return
+        lines = [
+            f"**Group:** {d['group']}" + (f" (GM {d['gm']})" if d["gm"] else ""),
+            f"**Game:** {d['game']}",
+            f"**Campaign:** {d['campaign']}",
+            f"**Session:** {d['session_day']}"
+            + (f" · {d['recordings']} recordings" if d["recordings"] > 1 else ""),
+        ]
+        await ctx.respond("\n".join(lines), ephemeral=True)
+
     @bot.slash_command(name="help", description="Show available commands.")
     async def help(ctx: discord.context.ApplicationContext):
         embed_fields = [
@@ -711,6 +787,11 @@ if __name__ == "__main__":
             discord.EmbedField(
                 name="/ask-public",
                 value="Ask about the transcript (answer shown to everyone).",
+                inline=True,
+            ),
+            discord.EmbedField(
+                name="/session",
+                value="Show the group, game, campaign and session being recorded.",
                 inline=True,
             ),
             discord.EmbedField(
@@ -744,9 +825,8 @@ if __name__ == "__main__":
     @bot.slash_command(name="health", description="Show system health status.")
     async def health(ctx: discord.context.ApplicationContext):
         await ctx.defer(ephemeral=True)
-        # Reuse the bot's existing HealthCheck instance so any ollama process
-        # it spawned at startup stays tracked, and to avoid re-loading the
-        # whisper model on every /health invocation.
+        # Reuse the bot's existing HealthCheck instance to avoid re-loading
+        # the whisper model on every /health invocation.
         await asyncio.to_thread(bot.health.run_all, autofix=False, bot=bot)
         status = (
             "All systems operational."

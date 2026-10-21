@@ -2,8 +2,6 @@ import json
 import logging
 import os
 import shutil
-import subprocess
-import time
 
 import yaml
 
@@ -15,7 +13,6 @@ STATUS_FILE = os.path.join(os.getcwd(), ".logs", "health_status.json")
 class HealthCheck:
     def __init__(self):
         self.checks = {}  # name -> {ok: bool, message: str, critical: bool}
-        self._ollama_process = None
 
     def _write_status(self, phase: str, current_check: str = None):
         """Write current health status to the status file for the web UI."""
@@ -40,7 +37,7 @@ class HealthCheck:
         """Run all checks, return {name: {ok, message, critical}}.
 
         If autofix=True, checks will attempt to fix themselves before
-        declaring failure (e.g. start ollama, pull models, create dirs).
+        declaring failure (e.g. create missing directories).
         Status file is only written during autofix (startup) runs so that
         slash-command re-checks don't overwrite the startup state.
 
@@ -63,7 +60,7 @@ class HealthCheck:
         if autofix:
             self._write_status("initializing", "whisper_model")
 
-        self._check_whisper_model()
+        self._check_whisper_model(autofix=autofix)
         if autofix:
             self._write_status("initializing", "openai_api")
 
@@ -81,23 +78,9 @@ class HealthCheck:
 
         self._check_player_map()
         if autofix:
-            self._write_status("initializing", "ollama_server")
+            self._write_status("initializing", "ask_provider")
 
-        self._check_ollama_server(autofix=autofix)
-        if autofix:
-            self._write_status("initializing", "ollama_model")
-
-        # Only check model if server is up
-        if self.checks.get("ollama_server", {}).get("ok"):
-            self._check_ollama_model()
-        else:
-            # Non-critical: ollama is only used by /ask; bot must still start.
-            self._record(
-                "ollama_model",
-                False,
-                "Skipped — ollama server is not running",
-                critical=False,
-            )
+        self._check_ask_provider()
 
         if autofix:
             self._write_status("initializing", "discord_gateway")
@@ -197,7 +180,34 @@ class HealthCheck:
 
     # ── whisper_model ─────────────────────────────────────────────────
 
-    def _check_whisper_model(self):
+    def _check_whisper_model(self, autofix: bool = False):
+        # Weights download lazily inside get_backend() — ~3 GB on a cold
+        # cache — so first say whether that is about to happen. Otherwise
+        # the bot just looks hung for minutes with no indication why
+        # (discord-transcript-bot-56t). The provisional record is written to
+        # the status file during startup so the dashboard shows the
+        # download too, not only the terminal. Best-effort: probe() never
+        # raises and a probe failure must not fail the real check below.
+        cold = None
+        try:
+            from src.asr.model_cache import probe
+
+            state = probe()
+            if state is not None and not state.cached:
+                cold = state
+                logger.warning(state.cold_message())
+                # critical=False: this is an in-progress notice, not a
+                # failure — the dashboard renders ok=False+critical as a
+                # red ✗ and would alarm about the very download being
+                # announced. It is overwritten by the real verdict below.
+                self._record(
+                    "whisper_model", False, state.cold_message(), critical=False
+                )
+                if autofix:
+                    self._write_status("initializing", "whisper_model")
+        except Exception as e:  # noqa: BLE001 - diagnostics only
+            logger.debug("cold-cache probe skipped: %s", e)
+
         try:
             from src.asr.selection import get_backend
 
@@ -208,11 +218,13 @@ class HealthCheck:
             # caught (roborev #512).
             backend = get_backend()
             backend.healthcheck()
-            self._record(
-                "whisper_model",
-                True,
-                f"{backend.name}/{backend.model_id} loaded and responding",
-            )
+            message = f"{backend.name}/{backend.model_id} loaded and responding"
+            if cold is not None:
+                message += (
+                    " (weights were downloaded during this start; run "
+                    "`make prewarm` before the next session to skip the wait)"
+                )
+            self._record("whisper_model", True, message)
         except Exception as e:
             self._record("whisper_model", False, f"Whisper model failed: {e}")
 
@@ -312,128 +324,38 @@ class HealthCheck:
         except Exception as e:
             self._record("player_map", False, f"Invalid YAML: {e}", critical=False)
 
-    # ── ollama_server ─────────────────────────────────────────────────
+    # ── ask_provider ─────────────────────────────────────────────────
 
-    def _ollama_is_reachable(self) -> bool:
-        try:
-            import ollama
+    def _check_ask_provider(self):
+        """Whether `/ask` has an Anthropic key.
 
-            ollama.list()
-            return True
-        except Exception:
-            return False
+        Key presence only — deliberately no test call, which would spend
+        money on every bot start; a key that is present but rejected is
+        reported at question time by src/llm/claude. Never critical: `/ask`
+        is the only consumer and transcription must start without it.
+        """
+        from src import library
+        from src.llm import claude
 
-    def _check_ollama_server(self, autofix: bool = False):
-        # Non-critical: only /ask depends on ollama. Voice transcription works
-        # without it, so a host without ollama installed must still be able to
-        # start the bot.
-        if self._ollama_is_reachable():
-            self._record(
-                "ollama_server", True, "Ollama server reachable", critical=False
-            )
-            return
-
-        if not autofix:
-            self._record(
-                "ollama_server", False, "Ollama server not reachable", critical=False
-            )
-            return
-
-        # Auto-fix: start ollama serve if we haven't already
-        if self._ollama_process is None or self._ollama_process.poll() is not None:
-            logger.info("Health autofix: starting 'ollama serve'...")
+        if claude.configured():
             try:
-                self._ollama_process = subprocess.Popen(
-                    ["ollama", "serve"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            except FileNotFoundError:
-                self._record(
-                    "ollama_server",
-                    False,
-                    "ollama binary not found on PATH (only /ask needs it)",
-                    critical=False,
-                )
-                return
-            except Exception as e:
-                self._record(
-                    "ollama_server",
-                    False,
-                    f"Failed to start ollama: {e}",
-                    critical=False,
-                )
-                return
-
-        # Poll for readiness (up to ~10s)
-        for i in range(20):
-            time.sleep(0.5)
-            if self._ollama_is_reachable():
-                logger.info("Health autofix: ollama server is now reachable.")
-                self._record(
-                    "ollama_server",
-                    True,
-                    "Ollama server started via autofix",
-                    critical=False,
-                )
-                return
-
-        self._record(
-            "ollama_server",
-            False,
-            "Started ollama serve but it didn't become reachable in 10s",
-            critical=False,
-        )
-
-    # ── ollama_model ──────────────────────────────────────────────────
-
-    def _check_ollama_model(self):
-        # Shared resolver with main.py's /ask (single source of truth;
-        # empty ASK_OLLAMA_MODEL= falls back to the default) so the
-        # health check always verifies whatever model /ask will use.
-        from src.config.ollama_config import get_ask_model, is_ollama_pullable
-
-        model_name = get_ask_model()
-        try:
-            import ollama
-
-            models = ollama.list()
-            installed = [m.model for m in models.models]
-            if any(
-                name == model_name or name.endswith("/" + model_name)
-                for name in installed
-            ):
-                self._record(
-                    "ollama_model", True, f"{model_name} is available", critical=False
-                )
-                return
-
-            # Non-critical: /ask is the only feature that uses this model.
-            # Voice transcription works without it. We deliberately do NOT
-            # auto-pull on startup — these models are multi-GB and it would
-            # block on_ready for several minutes.
-            #
-            # Do not blindly suggest `ollama pull <name>`: a Docker-namespaced
-            # name can never be pulled from Ollama's registry, and this check
-            # previously sent users to run exactly the command that had just
-            # failed for them.
-            if is_ollama_pullable(model_name):
-                remedy = f"run `ollama pull {model_name}` if /ask needed"
-            else:
-                remedy = (
-                    f"`{model_name}` is a Docker Hub name and CANNOT be pulled "
-                    "from Ollama's registry — set ASK_OLLAMA_MODEL to an "
-                    "Ollama model (e.g. gemma4:26b)"
-                )
+                n = len(library.load().campaigns)
+            except Exception as e:  # noqa: BLE001 - never block startup on the library
+                logger.warning("library could not be loaded: %s", e)
+                n = 0
             self._record(
-                "ollama_model",
-                False,
-                f"{model_name} not installed ({remedy})",
+                "ask_provider",
+                True,
+                f"/ask: Anthropic ({claude.model()}, effort {claude.effort()}), "
+                f"{n} campaign{'s' if n != 1 else ''} in the library",
                 critical=False,
             )
-        except Exception as e:
+        else:
             self._record(
-                "ollama_model", False, f"Ollama model check failed: {e}", critical=False
+                "ask_provider",
+                False,
+                "ANTHROPIC_API_KEY not set — /ask is disabled (see op.env.example)",
+                critical=False,
             )
 
     # ── discord_gateway ──────────────────────────────────────────────

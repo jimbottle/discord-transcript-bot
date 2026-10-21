@@ -7,9 +7,13 @@ test that needs a "transcription" stubs _transcribe_clip. discord-transcript-bot
 
 import importlib.util
 import json
+import subprocess
+import sys
 import wave
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 
 def _load_harness():
@@ -205,7 +209,7 @@ def test_main_skips_unavailable_backend_and_still_prints(tmp_path, monkeypatch, 
         )
     )
 
-    def fake_run_config(cfg, clips):
+    def fake_run_config(cfg, clips, **kw):
         if cfg.backend == "mlx-whisper":
             raise BackendUnavailable("mlx_whisper not installed")
         return {
@@ -236,7 +240,7 @@ def test_main_raises_when_all_backends_unavailable(tmp_path, monkeypatch):
 
     from src.asr.base import BackendUnavailable
 
-    def always_unavailable(cfg, clips):
+    def always_unavailable(cfg, clips, **kw):
         raise BackendUnavailable("nope")
 
     monkeypatch.setattr(ab, "run_config", always_unavailable)
@@ -245,3 +249,251 @@ def test_main_raises_when_all_backends_unavailable(tmp_path, monkeypatch):
         assert False, "should SystemExit when no config could run"
     except SystemExit:
         pass
+
+
+# ── order effects / marginal clips (discord-transcript-bot-adg) ────────
+
+
+def _three_clips(tmp_path):
+    clips = []
+    for name in ("a", "b", "c"):
+        wav = tmp_path / f"{name}.wav"
+        _write_wav(wav, seconds=1.0)
+        clips.append((str(wav), "hello there"))
+    return clips
+
+
+def _order_dependent_stub(ab, monkeypatch):
+    """b.wav decodes differently depending on whether a.wav ran right
+    before it — the measured MLX behaviour on marginal audio. a and c are
+    stable."""
+    seen = []
+
+    def fake(cfg, audio):
+        prev = seen[-1] if seen else None
+        seen.append(audio)
+        if audio.endswith("b.wav"):
+            return (
+                "hello there" if prev and prev.endswith("a.wav") else "hello here",
+                0.1,
+            )
+        return ("hello there", 0.1)
+
+    monkeypatch.setattr(ab, "_transcribe_clip", fake)
+    return seen
+
+
+def test_trial_order_is_manifest_order_then_seeded_shuffles():
+    assert ab._trial_order(4, 0) == [0, 1, 2, 3]
+    t1 = ab._trial_order(4, 1)
+    assert sorted(t1) == [0, 1, 2, 3]
+    assert t1 == ab._trial_order(4, 1), "trials must be reproducible"
+
+
+def test_single_trial_run_config_reports_per_clip_and_no_sensitivity(
+    tmp_path, monkeypatch
+):
+    clips = _three_clips(tmp_path)
+    _order_dependent_stub(ab, monkeypatch)
+    r = ab.run_config(ab.Config(name="x"), clips)
+    assert r["order_trials"] == 1
+    assert r["order_sensitive"] == []
+    assert [c["audio"] for c in r["clips"]] == ["a.wav", "b.wav", "c.wav"]
+    assert r["clips"][1]["hyp"] == "hello there"  # ran right after a.wav
+    assert r["wer"] == r["wer_min"] == r["wer_max"] == 0.0
+
+
+def test_order_trials_flag_the_order_sensitive_clip(tmp_path, monkeypatch):
+    clips = _three_clips(tmp_path)
+    seen = _order_dependent_stub(ab, monkeypatch)
+    r = ab.run_config(ab.Config(name="x"), clips, order_trials=3)
+
+    assert r["order_trials"] == 3
+    assert len(seen) == 9, "every clip transcribed once per trial"
+    assert r["order_sensitive"] == [clips[1][0]]
+    b = r["clips"][1]
+    assert b["order_sensitive"] is True
+    assert sorted(b["hyps"]) == ["hello here", "hello there"]
+    assert all(not c["order_sensitive"] for c in r["clips"] if c["audio"] != "b.wav")
+    # Headline numbers are trial 0 (manifest order) — identical to a plain run.
+    assert r["wer"] == 0.0
+    assert r["wer_min"] == 0.0 and r["wer_max"] > 0.0
+    # Only trial 0's compute counts toward RTF.
+    assert r["proc_s"] == pytest.approx(0.3)
+
+
+def test_hypotheses_that_differ_only_in_case_or_punctuation_are_stable(
+    tmp_path, monkeypatch
+):
+    clips = _three_clips(tmp_path)
+    n = {"i": 0}
+
+    def fake(cfg, audio):
+        n["i"] += 1
+        return ("Hello, there!" if n["i"] % 2 else "hello there", 0.1)
+
+    monkeypatch.setattr(ab, "_transcribe_clip", fake)
+    r = ab.run_config(ab.Config(name="x"), clips, order_trials=2)
+    assert r["order_sensitive"] == []
+
+
+def test_format_table_adds_range_and_unstable_columns_for_multi_trial():
+    base = {"edits": 1, "ref_words": 10, "rtf": 1.0, "proc_s": 2.0}
+    single = [{"config": "s", "wer": 0.1, **base}]
+    assert "unstable" not in ab.format_table(single)
+    multi = [
+        {
+            "config": "m",
+            "wer": 0.1,
+            "order_trials": 3,
+            "wer_min": 0.1,
+            "wer_max": 0.3,
+            "order_sensitive": ["/x/b.wav"],
+            **base,
+        }
+    ]
+    table = ab.format_table(multi)
+    assert "unstable" in table and "10.00-30.00%" in table
+
+
+def test_format_order_sensitivity_lists_clips_and_hypotheses():
+    results = [
+        {
+            "config": "m",
+            "order_trials": 3,
+            "clips": [
+                {"audio": "a.wav", "order_sensitive": False, "hyps": ["x"]},
+                {"audio": "b.wav", "order_sensitive": True, "hyps": ["x", "y"]},
+            ],
+        }
+    ]
+    text = ab.format_order_sensitivity(results)
+    assert "b.wav" in text and "'x'" in text and "'y'" in text
+    assert "a.wav" not in text
+    assert ab.format_order_sensitivity([{"config": "c", "clips": []}]) == ""
+
+
+def test_write_stable_manifest_drops_unstable_lines_verbatim(tmp_path):
+    manifest = tmp_path / "manifest.jsonl"
+    lines = [
+        json.dumps({"audio": "a.wav", "reference": "one", "player": "Gus"}),
+        json.dumps({"audio": "b.wav", "reference": "two", "note": "mumbled"}),
+        json.dumps({"audio": "c.wav", "reference": "three"}),
+    ]
+    manifest.write_text("\n".join(lines) + "\n\n")
+    out = tmp_path / "stable.jsonl"
+    kept, dropped = ab.write_stable_manifest(manifest, {str(tmp_path / "b.wav")}, out)
+    assert (kept, dropped) == (2, 1)
+    assert out.read_text().splitlines() == [lines[0], lines[2]]
+
+
+def test_main_order_trials_writes_stable_manifest(tmp_path, monkeypatch, capsys):
+    clips = _three_clips(tmp_path)
+    _order_dependent_stub(ab, monkeypatch)
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(
+        "".join(
+            json.dumps({"audio": Path(p).name, "reference": ref}) + "\n"
+            for p, ref in clips
+        )
+    )
+    cfgs = tmp_path / "cfg.json"
+    cfgs.write_text(json.dumps([{"name": "only", "backend": "faster-whisper"}]))
+    stable = tmp_path / "stable.jsonl"
+    ab.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--configs",
+            str(cfgs),
+            "--order-trials",
+            "3",
+            "--stable-manifest",
+            str(stable),
+        ]
+    )
+    out = capsys.readouterr().out
+    assert "order-sensitive" in out and "b.wav" in out
+    assert "kept 2 clip(s), dropped 1" in out
+    assert [json.loads(l)["audio"] for l in stable.read_text().splitlines()] == [
+        "a.wav",
+        "c.wav",
+    ]
+
+
+def test_stable_manifest_requires_manifest_and_multiple_trials(tmp_path):
+    wav = tmp_path / "c.wav"
+    _write_wav(wav)
+    ref = tmp_path / "r.txt"
+    ref.write_text("hi")
+    with pytest.raises(SystemExit):
+        ab.main(
+            ["--audio", str(wav), "--reference", str(ref), "--stable-manifest", "x"]
+        )
+
+
+def test_isolate_runs_each_config_in_its_own_subprocess(tmp_path, monkeypatch, capsys):
+    wav = tmp_path / "clip.wav"
+    _write_wav(wav)
+    manifest = tmp_path / "m.jsonl"
+    manifest.write_text(json.dumps({"audio": "clip.wav", "reference": "hi"}) + "\n")
+    cfgs = tmp_path / "cfg.json"
+    cfgs.write_text(
+        json.dumps(
+            [
+                {"name": "fw", "backend": "faster-whisper"},
+                {"name": "mlx", "backend": "mlx-whisper"},
+            ]
+        )
+    )
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        cfg = json.loads(Path(cmd[cmd.index("--configs") + 1]).read_text())[0]
+        out = Path(cmd[cmd.index("--json-out") + 1])
+        if cfg["backend"] == "mlx-whisper":
+            return subprocess.CompletedProcess(cmd, 1, "", "No configs ran")
+        out.write_text(
+            json.dumps(
+                {
+                    "results": [
+                        {
+                            "config": cfg["name"],
+                            "wer": 0.0,
+                            "edits": 0,
+                            "ref_words": 1,
+                            "audio_s": 1.0,
+                            "proc_s": 0.1,
+                            "rtf": 0.1,
+                        }
+                    ]
+                }
+            )
+        )
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(ab.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        ab, "run_config", lambda *a, **k: pytest.fail("must not run in-process")
+    )
+    ab.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--configs",
+            str(cfgs),
+            "--isolate",
+            "--order-trials",
+            "2",
+        ]
+    )
+
+    assert len(calls) == 2, "one subprocess per config"
+    for cmd in calls:
+        assert cmd[0] == sys.executable and cmd[1].endswith("ab_transcribe.py")
+        assert "--isolate" not in cmd, "child must not recurse"
+        assert cmd[cmd.index("--order-trials") + 1] == "2"
+        assert cmd[cmd.index("--manifest") + 1] == str(manifest)
+    out = capsys.readouterr().out
+    assert "SKIPPED mlx" in out and "fw" in out

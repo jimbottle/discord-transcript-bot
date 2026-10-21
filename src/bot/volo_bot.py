@@ -9,7 +9,7 @@ import discord
 import yaml
 from discord.sinks.errors import RecordingException
 
-from src import player_map_store
+from src import library, player_map_store, sessions
 from src.bot.health import HealthCheck
 from src.sinks.whisper_sink import WhisperSink
 
@@ -35,8 +35,38 @@ HEARTBEAT_INTERVAL_S = 30
 # pipeline case — not just a quiet room, where the queue stays shallow).
 STALL_OUTPUT_AGE_S = 120
 STALL_QUEUE_DEPTH = 25
+# CPU spin detector (discord-transcript-bot-309): process CPU% is sampled
+# between state writes and published as `cpu_pct`. High CPU while
+# transcription is legitimately busy is normal (the CPU backend uses every
+# core), so the heartbeat only warns when the process is hot AND idle: no
+# audio queued and no transcript output for IDLE_OUTPUT_AGE_S.
+HIGH_CPU_PCT = 90
+IDLE_OUTPUT_AGE_S = 60
+# Minimum window for a CPU% sample; state writes on rapid lifecycle
+# transitions would otherwise produce noisy sub-second readings.
+CPU_SAMPLE_MIN_WINDOW_S = 1.0
 
 logger = logging.getLogger(__name__)
+
+
+def _sample_cpu_pct(obj):
+    """Process CPU% since ``obj``'s previous sample, or None until a window
+    of at least CPU_SAMPLE_MIN_WINDOW_S has elapsed. Shorter gaps return the
+    previous reading and keep the baseline, so a burst of lifecycle writes
+    can't reset the measurement. Module-level (not a method) so it works on
+    any object that can hold two attributes — the bot, or a test stand-in."""
+    now_cpu, now_wall = time.process_time(), time.monotonic()
+    prev = getattr(obj, "_cpu_sample", None)
+    if prev is None:
+        obj._cpu_sample = (now_cpu, now_wall)
+        return None
+    window = now_wall - prev[1]
+    if window < CPU_SAMPLE_MIN_WINDOW_S:
+        return getattr(obj, "_last_cpu_pct", None)
+    pct = round((now_cpu - prev[0]) / window * 100.0, 1)
+    obj._cpu_sample = (now_cpu, now_wall)
+    obj._last_cpu_pct = pct
+    return pct
 
 
 class VoloBot(discord.Bot):
@@ -102,8 +132,8 @@ class VoloBot(discord.Bot):
                 *(_ghost_cleanup(g) for g in self.guilds), return_exceptions=True
             )
 
-        # Run startup health checks in a thread so blocking autofix
-        # (ollama serve poll, model pull) doesn't freeze the event loop.
+        # Run startup health checks in a thread so the blocking parts (the
+        # whisper model load and its test decode) don't freeze the event loop.
         await asyncio.to_thread(self.health.run_all, autofix=True, bot=self)
         for line in self.health.summary().splitlines():
             logger.info(f"Health: {line}")
@@ -160,6 +190,9 @@ class VoloBot(discord.Bot):
                         "the sink may be wedged. Try /stop then /scribe, or "
                         "restart the bot."
                     )
+                cpu_alert = getattr(self, "_cpu_alert", None)
+                if cpu_alert:
+                    logger.warning(cpu_alert)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 - heartbeat must not die loudly
@@ -169,15 +202,35 @@ class VoloBot(discord.Bot):
         self._last_interaction_time = time.time()
 
     async def on_voice_state_update(self, member, before, after):
-        """Refresh the dashboard's live voice roster when someone joins or
-        leaves a channel the bot is connected to.
+        """Two jobs. (1) If the BOT itself left a channel (kicked, moved
+        out, or a reconnect that failed), tear down that guild's helper,
+        sink and recording flag so a later /connect + /scribe starts clean
+        instead of failing with "Already recording". (2) Refresh the
+        dashboard's live voice roster when someone joins or leaves a
+        channel the bot is connected to.
 
-        Best-effort and fully guarded — a failure here is a dashboard
-        nicety, never allowed to affect voice. Only rewrites the small
-        state JSON (same atomic path as every other transition) and only
-        when the change actually touches one of our connected channels, so
-        unrelated server-wide voice churn doesn't thrash the file.
+        This is the ONLY handler for the event: registering another with
+        ``@bot.event`` in main.py replaces this method outright (that is
+        how discord.Client.event works), which is how the roster refresh
+        silently stopped running (discord-transcript-bot-xnj). Add more
+        handlers with ``@bot.listen()``.
+
+        Best-effort and fully guarded — a failure here must never affect
+        voice. The roster part only rewrites the small state JSON (same
+        atomic path as every other transition) and only when the change
+        actually touches one of our connected channels, so unrelated
+        server-wide voice churn doesn't thrash the file.
         """
+        try:
+            if (
+                self.user is not None
+                and member.id == self.user.id
+                and after.channel is None
+                and before.channel is not None
+            ):
+                await self._on_bot_left_voice(before.channel.guild.id)
+        except Exception as e:  # noqa: BLE001 - never fatal
+            logger.error(f"on_voice_state_update: bot-left cleanup failed: {e}")
         try:
             connected = {
                 getattr(getattr(h, "vc", None), "channel", None)
@@ -188,6 +241,18 @@ class VoloBot(discord.Bot):
                 self._write_runtime_state()
         except Exception as e:  # noqa: BLE001 - dashboard nicety, never fatal
             logger.debug(f"on_voice_state_update state refresh skipped: {e}")
+
+    async def _on_bot_left_voice(self, guild_id):
+        """Forget the guild's voice client and tear down its sink after the
+        bot left a channel by any route other than /disconnect (which does
+        this itself). The sink teardown joins the voice thread and waits
+        for in-flight transcriptions, so it is offloaded off the loop."""
+        helper = self.guild_to_helper.pop(guild_id, None)
+        if helper:
+            helper.set_vc(None)
+        self.guild_is_recording.pop(guild_id, None)
+        await asyncio.to_thread(self._close_and_clean_sink_for_guild, guild_id)
+        self._write_runtime_state()
 
     async def close_consumers(self):
         if hasattr(self, "consumer_manager"):
@@ -277,9 +342,29 @@ class VoloBot(discord.Bot):
                     )
                 except Exception as e:  # noqa: BLE001 - never fail a write
                     logger.debug(f"runtime-state: skipped guild {gid}: {e}")
+            # Hot-and-idle detection (discord-transcript-bot-309): a core
+            # pegged while nothing is queued and nothing has been produced
+            # for a while is a spinning thread, not work. Busy rooms keep
+            # output_age small, so a CPU backend at 400% mid-game never trips.
+            cpu_pct = _sample_cpu_pct(self)
+            idle = all(
+                g["queue_depth"] == 0
+                and (g["output_age"] is None or g["output_age"] >= IDLE_OUTPUT_AGE_S)
+                for g in guilds
+            )
+            self._cpu_alert = None
+            if cpu_pct is not None and cpu_pct >= HIGH_CPU_PCT and idle:
+                self._cpu_alert = (
+                    f"Process CPU at {cpu_pct:.0f}% while transcription is idle "
+                    f"(nothing queued, no output for ≥{IDLE_OUTPUT_AGE_S}s) — a "
+                    f"thread is spinning. Run `kill -USR1 {os.getpid()}` to write "
+                    "a ranked stack dump to .logs/thread_dump-*.txt "
+                    "(discord-transcript-bot-309)."
+                )
             state = {
                 "updated_at": time.time(),
                 "started_at": self._started_at,
+                "cpu_pct": cpu_pct,
                 "guilds": guilds,
             }
             os.makedirs(os.path.dirname(BOT_STATE_FILE), exist_ok=True)
@@ -320,20 +405,39 @@ class VoloBot(discord.Bot):
         except Exception as e:
             logger.error(f"Error closing whisper sink for {guild_id}: {e}")
 
-    def start_recording(self, ctx: discord.context.ApplicationContext):
+    def start_recording(self, ctx: discord.context.ApplicationContext) -> bool:
         """
         Start recording audio from the voice channel. Create a whisper sink
         and start sending transcripts to the queue.
 
+        Returns True when recording is on, False when the sink could not be
+        started — the caller must tell the user, because nothing is being
+        transcribed (discord-transcript-bot-vjm). Never raises.
+
         Since this is a critical function, this is where we should handle
         subscription checks and limits.
         """
+        ok = False
         try:
             self.start_whisper_sink(ctx)
             self.guild_is_recording[ctx.guild_id] = True
+            ok = True
         except Exception as e:
             logger.error(f"Error starting whisper sink: {e}")
+            # Undo whatever got started. If vc.start_recording succeeded and
+            # the voice thread then failed to start, Pycord's recorder would
+            # keep feeding a sink nobody drains, and every later /scribe
+            # would hit "Already recording" until a /disconnect
+            # (roborev #6411). stop_recording guards the not-recording case.
+            try:
+                self.stop_recording(ctx)
+            except Exception as stop_err:  # noqa: BLE001 - best-effort undo
+                logger.error(f"Error undoing a failed recording start: {stop_err}")
+            # A half-built sink (constructed but vc.start_recording raised)
+            # must not linger as "already active" for the next /scribe.
+            self._close_and_clean_sink_for_guild(ctx.guild_id)
         self._write_runtime_state()  # recording state changed
+        return ok
 
     def start_whisper_sink(self, ctx: discord.context.ApplicationContext):
         guild_voice_sink = self.guild_whisper_sinks.get(ctx.guild_id, None)
@@ -360,6 +464,12 @@ class VoloBot(discord.Bot):
             player_map=self.player_map,
         )
 
+        self._tag_session(ctx, whisper_sink)
+
+        # Registered before vc.start_recording so a failure there (e.g.
+        # RecordingException) leaves a sink start_recording can find and
+        # close, rather than an orphaned executor + open capture.
+        self.guild_whisper_sinks[ctx.guild_id] = whisper_sink
         self.guild_to_helper[ctx.guild_id].vc.start_recording(
             whisper_sink, on_stop_record_callback, ctx
         )
@@ -375,7 +485,34 @@ class VoloBot(discord.Bot):
 
         whisper_sink.start_voice_thread(on_exception=on_thread_exception)
 
-        self.guild_whisper_sinks[ctx.guild_id] = whisper_sink
+    def _tag_session(self, ctx, whisper_sink) -> None:
+        """Write the recording's group/game/campaign/session sidecar
+        (src/sessions.py) next to its transcript. Best-effort: a missing or
+        broken library.yml leaves the recording untagged, never unrecorded."""
+        try:
+            helper = self.guild_to_helper.get(ctx.guild_id)
+            channel = getattr(getattr(helper, "vc", None), "channel", None)
+            meta = sessions.build_meta(
+                library.load(),
+                guild_id=ctx.guild_id,
+                guild=getattr(ctx.guild, "name", None),
+                channel_id=getattr(channel, "id", None),
+                channel=getattr(channel, "name", None),
+            )
+            sessions.write_meta(whisper_sink.session_file, meta)
+            whisper_sink.session_meta = meta
+            if meta.campaign:
+                logger.info(
+                    f"Session tagged {meta.key} (group={meta.group}, game={meta.game})"
+                )
+            else:
+                logger.warning(
+                    f"Recording in guild {ctx.guild_id} matches no group in "
+                    "library/library.yml; it is untagged (scripts/tag_session.py "
+                    "can tag it later)."
+                )
+        except Exception as e:  # noqa: BLE001 - tagging must never block /scribe
+            logger.warning(f"Could not tag session: {e}")
 
     def stop_recording(self, ctx: discord.context.ApplicationContext):
         vc = ctx.guild.voice_client

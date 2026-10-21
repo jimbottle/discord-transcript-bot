@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Lore - Transcript Bot{% endblock %}
+{% block content %}
+<hgroup>
+    <h1>Lore</h1>
+    <p>Ask about the campaign from its reference notes: no transcript involved. Dashboard only;
+       there is no Discord command for this.</p>
+</hgroup>
+
+{% if not campaigns %}
+<p>No campaigns in <code>library/library.yml</code> yet. See <code>library/README.md</code>.</p>
+{% else %}
+<form method="get" class="history-filters">
+    <select name="campaign" aria-label="Campaign" onchange="this.form.submit()">
+        {% for c in campaigns %}
+        <option value="{{ c.id }}" {% if chosen and c.id == chosen.id %}selected{% endif %}>{{ c.name }}</option>
+        {% endfor %}
+    </select>
+    <noscript><button type="submit">Switch</button></noscript>
+    {% if chosen %}<span class="session-tag">{{ game_name or '—' }} · {{ group_name or '—' }}</span>{% endif %}
+</form>
+
+<article id="ask-panel">
+    <header>
+        <strong>Ask about {{ chosen.name }}</strong>
+        <span id="ask-meta" class="search-meta"></span>
+    </header>
+    <form id="ask-form" autocomplete="off"
+          data-ask-url="{{ url_for('lore_ask') }}"
+          data-campaign="{{ chosen.id }}"
+          data-ask-configured="{{ 'true' if ask_configured else 'false' }}"
+          data-static="true"
+          data-empty="{{ 'true' if not notes else 'false' }}"
+          data-empty-reason="This campaign has no notes yet."
+          data-history-url="{{ url_for('questions_data') }}"
+          data-history-query="source=dashboard-lore&campaign={{ chosen.id }}">
+        <textarea id="ask-question" name="question" rows="2" maxlength="2000" required
+                  placeholder="e.g. Who is Lilith Kane and what does she want?"></textarea>
+        <div class="ask-actions">
+            <button type="submit" id="ask-submit">Ask</button>
+            <label class="inline-check"><input type="checkbox" id="ask-include-gm"> Include GM-only notes (spoilers)</label>
+            <span id="ask-status" class="search-meta" aria-live="polite"></span>
+        </div>
+    </form>
+    {% if notes and not table_count %}
+    <p class="search-meta" id="gm-only-hint">This campaign only has GM-only notes, so tick "Include GM-only notes" to ask about it.</p>
+    {% endif %}
+    <div id="ask-answers" aria-live="polite"></div>
+</article>
+<script src="{{ url_for('static', filename='ask.js') }}"></script>
+
+<details class="lore-notes">
+    <summary>{{ notes|length }} note{{ '' if notes|length == 1 else 's' }} available to the model</summary>
+    <ul>
+    {% for n in notes %}
+        <li><strong>{{ n.title }}</strong>{% if n.audience == 'gm' %} <span class="qa-status">GM only</span>{% endif %}
+            <br><span class="search-meta">{{ n.summary }}</span></li>
+    {% endfor %}
+    </ul>
+</details>
+{% endif %}
+{% endblock %}

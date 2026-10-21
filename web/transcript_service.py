@@ -9,6 +9,8 @@ LOGS_DIR = PROJECT_ROOT / ".logs" / "transcripts"
 # Runtime state the bot writes (volo_bot.BOT_STATE_FILE) — true
 # connected-guild / recording / uptime, vs. the file-freshness guess.
 BOT_STATE_FILE = PROJECT_ROOT / ".logs" / "bot_state.json"
+# Reference-audio captures, one folder per recording (src/session_capture.py).
+CAPTURES_DIR = PROJECT_ROOT / "captures"
 
 # A session .txt modified within this many seconds is treated as "live"
 # (the bot writes a line per finished utterance, so a brief silence gap
@@ -99,21 +101,63 @@ def get_live_session():
     }
 
 
+def _library():
+    from src import library  # project root is on sys.path (roster_service/conftest)
+
+    return library.load()
+
+
+def session_info(filename, lib=None):
+    """Display fields for the session ``filename`` belongs to (group, game,
+    campaign, session day, how many recordings), or ``{"tagged": False}``."""
+    from src import sessions
+
+    path = _safe_path(TRANSCRIPTS_DIR, filename) if filename else None
+    if path is None:
+        return {"tagged": False, "recordings": 0}
+    lib = lib or _library()
+    files = sessions.session_files(path)
+    info = sessions.describe(lib, sessions.read_meta(path), len(files))
+    info["files"] = [f.name for f in files]
+    return info
+
+
 def list_transcripts():
-    """Return transcript .txt files sorted newest first."""
+    """Return transcript .txt files sorted newest first, each with its
+    session tag (``session``: see session_info)."""
     if not TRANSCRIPTS_DIR.is_dir():
         return []
+    from src import sessions
+
+    lib = _library()
     files = sorted(TRANSCRIPTS_DIR.glob("*.txt"), reverse=True)
+    metas = {f: sessions.read_meta(f) for f in files}
+    # Real session sizes (one pass, not session_files per row), so each
+    # row's tag editor offers "Apply to all N recordings" like the
+    # transcript page does (roborev #6491).
+    sizes = {}
+    for m in metas.values():
+        if m is not None:
+            sizes[m.key] = sizes.get(m.key, 0) + 1
     results = []
     for f in files:
+        meta = metas[f]
         results.append(
             {
                 "filename": f.name,
                 "size": f.stat().st_size,
                 "modified": f.stat().st_mtime,
+                "session": sessions.describe(
+                    lib, meta, sizes.get(meta.key, 1) if meta else 1
+                ),
             }
         )
     return results
+
+
+def transcript_path(filename):
+    """Validated path of a transcript, or None (same guard as get_transcript)."""
+    return _safe_path(TRANSCRIPTS_DIR, filename)
 
 
 def _safe_path(directory, filename):
@@ -286,3 +330,67 @@ def search_logs(query):
                     }
                 )
     return results
+
+
+class DeleteRefused(Exception):
+    """The transcript must not be deleted (it is being recorded right now)."""
+
+
+def is_being_recorded(filename) -> bool:
+    """True if the bot reports this file as a guild's live session file, or
+    the file was written within LIVE_FRESH_SECONDS (a bot running without a
+    state file is still caught)."""
+    state = get_bot_state() or {}
+    # A dead bot leaves "recording: true" behind; only trust a state file
+    # that is still being refreshed (roborev #6491).
+    hb = heartbeat_age(state)
+    if hb is None or hb > STATE_STALE_SECONDS:
+        state = {}
+    for g in state.get("guilds") or []:
+        if not isinstance(g, dict):
+            continue
+        live = g.get("session_file")
+        if g.get("recording") and live and Path(str(live)).name == filename:
+            return True
+    path = _safe_path(TRANSCRIPTS_DIR, filename)
+    if path is not None:
+        try:
+            return time.time() - path.stat().st_mtime <= LIVE_FRESH_SECONDS
+        except OSError:
+            return False
+    return False
+
+
+def delete_transcript(filename, *, include_audio=False) -> list:
+    """Permanently delete a recording's transcript and its session tag, and
+    optionally its captured audio folder. The shared per-day JSON log and
+    the question history are left alone. Returns what was removed
+    (paths relative to the project). Raises DeleteRefused for a live
+    recording; returns [] for an unknown or unsafe filename."""
+    import shutil
+
+    path = _safe_path(TRANSCRIPTS_DIR, filename)
+    if path is None or path.suffix != ".txt":
+        return []
+    if is_being_recorded(filename):
+        raise DeleteRefused(
+            "That recording is still being written. Stop recording first, then delete it."
+        )
+    removed = []
+    meta = path.with_name(path.stem + ".meta.json")
+    for f in (path, meta):
+        try:
+            f.unlink()
+            removed.append(f"{f.parent.name}/{f.name}")
+        except FileNotFoundError:
+            pass
+    if include_audio:
+        cap = CAPTURES_DIR / path.stem
+        if cap.is_dir() and cap.resolve().parent == CAPTURES_DIR.resolve():
+            shutil.rmtree(cap)
+            removed.append(f"{cap.parent.name}/{cap.name}/")
+    return removed
+
+
+def has_captured_audio(filename) -> bool:
+    return (CAPTURES_DIR / Path(filename).stem).is_dir()

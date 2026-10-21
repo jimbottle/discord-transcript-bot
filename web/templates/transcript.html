@@ -7,21 +7,35 @@
         <a href="{{ url_for('transcripts') }}">&larr; All transcripts</a>
         &middot; {{ entries|length }} entr{{ 'y' if entries|length == 1 else 'ies' }}
     </p>
+    {% if session.tagged %}
+    <p class="session-tag">
+        {{ session.game or '—' }} &middot; <strong>{{ session.campaign or 'no campaign' }}</strong>
+        &middot; {{ session.group or '—' }} &middot; session {{ session.session_day }}
+        {% if session.recordings > 1 %}&middot; {{ session.recordings }} recordings (questions cover all of them){% endif %}
+    </p>
+    {% else %}
+    <p class="session-tag">Untagged recording: not tied to a group or campaign.</p>
+    {% endif %}
+    {% include "_tag_editor.html" %}
+    {% with after_delete=url_for('transcripts') %}{% include "_delete_transcript.html" %}{% endwith %}
 </hgroup>
 
+<div class="feed-controls"><span id="order-toggle" class="order-toggle"></span></div>
 <fieldset role="group">
     <input type="search" id="filter" placeholder="Filter by speaker or text…" aria-label="Filter transcript">
     <button type="button" id="toggle-raw" class="secondary">Raw</button>
 </fieldset>
 
+{% with ask_filename=filename, ask_static=True, ask_empty=(not entries), ask_session_key=session.key %}{% include "_ask.html" %}{% endwith %}
+
 <div id="parsed-view" class="transcript-content">
     {% if entries %}
     {% for e in entries %}
-    <div class="entry" data-search="{{ ((e.player or '') ~ ' ' ~ (e.character or '') ~ ' ' ~ e.text)|lower }}">
+    <div class="entry" data-idx="{{ loop.index0 }}" data-search="{{ ((e.player or '') ~ ' ' ~ (e.character or '') ~ ' ' ~ e.text)|lower }}">
         {% if e.player or e.time %}
         <div class="entry-meta">
             <strong>{{ e.player or 'Unknown' }}{% if e.character and e.character != e.player %} ({{ e.character }}){% endif %}</strong>
-            {% if e.time %} &middot; {{ e.time }}{% endif %}
+            {% if e.time %} &middot; {{ e.time|clock }}{% endif %}
         </div>
         {% endif %}
         <div class="entry-text">{{ e.text }}</div>
@@ -36,6 +50,31 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="{{ url_for('static', filename='tag-editor.js') }}"></script>
+<script src="{{ url_for('static', filename='feed-order.js') }}"></script>
+<script>
+// Newest/oldest toggle for this transcript (remembered per browser). The
+// page is rendered oldest-first; data-idx is each line's place in the file.
+(function () {
+    const KEY = "transcriptOrder";
+    const view = document.getElementById("parsed-view");
+    function apply(order) {
+        const rows = Array.prototype.slice.call(view.querySelectorAll(".entry"));
+        rows.sort(function (a, b) {
+            const d = (+a.dataset.idx) - (+b.dataset.idx);
+            return order === "newest" ? -d : d;
+        });
+        rows.forEach(function (r) { view.appendChild(r); });
+    }
+    const start = FeedOrder.get(KEY, "oldest");
+    apply(start);
+    FeedOrder.mountToggle(document.getElementById("order-toggle"), start, function (o) {
+        FeedOrder.set(KEY, o);
+        apply(o);
+    });
+})();
+</script>
+<script src="{{ url_for('static', filename='delete-transcript.js') }}"></script>
 <script>
 // Filtering is handled by the shared transcript-filter.js. Only the
 // raw/styled toggle is page-specific.

@@ -10,7 +10,7 @@ Discord bot that transcribes voice channel audio to text in real-time using Fast
 
 ```bash
 make start          # Run the bot (python main.py)
-make web            # Run the web dashboard (Flask on port 5001)
+make web            # Run the web dashboard (Flask on http://127.0.0.1:5001; under `op run` too)
 python main.py -v   # Run with verbose/debug logging
 ```
 
@@ -28,30 +28,60 @@ Setup: `python -m venv venv && source venv/bin/activate && pip install -r requir
 3. `WhisperSink.write()` receives audio bytes from Discord, queues them per-speaker
 4. A background thread (`insert_voice`) monitors speakers, waits for 1.5s silence gap, then submits audio to a `ThreadPoolExecutor` for transcription
 5. Transcription results are written to per-session files (`transcripts/`) and a logging-based transcript log (`.logs/transcripts/`)
+6. `/scribe` also tags the recording with its group, game, campaign and session (`transcripts/<ts>.meta.json`, see "Library and sessions").
+7. `/stop` (or `/disconnect`, or the bot being kicked) stops the loop, which then flushes every still-buffered speaker, and `stop_voice_thread` waits up to `DRAIN_TIMEOUT_S` for the in-flight transcriptions before `close()` finalizes the session file — so the last thing said before `/stop` is not lost. `start_recording` returns `False` when the sink could not start and `/scribe` reports that instead of claiming to record.
 
 **State is tracked per-guild on the `VoloBot` instance:**
 - `guild_to_helper` — `BotHelper` (voice client wrapper)
 - `guild_is_recording` — recording state flag
 - `guild_whisper_sinks` — active `WhisperSink` per guild
 
-**Health system** (`src/bot/health.py`): `HealthCheck` runs startup checks (ffmpeg, opus, whisper model, ollama, env vars, directories) with optional auto-fix. Writes status to `.logs/health_status.json` for the web UI to read.
+**Health system** (`src/bot/health.py`): `HealthCheck` runs startup checks (ffmpeg, opus, whisper model, Anthropic key, env vars, directories) with optional auto-fix. Writes status to `.logs/health_status.json` for the web UI to read.
 
 ## Key Dependencies
 
 - **py-cord** (not discord.py) — the `discord` import is Pycord
 - **faster_whisper** — local transcription model (large-v3), loaded as module-level singleton in `whisper_sink.py`
-- **ollama** — powers the `/ask` command (model: `$ASK_OLLAMA_MODEL`, default `gemma4:26b`)
+- **anthropic** (SDK) — `/ask` (`src/llm/claude.py`); **openai** (SDK) is only the optional cloud transcription method
 - **torch** — CPU-only by default (see requirements.txt for CUDA option)
 - **ffmpeg** and **libopus** — required system dependencies for voice
 
 ## Environment Variables
 
-Required in `.env`:
+Required in `.env` (a derived copy; 1Password is the source of truth for the secret ones, see "Secrets" below):
 - `DISCORD_BOT_TOKEN` — bot token
 - `TRANSCRIPTION_METHOD` — `local` (default) or `openai`
 - `OPENAI_API_KEY` — only if using openai method
 - `PLAYER_MAP_FILE_PATH` — optional path to `player_map.yml` mapping Discord user IDs to player/character names
-- `ASK_OLLAMA_MODEL` — optional; model for `/ask`. Defaults to `gemma4:26b`, resolved for both `main.py` and `src/bot/health.py:_check_ollama_model` by `src/config/ollama_config.get_ask_model()` so the two cannot drift. Install it with `ollama pull gemma4:26b`. **It must be a name Ollama can actually pull:** the previous default `ai/mistral:latest` was a Docker Hub (Docker Model Runner) name that Ollama's registry 404s, so `/ask` failed out of the box and the health check told users to run the very `ollama pull` that had just failed. `ollama_config.is_ollama_pullable()` guards that trap. Model choice is benchmarked in the sibling `local-models` repo (`dev/discord-ask-model`), where `gemma4:26b` beat `mistral:latest` 6/6 vs 3/6 on human-judged grounding
+- `ANTHROPIC_API_KEY` — for `/ask`; load it from 1Password via `op.env` (see "Secrets"). Optional `ASK_MODEL` (default `claude-opus-5-5`) and `ASK_EFFORT` (default `medium`).
+
+### `/ask` (`src/llm/claude.py`)
+
+`/ask` is one call to Claude through the Anthropic SDK. The transcript goes in a cached system block (`cache_control: ephemeral`) so follow-up questions re-read it at the cache rate; the question is the single user message; `output_config.effort` is `ASK_EFFORT`. The SDK's own retries handle 429/5xx; everything else maps to a Discord-ready message (`AskFailed.user_message`: bad key, rate limit, out of credit, unreachable, refusal, empty answer), covered by `tests/test_llm_claude.py`. **Library and sessions (discord-transcript-bot-kda, -157).** Context is organised as game → group → campaign → session; see `library/README.md`. `library/library.yml` lists games, groups (bound to Discord `discord_guilds` or, winning, `discord_channels`, each with an `active_campaign`) and campaigns (`group`, `game`); `src/library.py` loads it and never raises. At `/scribe`, `VoloBot._tag_session` writes `transcripts/<ts>.meta.json` (`src/sessions.py`: group, game, campaign, guild/channel, start, `session_day` with a 6am cutoff). Recordings with the same campaign and session day are one session, so after a restart `/ask` (Discord and dashboard, via `sessions.ask_context`) reads every recording of the session joined with restart markers, plus a one-line `SESSION:` header ahead of the transcript in the cached block. `/session` shows the tag; `scripts/tag_session.py` tags or retags old recordings. Notes come from `library/games/<game>/notes`, `groups/<group>/notes` and `campaigns/<campaign>/notes` (later overrides same id). Every request carries only their index plus one strict tool, `read_campaign_notes(ids)`, with `tool_choice: auto`; `claude.ask` runs at most `MAX_TOOL_ROUNDS` (3) rounds then forces an answer with `tool_choice: none`, and reports `notes_used`. `audience: gm` notes are excluded unless `CAMPAIGN_GM_NOTES=1`. Tests: `tests/test_library_sessions.py`, `tests/test_campaign.py`. **Everything in `library/` except its README, `library.example.yml` and `example-note.md` is gitignored on purpose:** the GitHub repo is public and the notes are the GM's private material.
+
+**Question history (discord-transcript-bot-jmj).** Every `/ask`, `/ask-public` and dashboard question is appended by `src/question_log.py` to `history/questions.jsonl` (gitignored; answers can quote GM notes): source, asker, question, status (`answered`/`failed`/`rejected`), full answer or error, model, tokens, rounds, notes used, latency and the session tag. Writes take an `flock` (bot and dashboard share the file) and never raise. The dashboard's Questions page filters it by campaign, session, source and outcome, and the ask box shows the session's earlier Q&A. Tests set `QUESTION_LOG_FILE` to a temp file (autouse fixture in `tests/conftest.py`); the Discord recording path has no automated test (no slash-command harness).
+
+**Editing and deleting recordings (dashboard, discord-transcript-bot-wrt).** The Transcripts list and each transcript page have an inline tag editor (`_tag_editor.html` + `static/tag-editor.js`) that `POST /transcripts/<f>/tag` with campaign, game and group, validated against library.yml. It calls `sessions.retag`: a campaign fills in its group and game unless they are set explicitly, and the change applies to the whole session by default or to one recording when the box is unticked. Live links to the transcript page for this. `POST /transcripts/<f>/delete` permanently removes the .txt and its .meta.json, plus its `captures/<ts>/` folder only with `include_audio`. It needs `confirm: true`, which the inline "Yes, delete" step sends (no browser dialogs). It refuses with 409 for the file the bot reports as recording, or one written within `LIVE_FRESH_SECONDS`. The shared per-day JSON log and the question history are never touched.
+
+**Newest/oldest toggle.** The Live feed and transcript pages have a "Newest first / Oldest first" toggle (`static/feed-order.js`). It is remembered per browser per page, under the localStorage keys `liveFeedOrder` (default newest) and `transcriptOrder` (default oldest); storage access is wrapped in try/catch. Live rendering lives in `static/live-feed.js`. Newest-first prepends and stays pinned to the top, or keeps the reader's place by growing scrollTop. Oldest-first appends and follows the bottom, or leaves a scrolled-up reader alone. Switching rebuilds the feed. The transcript page re-sorts its server-rendered `.entry` rows by `data-idx`. Behavioural tests: `tests/js/live_feed.test.mjs`, run from pytest. Don't put `role="group"` on the toggle, because Pico renders that as a full-width button bar.
+
+**12-hour times.** Everything people read shows times as "8:26 PM" (`src/utils/timefmt.py`). That covers the transcript text the model gets (`sessions.ask_context` runs `timefmt.for_model`), a `TIME_STYLE` line in both system prompts, the dashboard (`clock`/`when` Jinja filters, `clock12` in live.html, `whenLabel` in ask.js) and the PDF export. Transcript files, JSON logs, metadata and history keep their 24-hour/ISO stamps, because the parsers and session tagging depend on them. The dashboard's Raw view shows the file verbatim.
+
+**Discord answer length.** Discord caps a message at 2000 characters. `/ask` never truncates. `claude.ask(max_chars=answer_budget(question))` adds an uncached `OUTPUT LIMIT` system block after the cached blocks, so the transcript cache is still shared with the dashboard. It sets a target of about 70% of the budget plus a hard ceiling, because models overshoot a stated count by up to a third. Anything still over the limit is split by `utils.answer.discord_messages` at paragraph, line, then word boundaries, closing and reopening code fences across messages, and posted as follow-ups. The dashboard passes no budget. Measured on tonight's session: 7 of 8 answers fit one message, and a full recap went 7,034 to about 2,000 characters.
+
+**GM check (discord-transcript-bot-zm3).** Every model interaction is gated by `src/llm/guard.py`, called from inside `claude.ask` and `claude.ask_lore` (so Discord `/ask`, `/ask-public`, the dashboard ask box and Lore can't skip it). One structured-output call to `GUARD_MODEL` (default `claude-haiku-5-5`, effort low, ~800 in / ~60 out tokens, ~2s) classifies the question as `ok`, `strategy`, `optimization`, `hidden_info` or `prediction`. Blocked questions raise `claude.AskBlocked` (deliberately not an `AskFailed`) before the answer model runs. The player sees a short in-voice refusal (`guard.block_message`), and the history records status `blocked` with the classifier's reason. GM mode (Lore with GM notes ticked) relaxes only `hidden_info`/`prediction`. It **fails closed**: if the check can't run, the question isn't answered. `TABLE_RULES` in both system prompts is the backstop. `TABLE_GUARD=off` disables it. Live-checked on 12 questions (6 block, 6 allow), all correct; re-run that check after editing `GUARD_SYSTEM`.
+
+**Lore page (dashboard only, discord-transcript-bot-sjc).** `/lore` asks about a campaign from its library notes with no transcript: `claude.ask_lore` (its own system prompt; header from `sessions.campaign_header`; the same `read_campaign_notes` loop via `_run`). A per-question checkbox admits `audience: gm` notes. Questions are recorded with source `dashboard-lore`. **Not exposed to Discord on purpose:** `tests/test_llm_claude.py::test_lore_is_not_exposed_to_discord` fails if `main.py` or `src/bot/` references `ask_lore`. Answers on the dashboard are rendered as a safe Markdown subset (`web/answer_markdown.py` for server pages, `renderMarkdown` in `static/ask.js`; both escape first).
+
+**Answer voice.** Each game in `library.yml` can set `voice:`; Cyberpunk RED and D&D 5e have defaults in `library.DEFAULT_VOICES` (a word or two of flavour, facts kept plain). It reaches the model as a `STYLE:` line under the `SESSION:` header; `voice: ""` turns it off.
+
+There is no local fallback: without wifi there is no Discord voice either, so a local tier only ever covered "Anthropic down while Discord up". This replaced a three-tier OpenRouter → Cerebras → Ollama chain (discord-transcript-bot-gh7); do not reintroduce provider failover here.
+
+The dashboard's Live page has the same ask box: `POST /ask` in `web/app.py` reads the newest session file (or a named transcript) and calls the same `claude.ask`, so `make web` also runs under `op run` when `op.env` exists. Its HTTP contract is in `tests/test_web.py` (400 bad question, 404 unknown file, 409 nothing transcribed, 502 `AskFailed.user_message`, 503 no key).
+
+`health.py:_check_ask_provider` only reports whether the key is present (a test call would spend money on every start) and is never critical: transcription does not depend on `/ask`.
+
+**`src/llm/claude.ask()` is blocking and must be called via `asyncio.to_thread`.** A call can take tens of seconds, which would stall voice receive and the gateway heartbeat rather than just the command.
 
 ### Transcription engine selection (`src/asr/selection.py`)
 
@@ -61,7 +91,7 @@ These tune the local transcription backend (no effect when `TRANSCRIPTION_METHOD
 - `MLX_WHISPER_MODEL` — optional; override the MLX HF repo (otherwise mapped from `WHISPER_MODEL`, e.g. `large-v3` → `mlx-community/whisper-large-v3-mlx`).
 - `WHISPER_BEAM_SIZE` (default 5), `WHISPER_BEST_OF` (default 5), `WHISPER_BATCH_SIZE` (default 8) — faster-whisper decode params. The MLX backend ignores all three: `mlx_whisper` has no beam-search decoder (greedy + temperature fallback only) and no batched pipeline. So the beam5-vs-beam10 accuracy question applies only to the faster-whisper path; the final value is set by the A/B bake-off (discord-transcript-bot-d6j).
 
-**Warm the model before a session:** `make prewarm`. Weights download lazily on the first transcription — ~3 GB for MLX — so a cold cache means the first person to speak stalls the bot for minutes. `make prewarm` downloads and does a real end-to-end decode; `python scripts/prewarm_models.py --check` just reports cache state.
+**Warm the model before a session:** `make prewarm`. Weights download lazily on the first transcription — ~3 GB for MLX — so a cold cache means the first person to speak stalls the bot for minutes. `make prewarm` downloads and does a real end-to-end decode; `python scripts/prewarm_models.py --check` just reports cache state (exit 1 when the resolved model is cold). The startup health check runs the same probe (`src/asr/model_cache.py`) and logs a loud warning *before* a cold-cache download starts, so a multi-minute stall is never unexplained; the probe mirrors `selection._build_backend`'s choice without loading anything, so keep the two in step.
 
 ### Reference-audio capture (`src/session_capture.py`)
 
@@ -70,7 +100,32 @@ These tune the local transcription backend (no effect when `TRANSCRIPTION_METHOD
 
 The draft manifest's `reference` fields are **machine output, not ground truth** — a human corrects them, then saves as `manifest.jsonl` for `scripts/ab_transcribe.py --manifest`. Scoring against an uncorrected draft compares Whisper to itself and reports a meaninglessly low WER; the harness warns if handed a `.draft` file. Each capture directory gets a README with the correction workflow.
 
+**Marginal clips are order-dependent** (discord-transcript-bot-adg): on near-unintelligible audio the MLX decode depends on what ran earlier in the same process, so those clips add order-dependent noise to the corpus WER. Bake-off methodology: `ab_transcribe.py --order-trials 3 --stable-manifest <out>` flags clips whose hypothesis changes between shuffled-order runs and writes the manifest without them; delete near-unintelligible clips from the reference rather than guessing their text; then score with `--isolate` (one subprocess per config). Per-clip WER and hypotheses are always in `--json-out`.
+
 Capture is best-effort by construction: `SessionCapture` swallows its own errors and the sink wraps its calls again, so no capture bug can cost a live session its transcription.
+
+## Secrets
+
+**Every credential an agent uses lives in 1Password.** API keys, tokens, DSNs, OAuth client secrets, webhook URLs, signing keys: if Claude Code, a cron job, an MCP server, or CI needs it, 1Password is the source of truth, and anything else (a local `.env`, SSM, GitHub Secrets, a server-side env file) is a derived copy seeded from it. This applies to the credentials this repo already uses, not only to new ones.
+
+- **Reference, don't copy.** Tracked files carry env var *names* and `op://<vault>/<item>/<field>` references, never values. Load at run time with `op run --env-file=op.env -- <cmd>` (an `op.env` of `op://` lines, gitignored) or `op read "op://..."` piped straight into the consumer.
+- **Name new items `<repo>-<service>`** (for example `mc-epn`), one item per service, fields named after the env vars. An item that already exists (such as the Anthropic one below) is referenced by its ID with whatever field name it has; the convention is for items this repo creates. Use the 1Password account that owns the work (personal `my.1password.com`, VisionWrights, or Newtack) and pass `--account` when more than one is signed in.
+- **A literal `.env` is debt, not a pattern.** It must be gitignored and `chmod 600`, and the inventory below marks it as pending migration. Move the values into 1Password the next time you touch them.
+- **Never print a secret.** Prove a key works by calling the API. Don't `cat` env files, echo variables, or paste values into transcripts, commit messages, or this file.
+- **Found a literal secret in a tracked file or in history?** Stop and tell the owner. It needs rotating and purging, and that is their call.
+- **Adding a credential:** create the 1Password item, add the `op://` line to `op.env.example` (or this repo's equivalent template), add a row below, and confirm the local copy is ignored.
+
+`main.py` calls `load_dotenv()`, which does not override variables already in the process, so `op run --env-file=op.env -- ./venv/bin/python main.py` works unchanged and the literal `.env` can shrink to the non-secret settings. `.env.sample` is the template for the non-secret settings; `op.env.example` is the template for `op.env`, and `make start` runs under `op run` whenever `op.env` exists.
+
+### Credentials this repo uses
+
+| Env var | Used by / purpose | Where it lives today | 1Password item |
+|---|---|---|---|
+| `DISCORD_BOT_TOKEN` | bot login (`src/bot/`, checked by `health.py`) | gitignored `.env`, literal value (migrate) | `dtb-discord` (to create) |
+| `ANTHROPIC_API_KEY` | `/ask` (`src/llm/claude.py`, presence checked by `health.py`) | `op.env` → 1Password (the pattern); a literal `.env` value is a stopgap | `Anthropic - evan.j.ray@gmail.com - Discord Transcript Bot` (vault `Credentials`, id `edgnovygji3let3vmtilywnsae`, field `credential`) |
+| `OPENAI_API_KEY` | transcription only when `TRANSCRIPTION_METHOD=openai` | not set today; when set, same `.env` (migrate) | `dtb-openai` (to create) |
+
+Not secrets, so not in the table: `CAMPAIGN_GM_NOTES`, `GUARD_MODEL`, `TABLE_GUARD`, `LIBRARY_DIR`, `SESSION_DAY_CUTOFF_HOUR`, `DISCORD_CHANNEL_ID`, `PLAYER_MAP_FILE_PATH`, `TRANSCRIPTION_METHOD`, `ASK_MODEL`, `ASK_EFFORT`, `ASR_BACKEND`, `WHISPER_*`, `MLX_WHISPER_MODEL`, `CAPTURE_*`, `BIAS_PROMPT_WITH_ROSTER`, `HF_HOME`, `HF_HUB_CACHE`, `FLASK_DEBUG`.
 
 ## Code Style
 
@@ -96,6 +151,7 @@ Capture is best-effort by construction: `SessionCapture` swallows its own errors
 ## Known Constraints
 
 - **DAVE protocol blocker (rechecked 2026-05-18):** Discord enforces E2EE on voice; this project depends on Pycord PR #3159 (`fix/voice-rec-2` branch) for voice-**receive** DAVE support. `requirements.txt` pins the branch directly. **Pycord 2.8.0 shipped 2026-05-18 but only includes DAVE voice-*send* (PR #3143) — the receive PR #3159 is still a draft, moved to the 2.9.0 milestone.** Do NOT switch to stable `py-cord==2.8.0`; it would re-break `/scribe`. Switch to a stable pin only once #3159 is merged and released (track the 2.9.0 milestone). See `DAVE_MIGRATION.md` for context.
+- **100%-core spin while recording (discord-transcript-bot-309):** observed once (2026-08-11) on a silent room; measured to be neither the engine nor `insert_voice` and to stop on `/stop` while still connected — i.e. a thread Pycord starts only while recording. Offline reproduction cleared `PacketRouter`/`JitterBuffer` (0% idle in every scenario) and found that `UDPKeepAlive.run` retries a failed UDP send with **no delay** (~6.5k iterations/s, logged only at DEBUG), plus its `delay = 5000` is used as seconds. `src/bot/pycord_patches.py` installs a guarded 1s backoff on that error path and logs the failure at WARNING; it refuses to patch if the upstream method changes shape. Not yet confirmed live: if `cpu_pct` in `.logs/bot_state.json` sits near 100 while `queue_depth` is 0, run `kill -USR1 <pid>` — `src/utils/thread_dump.py` writes a ranked stack dump to `.logs/thread_dump-*.txt` that names the thread. Upstream report draft: `docs/upstream/pycord-udp-keepalive-spin.md`.
 
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:7510c1e2 -->

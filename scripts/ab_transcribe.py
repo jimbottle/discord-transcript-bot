@@ -39,6 +39,33 @@ on proper nouns. To measure like-for-like, set a roster-augmented
 ``initial_prompt`` on the config(s) you score (it's a per-Config field,
 overridable via --configs JSON).
 
+ORDER EFFECTS AND MARGINAL CLIPS (discord-transcript-bot-adg)
+-------------------------------------------------------------
+Measured on real captured clips with the production MLX backend: for
+near-unintelligible audio the decode depends on what was transcribed earlier
+in the same process (GPU numerical state flipping a marginal argmax), while
+repeats within a process are stable and clear speech is unaffected. Because
+run_config loops every clip through one process, such clips contribute WER
+that depends on clip order and on which config ran first — differences
+between configs on them are noise, not signal.
+
+Two flags make that visible instead of folding it into the corpus number:
+
+    --order-trials 3     run each config 3 times with the clip order shuffled
+                         (trial 0 = manifest order); clips whose hypothesis
+                         changes between trials are reported as
+                         ORDER-SENSITIVE and counted in the table
+    --stable-manifest P  write the manifest minus every order-sensitive clip
+                         to P, ready to score for real
+    --isolate            run each config in a fresh subprocess so config B's
+                         numbers cannot depend on config A having run first
+
+Recommended methodology: `--order-trials 3 --stable-manifest stable.jsonl`
+once, review the flagged clips (delete near-unintelligible ones from the
+reference rather than guessing their text), then score the stable manifest
+with `--isolate`. Per-clip WER + hypotheses are always included in
+--json-out for inspection.
+
 EXTENDING (discord-transcript-bot-1s7 / -mni)
 ---------------------------------------------
 Each Config has a ``backend`` field (default "faster-whisper"). Add an MLX or
@@ -50,7 +77,11 @@ param, so it isn't expressible as a Config here.
 
 import argparse
 import json
+import os
+import random
+import subprocess
 import sys
+import tempfile
 import time
 import wave
 from dataclasses import dataclass, field, asdict
@@ -60,7 +91,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.asr.base import BackendUnavailable  # noqa: E402
-from src.wer import aggregate_wer, word_error_rate  # noqa: E402
+from src.wer import aggregate_wer, normalize_text, word_error_rate  # noqa: E402
 
 
 @dataclass
@@ -248,27 +279,103 @@ def _transcribe_clip(cfg, audio_path):
     )
 
 
-def run_config(cfg, clips):
-    """Run one config over all clips; return a result dict with corpus WER
-    and RTF."""
-    scores = []
-    proc_total = 0.0
-    audio_total = 0.0
-    for audio_path, reference in clips:
-        text, proc = _transcribe_clip(cfg, audio_path)
-        scores.append(word_error_rate(reference, text))
-        proc_total += proc
-        audio_total += wav_duration_seconds(audio_path)
-    agg = aggregate_wer(scores)
+def _trial_order(n_clips, trial):
+    """Clip order for one trial: 0 = manifest order; later trials are
+    seeded shuffles so a run is reproducible and two configs see the SAME
+    orders."""
+    order = list(range(n_clips))
+    if trial > 0:
+        random.Random(trial).shuffle(order)
+    return order
+
+
+def run_config(cfg, clips, *, order_trials=1):
+    """Run one config over all clips; return a result dict with corpus WER,
+    RTF and per-clip scores.
+
+    With ``order_trials > 1`` the clips are transcribed that many times in
+    different orders (see _trial_order). A clip whose normalized hypothesis
+    differs between trials is ORDER-SENSITIVE — its decode depends on what
+    ran before it, so its contribution to WER is noise
+    (discord-transcript-bot-adg). Headline numbers (wer/edits/proc_s/rtf)
+    always come from trial 0, the manifest order, so a plain run and the
+    first trial of a multi-trial run report identically.
+    """
+    n = len(clips)
+    hyps = [[] for _ in range(n)]  # per clip, one hypothesis per trial
+    trial_wers = []
+    proc0 = audio_total = 0.0
+    scores0 = []
+    for trial in range(max(1, order_trials)):
+        scores = [None] * n
+        for i in _trial_order(n, trial):
+            audio_path, reference = clips[i]
+            text, proc = _transcribe_clip(cfg, audio_path)
+            hyps[i].append(text)
+            scores[i] = word_error_rate(reference, text)
+            if trial == 0:
+                proc0 += proc
+                audio_total += wav_duration_seconds(audio_path)
+        if trial == 0:
+            scores0 = scores
+        trial_wers.append(aggregate_wer(scores)["wer"])
+
+    per_clip = []
+    for i, (audio_path, _reference) in enumerate(clips):
+        distinct = []
+        for h in hyps[i]:
+            key = normalize_text(h)
+            if key not in (normalize_text(d) for d in distinct):
+                distinct.append(h.strip())
+        per_clip.append(
+            {
+                "audio": os.path.basename(audio_path),
+                "path": audio_path,
+                "wer": scores0[i]["wer"],
+                "edits": scores0[i]["edits"],
+                "ref_words": scores0[i]["ref_words"],
+                "hyp": hyps[i][0].strip(),
+                "order_sensitive": len(distinct) > 1,
+                "hyps": distinct,
+            }
+        )
+
+    agg = aggregate_wer(scores0)
     return {
         "config": cfg.name,
         "wer": agg["wer"],
         "edits": agg["edits"],
         "ref_words": agg["ref_words"],
         "audio_s": audio_total,
-        "proc_s": proc_total,
-        "rtf": (proc_total / audio_total) if audio_total else 0.0,
+        "proc_s": proc0,
+        "rtf": (proc0 / audio_total) if audio_total else 0.0,
+        "order_trials": len(trial_wers),
+        "wer_min": min(trial_wers),
+        "wer_max": max(trial_wers),
+        "order_sensitive": [c["path"] for c in per_clip if c["order_sensitive"]],
+        "clips": per_clip,
     }
+
+
+def write_stable_manifest(src_manifest, unstable_paths, out_path):
+    """Copy ``src_manifest`` to ``out_path`` minus the clips whose resolved
+    audio path is in ``unstable_paths``. Lines are copied verbatim so every
+    field a human added during correction survives. Returns (kept, dropped)."""
+    base = Path(src_manifest).resolve().parent
+    kept = dropped = 0
+    unstable = {str(Path(p)) for p in unstable_paths}
+    out_lines = []
+    for line in Path(src_manifest).read_text().splitlines():
+        if not line.strip():
+            continue
+        audio = str(base / json.loads(line)["audio"])
+        if audio in unstable:
+            dropped += 1
+            continue
+        out_lines.append(line)
+        kept += 1
+    Path(out_path).write_text("\n".join(out_lines) + ("\n" if out_lines else ""))
+    return kept, dropped
 
 
 def load_configs(path):
@@ -277,16 +384,81 @@ def load_configs(path):
 
 
 def format_table(results):
+    multi = any(r.get("order_trials", 1) > 1 for r in results)
     header = f"{'config':<34} {'WER':>8} {'edits/ref':>12} {'RTF':>7} {'proc_s':>8}"
+    if multi:
+        header += f" {'WER range':>16} {'unstable':>8}"
     lines = [header, "-" * len(header)]
     for r in sorted(results, key=lambda r: r["wer"]):
         wer_pct = f"{r['wer'] * 100:.2f}%"
         ratio = f"{r['edits']}/{r['ref_words']}"
-        lines.append(
+        line = (
             f"{r['config']:<34} {wer_pct:>8} {ratio:>12} "
             f"{r['rtf']:>7.2f} {r['proc_s']:>8.1f}"
         )
+        if multi:
+            rng = f"{r.get('wer_min', r['wer']) * 100:.2f}-{r.get('wer_max', r['wer']) * 100:.2f}%"
+            line += f" {rng:>16} {len(r.get('order_sensitive', [])):>8}"
+        lines.append(line)
     return "\n".join(lines)
+
+
+def format_order_sensitivity(results):
+    """Per-config list of order-sensitive clips with their competing
+    hypotheses, so the human can decide which to cut from the reference."""
+    out = []
+    for r in results:
+        flagged = [c for c in r.get("clips", []) if c.get("order_sensitive")]
+        if not flagged:
+            continue
+        out.append(
+            f"\n{r['config']}: {len(flagged)} order-sensitive clip(s) over "
+            f"{r['order_trials']} trials — these decodes depend on what ran "
+            "before them; treat their WER as noise:"
+        )
+        for c in flagged:
+            out.append(f"  {c['audio']}")
+            for h in c["hyps"]:
+                out.append(f"      -> {h!r}")
+    if out:
+        out.append(
+            "\nDelete near-unintelligible clips from the reference rather than "
+            "guessing their text; --stable-manifest writes the manifest without them."
+        )
+    return "\n".join(out)
+
+
+def _run_isolated(cfg, args):
+    """Run ONE config in a fresh interpreter (same manifest/flags, minus
+    --isolate) and return its result dict, or None if the child failed —
+    e.g. its backend was unavailable. A fresh process means no model
+    cache and no GPU numerical state carried over from an earlier config
+    (discord-transcript-bot-adg)."""
+    with tempfile.TemporaryDirectory(prefix="ab_transcribe_") as tmp:
+        cfg_path = Path(tmp) / "config.json"
+        out_path = Path(tmp) / "result.json"
+        cfg_path.write_text(json.dumps([asdict(cfg)]))
+        cmd = [sys.executable, str(Path(__file__).resolve())]
+        if args.manifest:
+            cmd += ["--manifest", args.manifest]
+        else:
+            cmd += ["--audio", args.audio, "--reference", args.reference]
+        cmd += [
+            "--configs",
+            str(cfg_path),
+            "--json-out",
+            str(out_path),
+            "--order-trials",
+            str(args.order_trials),
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if proc.returncode != 0 or not out_path.exists():
+            tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-3:]
+            for line in tail:
+                print(f"    | {line}", flush=True)
+            return None
+        results = json.loads(out_path.read_text())["results"]
+        return results[0] if results else None
 
 
 def main(argv=None):
@@ -298,21 +470,60 @@ def main(argv=None):
         "--configs", help="JSON list of config objects (default set if omitted)"
     )
     parser.add_argument("--json-out", help="write full results JSON here")
+    parser.add_argument(
+        "--order-trials",
+        type=int,
+        default=1,
+        metavar="N",
+        help="transcribe every clip N times in different orders and flag clips "
+        "whose decode changes (order-sensitive = noise; default 1)",
+    )
+    parser.add_argument(
+        "--stable-manifest",
+        metavar="PATH",
+        help="with --manifest and --order-trials>1: write the manifest minus "
+        "every order-sensitive clip here",
+    )
+    parser.add_argument(
+        "--isolate",
+        action="store_true",
+        help="run each config in a fresh subprocess so no config's numbers "
+        "depend on which config ran first",
+    )
     args = parser.parse_args(argv)
 
     if not args.manifest and not (args.audio and args.reference):
         parser.error("provide --manifest, or both --audio and --reference")
+    if args.order_trials < 1:
+        parser.error("--order-trials must be >= 1")
+    if args.stable_manifest and not (args.manifest and args.order_trials > 1):
+        parser.error("--stable-manifest needs --manifest and --order-trials > 1")
 
     clips = load_manifest(args)
     configs = load_configs(args.configs) if args.configs else DEFAULT_CONFIGS
 
-    print(f"Scoring {len(configs)} config(s) over {len(clips)} clip(s)...\n")
+    trials_note = f", {args.order_trials} order trials" if args.order_trials > 1 else ""
+    iso_note = ", one subprocess per config" if args.isolate else ""
+    print(
+        f"Scoring {len(configs)} config(s) over {len(clips)} clip(s)"
+        f"{trials_note}{iso_note}...\n"
+    )
     results = []
     skipped = []
     for cfg in configs:
         print(f"  running: {cfg.name} ...", flush=True)
+        if args.isolate:
+            result = _run_isolated(cfg, args)
+            if result is None:
+                print(
+                    f"  SKIPPED {cfg.name}: subprocess failed (see above)", flush=True
+                )
+                skipped.append(cfg.name)
+            else:
+                results.append(result)
+            continue
         try:
-            results.append(run_config(cfg, clips))
+            results.append(run_config(cfg, clips, order_trials=args.order_trials))
         except BackendUnavailable as e:
             # e.g. an mlx-whisper config on a host without mlx_whisper. Skip it
             # with a notice rather than aborting the whole run (which would
@@ -330,6 +541,21 @@ def main(argv=None):
     print("\n" + format_table(results))
     if skipped:
         print(f"\nSkipped {len(skipped)} config(s): {', '.join(skipped)}")
+    sensitivity = format_order_sensitivity(results)
+    if sensitivity:
+        print(sensitivity)
+
+    if args.stable_manifest:
+        unstable = set()
+        for r in results:
+            unstable.update(r.get("order_sensitive", []))
+        kept, dropped = write_stable_manifest(
+            args.manifest, unstable, args.stable_manifest
+        )
+        print(
+            f"\nWrote {args.stable_manifest}: kept {kept} clip(s), dropped "
+            f"{dropped} order-sensitive clip(s)"
+        )
 
     if args.json_out:
         Path(args.json_out).write_text(

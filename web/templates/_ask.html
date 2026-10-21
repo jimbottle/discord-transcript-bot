@@ -1,0 +1,36 @@
+{#
+  Ask-about-this-session box. Included by live.html (follows the newest
+  session, availability updated from each poll) and transcript.html (one
+  fixed file, availability known at render time). Variables:
+    ask_configured  — bool, ANTHROPIC_API_KEY present in this process
+    ask_filename    — transcript to question; empty/None = newest session
+    ask_static      — True when the page has no live poll to update it
+    ask_empty       — True when the transcript has nothing to ask about yet
+    ask_session_key — session key whose earlier questions to show (static pages)
+#}
+<article id="ask-panel">
+    <header>
+        <strong>Ask about this session</strong>
+        <span id="ask-meta" class="search-meta"></span>
+    </header>
+    <form id="ask-form" autocomplete="off"
+          data-ask-url="{{ url_for('ask_session') }}"
+          data-filename="{{ ask_filename or '' }}"
+          data-ask-configured="{{ 'true' if ask_configured else 'false' }}"
+          data-static="{{ 'true' if ask_static else 'false' }}"
+          data-empty="{{ 'true' if ask_empty else 'false' }}"
+          data-history-url="{{ url_for('questions_data') }}"
+          data-session="{{ ask_session_key or '' }}">
+        <textarea id="ask-question" name="question" rows="2"
+                  maxlength="2000" required
+                  placeholder="e.g. What did the party agree to do next?"></textarea>
+        <div class="ask-actions">
+            <button type="submit" id="ask-submit">Ask</button>
+            <span id="ask-status" class="search-meta" aria-live="polite"></span>
+        </div>
+    </form>
+    <div id="ask-answers" aria-live="polite"></div>
+</article>
+{# Synchronous on purpose: the form is above, and a page's own script
+   (live.html) may call window.AskBox right after this include. #}
+<script src="{{ url_for('static', filename='ask.js') }}"></script>

@@ -13,8 +13,8 @@ This project is a Discord bot that transcribes voice channel audio into text in 
 - Supports multiple users.
 - Thread-safe operations for concurrent transcriptions.
 - Web dashboard for managing the bot and viewing transcripts.
-- Startup health checks with auto-fix (starts Ollama, pulls models, creates directories).
-- `/ask` command to query the current transcript via Ollama (works in DMs too).
+- Startup health checks with auto-fix (verifies ffmpeg/opus/the Whisper model, creates directories).
+- `/ask` command to query the current transcript with Claude via the Anthropic API (works in DMs too).
 
 ## Setup
 
@@ -25,7 +25,7 @@ To set up and run this Discord bot, follow these steps:
 - Python 3.8 or higher.
 - Discord bot token (see [Discord Developer Portal](https://discord.com/developers/applications)).
 - `ffmpeg` installed and added to your system's PATH.
-- [Ollama](https://ollama.ai) installed (for the `/ask` command).
+- An Anthropic API key (for the `/ask` command; transcription works without it).
 
 ### Installation
 
@@ -130,4 +130,4 @@ If you want to use, copy, or redistribute this code, open an issue. Resolving th
 - Originally created by [Josh Robinett](https://github.com/joshinryz) as [volo_discord_bot](https://github.com/joshinryz/volo_discord_bot), with contributions from [Noah Feinberg](https://github.com/NoahFeinberg). This fork builds directly on that work.
 - This project uses [Faster Whisper](https://github.com/SYSTRAN/faster-whisper) for audio transcription.
 - Built with [Pycord](https://github.com/Pycord-Development/pycord) for Discord integration.
-- Uses [Ollama](https://ollama.ai) for local LLM-powered transcript queries.
+- Uses Claude (Anthropic API) for transcript queries; the transcript is sent as a cached system block.

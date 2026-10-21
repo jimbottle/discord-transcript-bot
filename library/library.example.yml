@@ -1,0 +1,21 @@
+# Copy to library/library.yml and edit. See library/README.md.
+games:
+  cyberpunk-red:
+    name: Cyberpunk RED
+    # voice: ""   # optional: override the built-in answer flavour, or "" for none
+  dnd-5e:
+    name: D&D 5e
+
+groups:
+  example-group:
+    name: Example group
+    gm: Their GM
+    discord_guilds: [123456789012345678]   # whole server belongs to this group
+    # discord_channels: [234567890123456789] # or just these voice channels (wins over guilds)
+    active_campaign: example-campaign      # new recordings are tagged with this
+
+campaigns:
+  example-campaign:
+    name: Example Campaign
+    group: example-group
+    game: dnd-5e

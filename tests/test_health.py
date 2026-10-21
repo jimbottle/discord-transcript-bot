@@ -7,54 +7,28 @@ faster-whisper large-v3 — conftest's `_fast_whisper_model` fixture stubs
 `audio_model` for the fast suite.
 """
 
+import os
 from unittest.mock import MagicMock
 
 import pytest
 
 from src.bot.health import HealthCheck
+from src.bot import health as health_module
 
 
-def _stub_ollama_list(monkeypatch, installed_names):
-    """Stub ollama.list() so _check_ollama_model runs without a daemon."""
-    import ollama
+@pytest.fixture(autouse=True)
+def _isolate_status_file(monkeypatch, tmp_path):
+    """No test may write .logs/health_status.json.
 
-    fake = MagicMock()
-    fake.models = [MagicMock(model=n) for n in installed_names]
-    monkeypatch.setattr(ollama, "list", lambda: fake)
-
-
-def test_ollama_model_uses_env_override(monkeypatch):
-    """Regression for roborev #768 (MEDIUM): _check_ollama_model must
-    honor ASK_OLLAMA_MODEL, not a hardcoded literal."""
-    monkeypatch.setenv("ASK_OLLAMA_MODEL", "custom/model:99")
-    _stub_ollama_list(monkeypatch, [])  # nothing installed
-    hc = HealthCheck()
-    hc._check_ollama_model()
-    assert "custom/model:99" in hc.checks["ollama_model"]["message"]
-
-
-def test_ollama_model_default_when_env_unset(monkeypatch):
-    monkeypatch.delenv("ASK_OLLAMA_MODEL", raising=False)
-    _stub_ollama_list(monkeypatch, [])
-    hc = HealthCheck()
-    hc._check_ollama_model()
-    assert "gemma4:26b" in hc.checks["ollama_model"]["message"]
-
-
-def test_ollama_model_empty_env_falls_back_to_default(monkeypatch):
-    monkeypatch.setenv("ASK_OLLAMA_MODEL", "  ")
-    _stub_ollama_list(monkeypatch, [])
-    hc = HealthCheck()
-    hc._check_ollama_model()
-    assert "gemma4:26b" in hc.checks["ollama_model"]["message"]
-
-
-def test_ollama_model_ok_when_resolved_model_installed(monkeypatch):
-    monkeypatch.setenv("ASK_OLLAMA_MODEL", "gemma4:26b")
-    _stub_ollama_list(monkeypatch, ["gemma4:26b"])
-    hc = HealthCheck()
-    hc._check_ollama_model()
-    assert hc.checks["ollama_model"]["ok"] is True
+    The web dashboard reads that exact path (web/bot_manager.py), and the
+    bot only rewrites it at startup. A test that calls run_all(autofix=True)
+    with most checks stubbed would leave the UI reporting a handful of fake
+    checks — as "ready" — for a live bot whose real results had been erased,
+    and it would stay wrong for the rest of the session.
+    """
+    monkeypatch.setattr(
+        health_module, "STATUS_FILE", str(tmp_path / "health_status.json")
+    )
 
 
 def test_run_all_returns_dict_with_expected_keys():
@@ -70,8 +44,7 @@ def test_run_all_returns_dict_with_expected_keys():
         "transcripts_dir",
         "log_dirs",
         "player_map",
-        "ollama_server",
-        "ollama_model",
+        "ask_provider",
         "discord_gateway",
     }
     assert expected.issubset(results.keys())
@@ -107,57 +80,167 @@ def test_summary_renders_one_line_per_check():
     assert summary.count("\n") + 1 >= len(hc.checks)
 
 
-# ── ollama_model is non-critical ──────────────────────────────────────
-# Regression guards for "bot won't start because /ask's model isn't pulled."
-# /ask is the only thing that uses the Ollama model. Voice transcription
-# does not. on_ready aborts if all_ok() is False, so ollama_model being
-# critical was effectively blocking the entire bot on a 4GB model pull.
+# ── ask_provider ──────────────────────────────────────────────────────
+# /ask is the only thing that needs the Anthropic key. Voice transcription
+# does not, and on_ready aborts if all_ok() is False, so this check must
+# never be critical.
 
 
-def test_ollama_model_is_non_critical():
+def test_ask_provider_passes_with_a_key(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("ASK_MODEL", "claude-sonnet-5-5")
     hc = HealthCheck()
-    hc.run_all(autofix=False, bot=None)
-    assert (
-        hc.checks["ollama_model"]["critical"] is False
-    ), "ollama_model must stay non-critical so a missing /ask model doesn't block startup"
+    hc._check_ask_provider()
+    check = hc.checks["ask_provider"]
+    assert check["ok"] is True
+    assert "claude-sonnet-5-5" in check["message"]
+    assert check["critical"] is False
 
 
-def test_all_ok_when_only_ollama_model_fails():
-    """Synthesize a check set where every critical check passes and only
-    ollama_model is failing — all_ok() must return True."""
+def test_ask_provider_warns_without_a_key(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "  ")
+    hc = HealthCheck()
+    hc._check_ask_provider()
+    check = hc.checks["ask_provider"]
+    assert check["ok"] is False
+    assert "ANTHROPIC_API_KEY" in check["message"]
+    assert check["critical"] is False
+
+
+def test_all_ok_when_only_ask_provider_fails():
+    """Every critical check passes and only ask_provider is failing —
+    all_ok() must return True so a missing key never blocks startup."""
     hc = HealthCheck()
     hc.checks = {
         "env_vars": {"ok": True, "message": "ok", "critical": True},
         "ffmpeg": {"ok": True, "message": "ok", "critical": True},
         "opus": {"ok": True, "message": "ok", "critical": True},
         "whisper_model": {"ok": True, "message": "ok", "critical": True},
-        "ollama_server": {"ok": True, "message": "ok", "critical": True},
-        "ollama_model": {"ok": False, "message": "not installed", "critical": False},
+        "ask_provider": {"ok": False, "message": "no key", "critical": False},
     }
-    assert (
-        hc.all_ok() is True
-    ), "all_ok() must return True if only non-critical ollama_model is failing"
+    assert hc.all_ok() is True
 
 
-def test_missing_model_suggests_a_command_that_can_work(monkeypatch):
-    """A pullable-but-absent model gets the pull command."""
-    monkeypatch.setenv("ASK_OLLAMA_MODEL", "gemma4:26b")
-    _stub_ollama_list(monkeypatch, [])
+def test_run_all_never_calls_anthropic(monkeypatch):
+    """The health check must not spend tokens: no client is ever built."""
+    import anthropic
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+    def boom(*a, **k):
+        raise AssertionError("health check constructed an Anthropic client")
+
+    monkeypatch.setattr(anthropic, "Anthropic", boom)
     hc = HealthCheck()
-    hc._check_ollama_model()
-    assert "ollama pull gemma4:26b" in hc.checks["ollama_model"]["message"]
+    hc._check_ask_provider()
+    assert hc.checks["ask_provider"]["ok"] is True
 
 
-def test_docker_named_model_does_not_suggest_a_failing_pull(monkeypatch):
-    """The regression: health used to tell users to run `ollama pull
-    ai/mistral:latest` — the exact command that had just 404'd for them,
-    sending them in a circle instead of naming the real problem."""
-    monkeypatch.setenv("ASK_OLLAMA_MODEL", "ai/mistral:latest")
-    _stub_ollama_list(monkeypatch, [])
+def test_health_checks_never_touch_the_live_status_file(monkeypatch, tmp_path):
+    """Regression: a stubbed run_all(autofix=True) once overwrote
+    .logs/health_status.json, leaving the dashboard reporting three fake
+    checks as 'ready' for a bot whose real results were gone."""
+    live = os.path.join(os.getcwd(), ".logs", "health_status.json")
+    before = os.path.exists(live) and os.path.getmtime(live)
+
     hc = HealthCheck()
-    hc._check_ollama_model()
-    message = hc.checks["ollama_model"]["message"]
+    for name in (
+        "_check_env_vars",
+        "_check_ffmpeg",
+        "_check_opus",
+        "_check_whisper_model",
+        "_check_openai_api",
+        "_check_player_map",
+        "_check_discord_gateway",
+        "_check_ask_provider",
+    ):
+        monkeypatch.setattr(hc, name, lambda *a, **kw: None)
+    monkeypatch.setattr(hc, "_check_transcripts_dir", lambda **kw: None)
+    monkeypatch.setattr(hc, "_check_log_dirs", lambda **kw: None)
 
-    assert "ollama pull ai/mistral:latest" not in message
-    assert "Docker Hub" in message
-    assert "ASK_OLLAMA_MODEL" in message
+    hc.run_all(autofix=True)
+
+    after = os.path.exists(live) and os.path.getmtime(live)
+    assert after == before, "run_all wrote to the live health status file"
+
+
+# ── whisper_model: cold cache is announced, not silently downloaded ────
+# discord-transcript-bot-56t. get_backend() downloads ~3 GB on a cold
+# cache from inside this check; the operator must be told BEFORE the stall.
+
+
+def _cache_state(cached):
+    from src.asr.model_cache import CacheState
+
+    return CacheState(
+        backend="mlx-whisper",
+        model_id="large-v3",
+        repo="mlx-community/whisper-large-v3-mlx",
+        cached=cached,
+        cache_dir="/nowhere/hub",
+        approx_gb=3.0,
+    )
+
+
+def test_whisper_check_warns_before_a_cold_cache_download(monkeypatch, caplog):
+    import logging
+
+    from src.asr import model_cache
+
+    monkeypatch.setattr(model_cache, "probe", lambda: _cache_state(False))
+    hc = HealthCheck()
+    written = []
+    provisional = []
+
+    def capture_status(phase, check=None):
+        written.append((phase, check))
+        provisional.append(dict(hc.checks.get("whisper_model", {})))
+
+    monkeypatch.setattr(hc, "_write_status", capture_status)
+    with caplog.at_level(logging.WARNING, logger="src.bot.health"):
+        hc._check_whisper_model(autofix=True)
+
+    assert any("downloading ~3 GB" in r.message for r in caplog.records)
+    # The provisional record persisted to the dashboard is an in-progress
+    # notice (warn styling), not a critical failure (red ✗) — roborev #4307.
+    assert provisional and provisional[0]["ok"] is False
+    assert provisional[0]["critical"] is False
+    # The provisional "downloading" state reached the dashboard status file
+    # before the (stubbed) load ran.
+    assert ("initializing", "whisper_model") in written
+    # ...and the final verdict still reflects the real load.
+    result = hc.checks["whisper_model"]
+    assert result["ok"] is True
+    assert "make prewarm" in result["message"]
+
+
+def test_whisper_check_is_quiet_on_a_warm_cache(monkeypatch, caplog):
+    import logging
+
+    from src.asr import model_cache
+
+    monkeypatch.setattr(model_cache, "probe", lambda: _cache_state(True))
+    hc = HealthCheck()
+    written = []
+    monkeypatch.setattr(
+        hc, "_write_status", lambda phase, check=None: written.append((phase, check))
+    )
+    with caplog.at_level(logging.WARNING, logger="src.bot.health"):
+        hc._check_whisper_model(autofix=True)
+
+    assert not any("downloading" in r.message for r in caplog.records)
+    assert written == []
+    assert hc.checks["whisper_model"]["ok"] is True
+    assert "downloaded" not in hc.checks["whisper_model"]["message"]
+
+
+def test_whisper_check_survives_a_broken_probe(monkeypatch):
+    from src.asr import model_cache
+
+    def boom():
+        raise RuntimeError("probe exploded")
+
+    monkeypatch.setattr(model_cache, "probe", boom)
+    hc = HealthCheck()
+    hc._check_whisper_model()
+    assert hc.checks["whisper_model"]["ok"] is True

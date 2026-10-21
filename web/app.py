@@ -2,6 +2,7 @@ import os
 
 from flask import Flask, abort, jsonify, render_template, request
 
+import answer_markdown
 from bot_manager import BotManager
 from roster_service import get_roster, get_unmapped_speakers, roster_path
 from transcript_service import (
@@ -17,11 +18,28 @@ from transcript_service import (
     list_transcripts,
     parse_transcript_text,
     search_logs,
+    session_info,
+    transcript_path,
+    DeleteRefused,
+    delete_transcript,
+    has_captured_audio,
+    is_being_recorded,
 )
 
 # roster_service put the project root on sys.path so the shared store
 # (the bot's own roster writer) is importable from web/.
 from src import player_map_store  # noqa: E402
+
+# The Live page's ask box goes through the very module the bot's /ask uses,
+# so the prompt, the transcript cache and the error messages are identical
+# whether the question comes from Discord or from the dashboard.
+from src.llm import claude  # noqa: E402
+from src import question_log, sessions  # noqa: E402
+from src.utils import timefmt  # noqa: E402
+import time  # noqa: E402
+
+# Upper bound on a posted question; the transcript is the real payload.
+MAX_QUESTION_CHARS = 2000
 
 # Load .env so a custom PLAYER_MAP_FILE_PATH (or other config) is honoured
 # by the dashboard process too — the bot already loads it. Best-effort:
@@ -39,18 +57,49 @@ app = Flask(__name__)
 bot = BotManager()
 # Format a raw seconds count in templates, e.g. a guild's stalled output age.
 app.jinja_env.filters["duration"] = format_duration
+# Model answers are Markdown; render the safe subset (escaped first).
+app.jinja_env.filters["answer_md"] = answer_markdown.render
+# 12-hour times for people; the files keep 24-hour stamps.
+app.jinja_env.filters["clock"] = lambda v: timefmt.clock(v)
+app.jinja_env.filters["when"] = lambda v: timefmt.when(v)
+
+# The dashboard only ever listens on loopback. Requests must also *address*
+# it as loopback: a DNS-rebinding page (attacker.example resolving to
+# 127.0.0.1 after first load) arrives with Host/Origin set to the attacker's
+# name, and that is what the Host check and the Origin check below reject.
+# Both compare against these fixed values, never against the request's own
+# Host header, which is attacker-controlled in exactly that scenario.
+DASHBOARD_HOST = "127.0.0.1"
+DASHBOARD_PORT = 5001
+_LOOPBACK_NAMES = ("127.0.0.1", "localhost", "[::1]")
+
+
+def _allowed_hosts():
+    port = app.config.get("DASHBOARD_PORT", DASHBOARD_PORT)
+    bare = set(_LOOPBACK_NAMES)
+    return bare | {f"{name}:{port}" for name in bare}
+
+
+def _allowed_origins():
+    return {f"http://{host}" for host in _allowed_hosts()}
+
+
+@app.before_request
+def _reject_foreign_host():
+    if request.host not in _allowed_hosts():
+        abort(403)
 
 
 def _require_csrf_header():
     # CSRF defense for state-changing endpoints. Cross-origin <form> submissions
     # cannot set custom headers, so requiring X-Requested-With blocks the classic
     # form-CSRF attack. Additionally reject any request whose Origin is set and
-    # doesn't match this host — defense in depth against a browser extension or
-    # other same-machine actor that can set arbitrary headers.
+    # isn't one of the loopback origins — defense in depth against a browser
+    # extension or other same-machine actor that can set arbitrary headers.
     if request.headers.get("X-Requested-With") != "XMLHttpRequest":
         abort(403)
     origin = request.headers.get("Origin")
-    if origin and origin != request.host_url.rstrip("/"):
+    if origin and origin not in _allowed_origins():
         abort(403)
 
 
@@ -78,7 +127,101 @@ def index():
 def transcripts():
     txt_files = list_transcripts()
     log_files = list_logs()
-    return render_template("transcripts.html", txt_files=txt_files, log_files=log_files)
+    return render_template(
+        "transcripts.html",
+        txt_files=txt_files,
+        log_files=log_files,
+        tag_choices=_tag_choices(),
+        has_audio=has_captured_audio,
+        is_live=is_being_recorded,
+    )
+
+
+def _tag_choices():
+    """Campaigns (with their group and game), groups and games from
+    library.yml, for the tag editor's dropdowns."""
+    lib = sessions_library()
+    return {
+        "campaigns": sorted(
+            (
+                {
+                    "id": c.id,
+                    "name": c.name,
+                    "group": c.group or "",
+                    "game": c.game or "",
+                }
+                for c in lib.campaigns.values()
+            ),
+            key=lambda c: c["name"].lower(),
+        ),
+        "groups": sorted(
+            ({"id": g.id, "name": g.name} for g in lib.groups.values()),
+            key=lambda g: g["name"].lower(),
+        ),
+        "games": sorted(
+            ({"id": g.id, "name": g.name} for g in lib.games.values()),
+            key=lambda g: g["name"].lower(),
+        ),
+    }
+
+
+@app.route("/transcripts/<filename>/delete", methods=["POST"])
+def delete_transcript_route(filename):
+    """Permanently delete a recording. JSON ``{"confirm": true,
+    "include_audio"?: bool}``; without an explicit ``confirm: true`` nothing
+    is deleted (the page's Yes button sends it). Refuses (409) while the
+    bot is still writing the file."""
+    _require_csrf_header()
+    data = request.get_json(silent=True) or {}
+    if data.get("confirm") is not True:
+        return jsonify({"error": "confirmation required"}), 400
+    if transcript_path(filename) is None:
+        return jsonify({"error": "transcript not found"}), 404
+    try:
+        removed = delete_transcript(
+            filename, include_audio=data.get("include_audio") is True
+        )
+    except DeleteRefused as e:
+        return jsonify({"error": str(e)}), 409
+    if not removed:
+        return jsonify({"error": "transcript not found"}), 404
+    app.logger.warning("deleted from the dashboard: %s", ", ".join(removed))
+    return jsonify({"deleted": removed})
+
+
+@app.route("/transcripts/<filename>/tag", methods=["POST"])
+def retag_transcript(filename):
+    """JSON ``{"campaign", "group", "game", "whole_session"}`` -> rewrite the
+    recording's session tag (``.meta.json``). Ids must exist in
+    library.yml; empty clears. ``whole_session`` (default true) applies the
+    change to every recording of the session."""
+    _require_csrf_header()
+    path = transcript_path(filename)
+    if path is None:
+        return jsonify({"error": "transcript not found"}), 404
+    data = request.get_json(silent=True) or {}
+    fields = {}
+    for key in ("campaign", "group", "game"):
+        v = data.get(key)
+        if v is not None and not isinstance(v, str):
+            return jsonify({"error": f"{key} must be a string"}), 400
+        if key in data:
+            fields[key] = (v or "").strip()
+    try:
+        written = sessions.retag(
+            path,
+            sessions_library(),
+            whole_session=data.get("whole_session", True) is not False,
+            **fields,
+        )
+    except sessions.TagError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify(
+        {
+            "updated": [p.name for p in written],
+            "session": session_info(filename),
+        }
+    )
 
 
 @app.route("/transcripts/<filename>")
@@ -90,7 +233,15 @@ def view_transcript(filename):
         return "Not found", 404
     entries = parse_transcript_text(raw)
     return render_template(
-        "transcript.html", filename=filename, entries=entries, raw=raw
+        "transcript.html",
+        filename=filename,
+        entries=entries,
+        raw=raw,
+        ask_configured=claude.configured(),
+        session=session_info(filename),
+        tag_choices=_tag_choices(),
+        has_audio=has_captured_audio(filename),
+        is_live=is_being_recorded(filename),
     )
 
 
@@ -109,7 +260,124 @@ def live():
 
 @app.route("/live/data")
 def live_data():
-    return jsonify(get_live_session())
+    data = get_live_session()
+    # Lets the Live page disable its ask box, with the reason, instead of
+    # finding out on the first question.
+    data["ask_configured"] = claude.configured()
+    data["session"] = session_info(data["filename"])
+    return jsonify(data)
+
+
+@app.route("/ask", methods=["POST"])
+def ask_session():
+    """Answer a question about a session transcript with Claude.
+
+    JSON body: ``{"question": str, "filename": optional str}``. Without
+    ``filename`` the newest session file (the live one) is used.
+    Blocking for the length of the API call (tens of seconds at most);
+    Flask's threaded dev server keeps serving the live poll meanwhile.
+    Errors come back as ``{"error": msg}`` with a status that says why:
+    400 bad question, 404 unknown transcript, 409 nothing transcribed
+    yet, 502 Anthropic said no (``AskFailed.user_message``), 503 no key.
+    """
+    _require_csrf_header()
+    data = request.get_json(silent=True) or {}
+    question = str(data.get("question") or "").strip()
+    if not question:
+        return jsonify({"error": "question is required"}), 400
+    if len(question) > MAX_QUESTION_CHARS:
+        return (
+            jsonify(
+                {"error": f"question is too long (max {MAX_QUESTION_CHARS} characters)"}
+            ),
+            400,
+        )
+    filename = data.get("filename")
+    if filename is not None and not isinstance(filename, str):
+        # _safe_path does substring tests on it; anything but a string is
+        # an unknown transcript, not a 500.
+        return jsonify({"error": "transcript not found"}), 404
+    filename = filename or get_live_session()["filename"]
+    path = transcript_path(filename) if filename else None
+    if filename and path is None:
+        return jsonify({"error": "transcript not found"}), 404
+
+    def _log(status, started=None, **kw):
+        question_log.record(
+            source="dashboard",
+            question=question,
+            status=status,
+            asker="dashboard",
+            transcript_path=path,
+            latency_s=(time.perf_counter() - started) if started else None,
+            **kw,
+        )
+
+    if not claude.configured():
+        _log(question_log.REJECTED, error=claude.NO_KEY_MSG)
+        return jsonify({"error": claude.NO_KEY_MSG}), 503
+
+    # The whole session the file belongs to (every recording of that
+    # campaign night), its header line and its note folders.
+    transcript, header, note_dirs, files = (
+        sessions.ask_context(path) if path else ("", "", [], [])
+    )
+    if not transcript or not transcript.strip():
+        no_data = "No transcript data in the current session yet."
+        _log(question_log.REJECTED, error=no_data)
+        return jsonify({"error": no_data}), 409
+
+    started = time.perf_counter()
+    try:
+        result = claude.ask(transcript, question, header=header, note_dirs=note_dirs)
+    except claude.AskBlocked as e:
+        _log(question_log.BLOCKED, started, error=e.user_message, verdict=e.verdict)
+        return jsonify(_blocked_body(question, e))
+    except claude.AskFailed as e:
+        app.logger.error("ask failed: %s (%r)", e.user_message, e.__cause__)
+        _log(question_log.FAILED, started, error=e.user_message)
+        return jsonify({"error": e.user_message}), 502
+    answer = result.answer.strip()
+    if not answer:
+        _log(question_log.FAILED, started, error=claude.EMPTY_MSG, result=result)
+        return jsonify({"error": claude.EMPTY_MSG}), 502
+    _log(question_log.ANSWERED, started, answer=answer, result=result)
+    app.logger.info(
+        "ask answered by %s (input=%s, cached=%s, output=%s, notes=%s)",
+        result.model,
+        result.input_tokens,
+        result.cached_tokens,
+        result.output_tokens,
+        result.notes_used,
+    )
+    return jsonify(
+        {
+            "filename": filename,
+            "question": question,
+            "answer": answer,
+            "model": result.model,
+            "input_tokens": result.input_tokens,
+            "cached_tokens": result.cached_tokens,
+            "output_tokens": result.output_tokens,
+            "notes_used": list(result.notes_used),
+            "recordings": len(files),
+        }
+    )
+
+
+def _history_filters():
+    def arg(name):
+        v = request.args.get(name, "").strip()
+        return v or None
+
+    gm = arg("include_gm")
+    return {
+        "session_key": arg("session"),
+        "campaign": arg("campaign"),
+        "source": arg("source"),
+        "status": arg("status"),
+        "include_gm": (False if gm and gm.lower() in ("0", "false", "no") else None),
+    }
 
 
 @app.route("/search")
@@ -136,6 +404,160 @@ def bot_stop():
 @app.route("/bot/status")
 def bot_status():
     return jsonify(bot.status())
+
+
+def _blocked_body(question, e):
+    """200, not an error: the request worked and the GM check said no. The
+    ask box shows it as a refusal, not in error red."""
+    return {
+        "question": question,
+        "blocked": True,
+        "answer": e.user_message,
+        "category": e.verdict.category,
+    }
+
+
+@app.route("/lore")
+def lore():
+    """Campaign Q&A from library notes only. Dashboard-only on purpose: no
+    Discord command reaches claude.ask_lore."""
+    lib = sessions_library()
+    campaigns = sorted(lib.campaigns.values(), key=lambda c: c.name.lower())
+    chosen = request.args.get("campaign") or next(
+        (g.active_campaign for g in lib.groups.values() if g.active_campaign), None
+    )
+    if chosen not in lib.campaigns:
+        chosen = campaigns[0].id if campaigns else None
+    c = lib.campaigns.get(chosen) if chosen else None
+    from src.llm import campaign as notes_mod
+
+    dirs = lib.note_dirs(game=c.game, group=c.group, campaign=c.id) if c else []
+    table_notes = notes_mod.load_notes(dirs, include_gm=False)
+    all_notes = notes_mod.load_notes(dirs, include_gm=True)
+    return render_template(
+        "lore.html",
+        campaigns=campaigns,
+        chosen=c,
+        game_name=lib.name("game", c.game) if c else None,
+        group_name=lib.name("group", c.group) if c else None,
+        notes=all_notes,
+        table_count=len(table_notes),
+        ask_configured=claude.configured(),
+    )
+
+
+@app.route("/lore/ask", methods=["POST"])
+def lore_ask():
+    """JSON ``{"question", "campaign", "include_gm"?}`` -> answer from that
+    campaign's notes. Same status codes as /ask; recorded in the question
+    history as source ``dashboard-lore``."""
+    _require_csrf_header()
+    data = request.get_json(silent=True) or {}
+    question = str(data.get("question") or "").strip()
+    if not question:
+        return jsonify({"error": "question is required"}), 400
+    if len(question) > MAX_QUESTION_CHARS:
+        return (
+            jsonify(
+                {"error": f"question is too long (max {MAX_QUESTION_CHARS} characters)"}
+            ),
+            400,
+        )
+    campaign_id = data.get("campaign")
+    lib = sessions_library()
+    if not isinstance(campaign_id, str) or campaign_id not in lib.campaigns:
+        return jsonify({"error": "unknown campaign"}), 404
+    include_gm = data.get("include_gm") is True
+    c = lib.campaigns[campaign_id]
+
+    def _log(status, started=None, **kw):
+        question_log.record(
+            source="dashboard-lore",
+            question=question,
+            status=status,
+            asker="dashboard",
+            campaign=campaign_id,
+            include_gm=include_gm,
+            latency_s=(time.perf_counter() - started) if started else None,
+            **kw,
+        )
+
+    if not claude.configured():
+        _log(question_log.REJECTED, error=claude.NO_KEY_MSG)
+        return jsonify({"error": claude.NO_KEY_MSG}), 503
+    started = time.perf_counter()
+    try:
+        result = claude.ask_lore(
+            question,
+            header=sessions.campaign_header(lib, campaign_id),
+            note_dirs=lib.note_dirs(game=c.game, group=c.group, campaign=c.id),
+            include_gm=include_gm,
+        )
+    except claude.AskBlocked as e:
+        _log(question_log.BLOCKED, started, error=e.user_message, verdict=e.verdict)
+        return jsonify(_blocked_body(question, e))
+    except claude.AskFailed as e:
+        status = (
+            question_log.REJECTED
+            if e.user_message in (claude.NO_NOTES_MSG, claude.ONLY_GM_NOTES_MSG)
+            else question_log.FAILED
+        )
+        _log(status, started, error=e.user_message)
+        return jsonify({"error": e.user_message}), (
+            409 if status == question_log.REJECTED else 502
+        )
+    answer = result.answer.strip()
+    if not answer:
+        _log(question_log.FAILED, started, error=claude.EMPTY_MSG, result=result)
+        return jsonify({"error": claude.EMPTY_MSG}), 502
+    _log(question_log.ANSWERED, started, answer=answer, result=result)
+    return jsonify(
+        {
+            "campaign": campaign_id,
+            "question": question,
+            "answer": answer,
+            "model": result.model,
+            "input_tokens": result.input_tokens,
+            "cached_tokens": result.cached_tokens,
+            "output_tokens": result.output_tokens,
+            "notes_used": list(result.notes_used),
+        }
+    )
+
+
+@app.route("/questions")
+def questions():
+    filters = _history_filters()
+    entries = question_log.read(**filters, limit=500)
+    everything = question_log.read()
+    lib = sessions_library()
+    return render_template(
+        "questions.html",
+        entries=entries,
+        filters=filters,
+        campaigns=sorted({e["campaign"] for e in everything if e.get("campaign")}),
+        session_keys=sorted(
+            {e["session_key"] for e in everything if e.get("session_key")}, reverse=True
+        ),
+        campaign_name=lambda cid: lib.name("campaign", cid),
+        sources=question_log.SOURCES,
+        total=len(everything),
+    )
+
+
+@app.route("/questions/data")
+def questions_data():
+    try:
+        limit = max(1, min(500, int(request.args.get("limit", "100"))))
+    except ValueError:
+        limit = 100
+    return jsonify(question_log.read(**_history_filters(), limit=limit))
+
+
+def sessions_library():
+    from src import library
+
+    return library.load()
 
 
 @app.route("/roster")
@@ -198,4 +620,4 @@ def roster_delete():
 
 if __name__ == "__main__":
     debug = os.getenv("FLASK_DEBUG", "").lower() in ("1", "true", "yes")
-    app.run(host="127.0.0.1", port=5001, debug=debug)
+    app.run(host=DASHBOARD_HOST, port=DASHBOARD_PORT, debug=debug)

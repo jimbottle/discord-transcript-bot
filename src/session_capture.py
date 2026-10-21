@@ -103,6 +103,23 @@ understates the bot's real accuracy on names.
 You do not have to correct every clip. A few hundred well-chosen seconds
 spanning all speakers, including noisy/overlapping moments and plenty of
 spoken names, is worth more than hours of clean solo narration.
+
+## Marginal clips skew the result — cut them, don't guess
+
+For near-unintelligible audio the engine's output depends on what it
+transcribed earlier in the same process (measured: the same clip decoded two
+different ways depending on the clip before it, while clear speech was
+byte-identical). Such clips add WER that depends on clip order, not on the
+config — noise, not signal. Delete a clip you cannot confidently transcribe
+rather than typing a best guess, then let the harness find the rest:
+
+    python scripts/ab_transcribe.py --manifest manifest.jsonl \\
+        --order-trials 3 --stable-manifest manifest.stable.jsonl
+
+That transcribes every clip three times in shuffled orders, lists the clips
+whose decode changed with their competing hypotheses, and writes the
+manifest without them. Score `manifest.stable.jsonl` with `--isolate` so
+each config also runs in its own process.
 """
 
 

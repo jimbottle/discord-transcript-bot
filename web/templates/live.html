@@ -4,22 +4,36 @@
 <hgroup>
     <h1>Live Session</h1>
     <p id="session-meta">Loading…</p>
+    <p><a id="edit-tag-link" class="search-meta" href="#" hidden>Edit campaign / game / group</a></p>
 </hgroup>
+
+{% with ask_static=False %}{% include "_ask.html" %}{% endwith %}
 
 <article>
     <header>
         <span id="live-badge" class="live-badge live-off">idle</span>
         <span id="updated" class="search-meta"></span>
+        <span id="order-toggle" class="order-toggle"></span>
     </header>
     <div id="live-feed" class="transcript-content" aria-live="polite">
-        <p id="empty-state">No session transcript yet.</p>
     </div>
 </article>
+
 {% endblock %}
 
 {% block scripts %}
+<script src="{{ url_for('static', filename='feed-order.js') }}"></script>
+<script src="{{ url_for('static', filename='live-feed.js') }}"></script>
 <script>
 const DATA_URL = "{{ url_for('live_data') }}";
+const ORDER_KEY = "liveFeedOrder";
+const liveFeed = createLiveFeed(document.getElementById("live-feed"), {
+    order: FeedOrder.get(ORDER_KEY, "newest"),
+});
+FeedOrder.mountToggle(document.getElementById("order-toggle"), liveFeed.order(), function (o) {
+    FeedOrder.set(ORDER_KEY, o);
+    liveFeed.setOrder(o);
+});
 const POLL_MS = 3000;
 
 let lastFetchAt = 0;
@@ -41,46 +55,9 @@ function tickUpdatedLabel() {
         "last write " + fmtAge(lastAge + extra);
 }
 
-// How many entries are already in the DOM, and for which session file.
-// Append-only rendering: we never tear down existing nodes, so a user
-// who scrolled up to re-read keeps their position, text selection is
-// preserved, and a screen reader (aria-live) only announces NEW lines —
-// not the whole transcript every poll.
-let renderedCount = 0;
-let renderedFile = null;
-
-function buildEntry(e) {
-    // createElement + textContent: transcript text is raw user speech
-    // and must never be parsed as HTML.
-    const entry = document.createElement("div");
-    entry.className = "entry";
-
-    let who = "";
-    if (e.player) {
-        who = e.player;
-        if (e.character && e.character !== e.player) who += " (" + e.character + ")";
-    }
-    if (who || e.time) {
-        const head = document.createElement("div");
-        head.className = "entry-meta";
-        const whoSpan = document.createElement("strong");
-        whoSpan.textContent = who || "Unknown";
-        head.appendChild(whoSpan);
-        if (e.time) head.appendChild(document.createTextNode(" · " + e.time));
-        entry.appendChild(head);
-    }
-
-    const body = document.createElement("div");
-    body.className = "entry-text";
-    body.textContent = e.text;
-    entry.appendChild(body);
-    return entry;
-}
-
 function render(data) {
     const badge = document.getElementById("live-badge");
     const meta = document.getElementById("session-meta");
-    const feed = document.getElementById("live-feed");
 
     if (data.live) {
         badge.textContent = "● LIVE";
@@ -90,62 +67,36 @@ function render(data) {
         badge.className = "live-badge live-off";
     }
 
-    meta.textContent = data.filename
-        ? "session: " + data.filename + " · " + data.entries.length + " entries"
-        : "No active session.";
+    const editLink = document.getElementById("edit-tag-link");
+    if (data.filename) {
+        editLink.href = "{{ url_for('transcripts') }}/" + encodeURIComponent(data.filename);
+        editLink.hidden = false;
+    } else {
+        editLink.hidden = true;
+    }
+    const s = data.session || {};
+    if (!data.filename) {
+        meta.textContent = "No active session.";
+    } else if (s.tagged && s.campaign) {
+        meta.textContent = [s.game, s.campaign, s.group, "session " + s.session_day]
+            .filter(Boolean).join(" · ")
+            + (s.recordings > 1 ? " · " + s.recordings + " recordings" : "")
+            + " · " + data.entries.length + " entries in " + data.filename;
+    } else {
+        meta.textContent = "untagged recording " + data.filename + " · "
+            + data.entries.length + " entries";
+    }
 
     lastAge = data.age_seconds;
     lastFetchAt = Date.now();
     tickUpdatedLabel();
+    updateAskAvailability(data);
 
-    const entries = data.entries || [];
-
-    // Full reset only when the session changed or the file shrank
-    // (new session / rotated / truncated) — otherwise it grows.
-    const reset =
-        data.filename !== renderedFile || entries.length < renderedCount;
-    if (reset) {
-        while (feed.firstChild) feed.removeChild(feed.firstChild);
-        renderedCount = 0;
-        renderedFile = data.filename;
-    }
-
-    if (entries.length === 0) {
-        if (!document.getElementById("empty-state")) {
-            const p = document.createElement("p");
-            p.id = "empty-state";
-            p.textContent = data.filename
-                ? "Session file is empty so far."
-                : "No session transcript yet.";
-            feed.appendChild(p);
-        }
-        return;
-    }
-
-    // Clear the empty-state placeholder before appending real entries.
-    // Unconditional: on the empty→content transition `reset` is false
-    // (same file, entries grew), so a reset-gated removal would leave
-    // "Session file is empty so far." pinned above the transcript.
-    const empty = document.getElementById("empty-state");
-    if (empty) empty.remove();
-
-    if (entries.length === renderedCount) return;  // nothing new
-
-    // Measure BEFORE appending; only auto-scroll if already at the
-    // bottom (or this is a fresh session). Otherwise leave scrollTop
-    // untouched so re-reading earlier lines isn't disrupted.
-    const stick =
-        reset ||
-        feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
-
-    const frag = document.createDocumentFragment();
-    for (let i = renderedCount; i < entries.length; i++) {
-        frag.appendChild(buildEntry(entries[i]));
-    }
-    feed.appendChild(frag);
-    renderedCount = entries.length;
-
-    if (stick) feed.scrollTop = feed.scrollHeight;
+    liveFeed.update(
+        data.entries,
+        data.filename,
+        data.filename ? "Session file is empty so far." : "No session transcript yet."
+    );
 }
 
 async function poll() {
@@ -160,5 +111,17 @@ async function poll() {
 poll();
 setInterval(poll, POLL_MS);
 setInterval(tickUpdatedLabel, 1000);
+
+// The ask box (templates/_ask.html + static/ask.js) follows the newest
+// session; tell it on every poll whether there is anything to ask about.
+function updateAskAvailability(data) {
+    if (!window.AskBox) return;
+    let reason = "";
+    if (data.ask_configured === false) reason = window.AskBox.NO_KEY_REASON;
+    else if (!data.filename) reason = "No session transcript yet.";
+    else if (!data.entries || data.entries.length === 0) reason = "Nothing transcribed yet.";
+    window.AskBox.setAvailability(reason);
+    window.AskBox.setSession(data.session && data.session.key);
+}
 </script>
 {% endblock %}
