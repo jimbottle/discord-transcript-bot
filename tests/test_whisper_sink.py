@@ -1007,3 +1007,35 @@ def test_failed_submit_releases_the_inflight_count(tmp_path, monkeypatch):
     sink._wait_for_inflight()  # must not wait on a count that was never released
     assert time.time() - t0 < 0.15
     sink.close()
+
+
+def test_voice_thread_failure_goes_to_its_own_handler_not_the_global_hook(
+    tmp_path, monkeypatch
+):
+    """discord-transcript-bot-7g8: start_voice_thread used to replace the
+    process-wide threading.excepthook (last sink wins, never restored)."""
+    import threading
+
+    sink = _make_sink(tmp_path, monkeypatch)
+    sink.vc = SimpleNamespace(channel=SimpleNamespace(guild=SimpleNamespace(id=1)))
+    boom = RuntimeError("voice loop exploded")
+    monkeypatch.setattr(sink, "insert_voice", MagicMock(side_effect=boom))
+    before = threading.excepthook
+    seen = []
+
+    sink.start_voice_thread(on_exception=seen.append)
+    sink.voice_thread.join(timeout=5)
+
+    assert threading.excepthook is before
+    assert seen == [boom]
+    sink.close()
+
+
+def test_voice_thread_survives_a_failing_handler(tmp_path, monkeypatch):
+    sink = _make_sink(tmp_path, monkeypatch)
+    sink.vc = SimpleNamespace(channel=SimpleNamespace(guild=SimpleNamespace(id=1)))
+    monkeypatch.setattr(sink, "insert_voice", MagicMock(side_effect=ValueError("x")))
+    sink.start_voice_thread(on_exception=MagicMock(side_effect=OSError("handler")))
+    sink.voice_thread.join(timeout=5)
+    assert not sink.voice_thread.is_alive()
+    sink.close()

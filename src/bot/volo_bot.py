@@ -480,15 +480,50 @@ class VoloBot(discord.Bot):
         )
 
         def on_thread_exception(e):
-            logger.warning(
-                f"Whisper sink thread exception for guild {ctx.guild_id}. Retry in 5 seconds...\n{e}"
+            # Runs on the dying voice thread. Everything else (the teardown,
+            # which joins this very thread, and the restart) belongs on the
+            # loop, and only run_coroutine_threadsafe may hand it there.
+            asyncio.run_coroutine_threadsafe(
+                self._recover_voice_thread(ctx, whisper_sink, e), self.loop
             )
-            self._close_and_clean_sink_for_guild(ctx.guild_id)
-
-            # retry in 5 seconds
-            self.loop.call_later(5, self.start_recording, ctx)
 
         whisper_sink.start_voice_thread(on_exception=on_thread_exception)
+
+    VOICE_RESTART_DELAY_S = 5
+
+    async def _recover_voice_thread(self, ctx, sink, error) -> bool:
+        """The voice thread died: end that recording, wait, start a new one,
+        and say so in the channel either way. Returns whether recording
+        restarted. Does nothing if the recording was already stopped or
+        replaced, since then nobody is waiting on this sink."""
+        guild_id = ctx.guild_id
+        if self.guild_whisper_sinks.get(guild_id) is not sink:
+            return False
+        logger.warning(
+            f"Voice thread for guild {guild_id} died ({error}); restarting "
+            f"the recording in {self.VOICE_RESTART_DELAY_S}s."
+        )
+        try:
+            await self.end_recording_session(ctx)
+        except Exception as e:  # noqa: BLE001 - still try to restart
+            logger.error(f"Teardown after a voice thread failure failed: {e}")
+        await asyncio.sleep(self.VOICE_RESTART_DELAY_S)
+        # /disconnect or a new /scribe in the meantime: leave it alone.
+        if guild_id not in self.guild_to_helper or self.guild_is_recording.get(
+            guild_id
+        ):
+            return False
+        ok = self.start_recording(ctx)
+        notice = (
+            "Transcription hit an error and restarted. A few seconds may be missing."
+            if ok
+            else "Transcription hit an error and could not restart. Run `/scribe` again."
+        )
+        try:
+            await ctx.channel.send(notice)
+        except Exception as e:  # noqa: BLE001 - the restart matters more
+            logger.warning(f"Could not post the restart notice: {e}")
+        return ok
 
     def _tag_session(self, ctx, whisper_sink) -> None:
         """Write the recording's group/game/campaign/session sidecar

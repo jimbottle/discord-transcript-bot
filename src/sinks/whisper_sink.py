@@ -276,24 +276,36 @@ class WhisperSink(Sink):
         }
 
     def start_voice_thread(self, on_exception=None):
-        def thread_exception_hook(args):
-            logger.debug(
-                f"""Exception in voice thread: {args} Likely disconnected while listening."""
-            )
+        """Start the voice thread. ``on_exception(exc)`` is called, on that
+        thread, if insert_voice dies with an exception.
 
+        This used to assign the process-wide ``threading.excepthook``, so
+        every sink replaced every other's handler (and every unrelated
+        thread's) and nothing ever restored it (discord-transcript-bot-7g8).
+        The handler is now scoped to this sink's own thread.
+        """
         logger.debug(
             f"Starting whisper sink thread for guild {self.vc.channel.guild.id}."
         )
+        self._on_thread_exception = on_exception
         self.voice_thread = threading.Thread(
-            target=self.insert_voice, args=(), daemon=True
+            target=self._voice_thread_main, args=(), daemon=True
         )
-
-        if on_exception:
-            threading.excepthook = on_exception
-        else:
-            threading.excepthook = thread_exception_hook
-
         self.voice_thread.start()
+
+    def _voice_thread_main(self):
+        try:
+            self.insert_voice()
+        except Exception as e:  # noqa: BLE001 - reported, never re-raised
+            logger.exception(f"Voice thread died: {e}")
+            handler = getattr(self, "_on_thread_exception", None)
+            if handler is not None:
+                try:
+                    handler(e)
+                except Exception as handler_err:  # noqa: BLE001
+                    logger.error(
+                        f"Voice thread exception handler failed: {handler_err}"
+                    )
 
     # Upper bound for joining the voice thread. It should exit within a
     # couple of seconds of self.running going False (one insert_voice
