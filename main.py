@@ -601,7 +601,8 @@ if __name__ == "__main__":
             answer = clean_answer(result.answer)
             logger.info(
                 f"/ask answered by {result.model} (input={result.input_tokens}, "
-                f"cached={result.cached_tokens}, output={result.output_tokens})"
+                f"cached={result.cached_tokens}, output={result.output_tokens}, "
+                f"rounds={result.rounds}, notes={result.notes_used or '-'})"
             )
 
             if not answer:

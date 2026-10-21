@@ -54,6 +54,8 @@
                     + " · in " + result.input_tokens
                     + (result.cached_tokens ? " (" + result.cached_tokens + " cached)" : "")
                     + " · out " + result.output_tokens
+                    + (result.notes_used && result.notes_used.length
+                        ? " · notes: " + result.notes_used.join(", ") : "")
                     + " · " + new Date().toLocaleTimeString();
                 block.appendChild(m);
             }

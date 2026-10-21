@@ -16,17 +16,28 @@ from src.llm import claude
 
 
 @pytest.fixture(autouse=True)
-def _key(monkeypatch):
+def _key(monkeypatch, tmp_path):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     monkeypatch.delenv("ASK_MODEL", raising=False)
     monkeypatch.delenv("ASK_EFFORT", raising=False)
+    # No campaign notes unless a test writes some: the plain two-block
+    # request shape is the baseline the tests below assert on.
+    monkeypatch.setenv("CAMPAIGN_NOTES_DIR", str(tmp_path / "no-notes"))
+    monkeypatch.delenv("CAMPAIGN_GM_NOTES", raising=False)
 
 
 def _response(
-    text="The party fought a troll.", stop_reason="end_turn", model="claude-x"
+    text="The party fought a troll.",
+    stop_reason="end_turn",
+    model="claude-x",
+    content=None,
 ):
     return SimpleNamespace(
-        content=[SimpleNamespace(type="text", text=text)],
+        content=(
+            content
+            if content is not None
+            else [SimpleNamespace(type="text", text=text)]
+        ),
         stop_reason=stop_reason,
         model=model,
         usage=SimpleNamespace(
@@ -35,10 +46,22 @@ def _response(
     )
 
 
+def _tool_call(ids, call_id="tu_1", name=claude.campaign.TOOL_NAME):
+    return _response(
+        stop_reason="tool_use",
+        content=[
+            SimpleNamespace(type="thinking", thinking="hmm"),
+            SimpleNamespace(type="tool_use", id=call_id, name=name, input={"ids": ids}),
+        ],
+    )
+
+
 class _FakeClient:
+    """``result`` may be a list: one response per call, in order."""
+
     def __init__(self, result=None, error=None):
         self.calls = []
-        self._result = result
+        self._results = list(result) if isinstance(result, list) else [result]
         self._error = error
         self.messages = self
 
@@ -46,7 +69,7 @@ class _FakeClient:
         self.calls.append(kwargs)
         if self._error is not None:
             raise self._error
-        return self._result
+        return self._results.pop(0) if len(self._results) > 1 else self._results[0]
 
 
 def _use(monkeypatch, client):
@@ -245,3 +268,128 @@ def test_max_tokens_with_no_text_names_the_budget(monkeypatch):
     with pytest.raises(claude.AskFailed) as ei:
         claude.ask("t", "q")
     assert ei.value.user_message == claude.TRUNCATED_MSG
+
+
+# ── campaign notes: index in the prompt, bodies only on request ──────────
+
+
+NOTE = """---
+id: npcs
+title: Named NPCs
+summary: Who the recurring NPCs are.
+keywords: [NPC, Lilith Kane]
+---
+Lilith Kane is the fixer who runs Little Europe.
+"""
+
+
+@pytest.fixture
+def notes_dir(tmp_path, monkeypatch):
+    d = tmp_path / "notes"
+    d.mkdir()
+    (d / "npcs.md").write_text(NOTE, encoding="utf-8")
+    monkeypatch.setenv("CAMPAIGN_NOTES_DIR", str(d))
+    return d
+
+
+def test_request_without_notes_has_no_tools():
+    req = claude.build_request("t", "q")
+    assert "tools" not in req and "tool_choice" not in req
+    assert len(req["system"]) == 2
+
+
+def test_request_with_notes_adds_a_cached_index_block_and_the_tool(notes_dir):
+    notes = claude.campaign.load_notes()
+    index = claude.campaign.index_text(notes)
+    req = claude.build_request("t", "q", index)
+    assert req["system"][1]["text"].startswith("TRANSCRIPT:")
+    assert req["system"][1]["cache_control"] == {"type": "ephemeral"}
+    assert req["system"][2]["text"] == index
+    assert "npcs — Named NPCs: Who the recurring NPCs are. [NPC, Lilith Kane]" in index
+    assert "Lilith Kane is the fixer" not in index  # bodies are not in the prompt
+    assert req["tools"] == [claude.campaign.TOOL]
+    assert req["tool_choice"] == {"type": "auto"}
+
+
+def test_ask_without_notes_sends_no_tools(monkeypatch):
+    client = _use(monkeypatch, _FakeClient(_response()))
+    claude.ask("t", "q")
+    assert "tools" not in client.calls[0]
+
+
+def test_ask_answers_in_one_round_when_the_model_does_not_call_the_tool(
+    monkeypatch, notes_dir
+):
+    client = _use(monkeypatch, _FakeClient(_response("From the transcript.")))
+    result = claude.ask("t", "q")
+    assert len(client.calls) == 1
+    assert result.answer == "From the transcript."
+    assert result.notes_used == []
+    assert result.rounds == 1
+
+
+def test_ask_feeds_requested_notes_back_and_sums_usage(monkeypatch, notes_dir):
+    client = _use(
+        monkeypatch,
+        _FakeClient([_tool_call(["npcs"]), _response("Kane runs Little Europe.")]),
+    )
+    result = claude.ask("t", "who is kane?")
+    assert len(client.calls) == 2
+    second = client.calls[1]["messages"]
+    # user question, the assistant turn verbatim (thinking block included),
+    # then one user message holding the tool result
+    assert [m["role"] for m in second] == ["user", "assistant", "user"]
+    assert second[1]["content"][0].type == "thinking"
+    (tool_result,) = second[2]["content"]
+    assert tool_result["type"] == "tool_result"
+    assert tool_result["tool_use_id"] == "tu_1"
+    assert "Lilith Kane is the fixer" in tool_result["content"]
+    assert "is_error" not in tool_result
+    assert result.answer == "Kane runs Little Europe."
+    assert result.notes_used == ["npcs"]
+    assert result.rounds == 2
+    assert result.input_tokens == 240 and result.cached_tokens == 200
+    assert result.output_tokens == 18
+
+
+def test_unknown_note_id_is_an_error_result_not_a_crash(monkeypatch, notes_dir):
+    client = _use(
+        monkeypatch,
+        _FakeClient([_tool_call(["nope"]), _response("Can't say.")]),
+    )
+    result = claude.ask("t", "q")
+    (tool_result,) = client.calls[1]["messages"][2]["content"]
+    assert tool_result["is_error"] is True
+    assert "Unknown note id(s): nope" in tool_result["content"]
+    assert "Available: npcs" in tool_result["content"]
+    assert result.notes_used == []
+
+
+def test_tool_rounds_are_capped(monkeypatch, notes_dir):
+    looping = _tool_call(["npcs"])
+    client = _use(
+        monkeypatch,
+        _FakeClient([looping, looping, looping, _response("Finally.")]),
+    )
+    result = claude.ask("t", "q")
+    # MAX_TOOL_ROUNDS calls that asked for tools, then one forced answer
+    assert len(client.calls) == claude.MAX_TOOL_ROUNDS + 1
+    assert client.calls[-1]["tool_choice"] == {"type": "none"}
+    assert result.answer == "Finally."
+    assert result.notes_used == ["npcs"]
+
+
+def test_gm_notes_are_hidden_unless_enabled(tmp_path, monkeypatch):
+    d = tmp_path / "notes"
+    d.mkdir()
+    (d / "npcs.md").write_text(NOTE, encoding="utf-8")
+    (d / "secrets.md").write_text(
+        NOTE.replace("id: npcs", "id: secrets").replace(
+            "---\nLilith", "audience: gm\n---\nLilith"
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CAMPAIGN_NOTES_DIR", str(d))
+    assert [n.id for n in claude.campaign.load_notes()] == ["npcs"]
+    monkeypatch.setenv("CAMPAIGN_GM_NOTES", "1")
+    assert [n.id for n in claude.campaign.load_notes()] == ["npcs", "secrets"]

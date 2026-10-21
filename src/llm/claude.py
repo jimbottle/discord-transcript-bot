@@ -12,14 +12,20 @@ receive and the gateway heartbeat, not just the command.
 
 The transcript goes in a cached system block, so repeated questions about
 the same session within the cache window are mostly cache reads.
+
+Campaign background (``campaign/notes``) is retrieved on demand: the
+request carries only a one-line-per-note index and a tool; the model pulls
+a note's body only when the question needs it (discord-transcript-bot-kda).
 """
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import anthropic
+
+from src.llm import campaign
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +40,15 @@ TIMEOUT_S = 120
 
 SYSTEM_PROMPT = (
     "You are an assistant that answers questions about a voice chat "
-    "transcript of a D&D game. Be concise and direct. Only reference what's "
-    "actually in the transcript. If the answer isn't in the transcript, say so."
+    "transcript of a tabletop RPG session. Be concise and direct. Answer from "
+    "the transcript; if the answer isn't there, say so. When a CAMPAIGN NOTES "
+    "INDEX is provided you may read campaign notes with the read_campaign_notes "
+    "tool, but only when the question needs background the transcript lacks, "
+    "and say when an answer comes from the notes rather than the transcript."
 )
+# Tool rounds per question. One is the norm (the model asks for the notes it
+# needs in a single call); the cap keeps a confused model from spending money.
+MAX_TOOL_ROUNDS = 3
 
 NO_KEY_MSG = "/ask isn't configured: ANTHROPIC_API_KEY is not set on the bot host."
 BAD_KEY_MSG = "Anthropic rejected the API key. Check ANTHROPIC_API_KEY on the bot host."
@@ -95,6 +107,10 @@ class AskResult:
     input_tokens: int = 0
     cached_tokens: int = 0
     output_tokens: int = 0
+    # Campaign notes the model pulled in (ids), in order; [] when it answered
+    # from the transcript alone. Token counts above are summed over rounds.
+    notes_used: list = field(default_factory=list)
+    rounds: int = 1
 
 
 def _api_error_message(error: anthropic.APIStatusError) -> str:
@@ -117,36 +133,48 @@ def _client() -> anthropic.Anthropic:
     return anthropic.Anthropic(api_key=api_key(), max_retries=2, timeout=TIMEOUT_S)
 
 
-def build_request(transcript: str, question: str) -> dict:
+def build_request(transcript: str, question: str, index: str = "") -> dict:
     """The exact ``messages.create`` arguments for one question. Pure, so the
-    request shape is unit-testable without a client."""
-    return {
+    request shape is unit-testable without a client.
+
+    With a campaign ``index`` the request gains a third system block and the
+    ``read_campaign_notes`` tool; without one it is the plain two-block shape.
+    The transcript keeps its own cache breakpoint either way, so editing a
+    note (which changes the index) does not evict the cached transcript.
+    """
+    system = [
+        {"type": "text", "text": SYSTEM_PROMPT},
+        {
+            "type": "text",
+            "text": "TRANSCRIPT:\n" + transcript,
+            # Cached so follow-up questions about the same session re-read
+            # the transcript at the cache rate instead of paying for it
+            # every time.
+            "cache_control": {"type": "ephemeral"},
+        },
+    ]
+    request = {
         "model": model(),
         "max_tokens": MAX_ANSWER_TOKENS,
-        "system": [
-            {"type": "text", "text": SYSTEM_PROMPT},
-            {
-                "type": "text",
-                "text": "TRANSCRIPT:\n" + transcript,
-                # Cached so follow-up questions about the same session re-read
-                # the transcript at the cache rate instead of paying for it
-                # every time.
-                "cache_control": {"type": "ephemeral"},
-            },
-        ],
+        "system": system,
         "messages": [{"role": "user", "content": question}],
         "output_config": {"effort": effort()},
     }
+    if index:
+        system.append(
+            {"type": "text", "text": index, "cache_control": {"type": "ephemeral"}}
+        )
+        request["tools"] = [campaign.TOOL]
+        # Opus 5.5 rejects forced tool_choice; "auto" plus the tool
+        # description is what makes retrieval conditional on the question.
+        request["tool_choice"] = {"type": "auto"}
+    return request
 
 
-def ask(transcript: str, question: str) -> AskResult:
-    """Answer ``question`` from ``transcript``. Blocking. Raises
-    :class:`AskFailed` with a Discord-ready message on any failure."""
-    if not configured():
-        raise AskFailed(NO_KEY_MSG)
-    request = build_request(transcript, question)
+def _create(request: dict):
+    """One API call with every SDK error mapped to an :class:`AskFailed`."""
     try:
-        response = _client().messages.create(**request)
+        return _client().messages.create(**request)
     except anthropic.AuthenticationError as e:
         raise AskFailed(BAD_KEY_MSG, e) from e
     except anthropic.PermissionDeniedError as e:
@@ -166,7 +194,78 @@ def ask(transcript: str, question: str) -> AskResult:
     except anthropic.APIConnectionError as e:  # includes APITimeoutError
         raise AskFailed(UNREACHABLE_MSG, e) from e
 
-    stop_reason = getattr(response, "stop_reason", None)
+
+def _tool_results(response, notes, used: list) -> list:
+    """Run every ``read_campaign_notes`` call in ``response`` and return the
+    matching ``tool_result`` blocks (all of them in one user message, as the
+    API expects for parallel calls)."""
+    results = []
+    for block in response.content:
+        if getattr(block, "type", None) != "tool_use":
+            continue
+        raw = getattr(block, "input", None) or {}
+        ids = raw.get("ids") if isinstance(raw, dict) else None
+        if block.name != campaign.TOOL_NAME or not isinstance(ids, list):
+            text, is_error = f"Unknown tool call: {block.name}", True
+        else:
+            text, is_error = campaign.read_notes(ids, notes)
+            used.extend(i for i in ids if i in {n.id for n in notes})
+        result = {"type": "tool_result", "tool_use_id": block.id, "content": text}
+        if is_error:
+            result["is_error"] = True
+        results.append(result)
+    return results
+
+
+def ask(transcript: str, question: str) -> AskResult:
+    """Answer ``question`` from ``transcript``. Blocking. Raises
+    :class:`AskFailed` with a Discord-ready message on any failure."""
+    if not configured():
+        raise AskFailed(NO_KEY_MSG)
+    notes = campaign.load_notes()
+    request = build_request(transcript, question, campaign.index_text(notes))
+    totals = {"input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 0}
+    used: list = []
+    rounds = 0
+    while True:
+        rounds += 1
+        response = _create(request)
+        usage = getattr(response, "usage", None)
+        for key in totals:
+            totals[key] += getattr(usage, key, 0) or 0
+        stop_reason = getattr(response, "stop_reason", None)
+        if stop_reason != "tool_use":
+            break
+        if rounds >= MAX_TOOL_ROUNDS:
+            logger.warning(
+                f"/ask still calling tools after {rounds} rounds; answering "
+                "without the extra notes"
+            )
+            # Resend with the tool withheld so the model has to answer from
+            # what it already has (the content so far, notes included).
+            request["messages"] = request["messages"] + [
+                {"role": "assistant", "content": response.content},
+                {
+                    "role": "user",
+                    "content": _tool_results(response, notes, used)
+                    + [{"type": "text", "text": "Answer now with what you have."}],
+                },
+            ]
+            request["tool_choice"] = {"type": "none"}
+            rounds += 1
+            response = _create(request)
+            usage = getattr(response, "usage", None)
+            for key in totals:
+                totals[key] += getattr(usage, key, 0) or 0
+            stop_reason = getattr(response, "stop_reason", None)
+            break
+        # Hand the assistant turn back verbatim (thinking blocks included:
+        # the API needs them unchanged) followed by the tool results.
+        request["messages"] = request["messages"] + [
+            {"role": "assistant", "content": response.content},
+            {"role": "user", "content": _tool_results(response, notes, used)},
+        ]
+
     if stop_reason == "refusal":
         raise AskFailed(REFUSAL_MSG)
     answer = "".join(
@@ -187,11 +286,14 @@ def ask(transcript: str, question: str) -> AskResult:
         answer += TRUNCATION_NOTE
     if not answer:
         raise AskFailed(EMPTY_MSG)
-    usage = getattr(response, "usage", None)
+    seen = set()
+    notes_used = [i for i in used if not (i in seen or seen.add(i))]
     return AskResult(
         answer=answer,
         model=getattr(response, "model", None) or request["model"],
-        input_tokens=getattr(usage, "input_tokens", 0) or 0,
-        cached_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
-        output_tokens=getattr(usage, "output_tokens", 0) or 0,
+        input_tokens=totals["input_tokens"],
+        cached_tokens=totals["cache_read_input_tokens"],
+        output_tokens=totals["output_tokens"],
+        notes_used=notes_used,
+        rounds=rounds,
     )

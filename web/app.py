@@ -205,11 +205,12 @@ def ask_session():
     if not answer:
         return jsonify({"error": claude.EMPTY_MSG}), 502
     app.logger.info(
-        "ask answered by %s (input=%s, cached=%s, output=%s)",
+        "ask answered by %s (input=%s, cached=%s, output=%s, notes=%s)",
         result.model,
         result.input_tokens,
         result.cached_tokens,
         result.output_tokens,
+        result.notes_used,
     )
     return jsonify(
         {
@@ -220,6 +221,7 @@ def ask_session():
             "input_tokens": result.input_tokens,
             "cached_tokens": result.cached_tokens,
             "output_tokens": result.output_tokens,
+            "notes_used": list(result.notes_used),
         }
     )
 

@@ -334,13 +334,15 @@ class HealthCheck:
         reported at question time by src/llm/claude. Never critical: `/ask`
         is the only consumer and transcription must start without it.
         """
-        from src.llm import claude
+        from src.llm import campaign, claude
 
         if claude.configured():
+            notes = campaign.load_notes()
             self._record(
                 "ask_provider",
                 True,
-                f"/ask: Anthropic ({claude.model()}, effort {claude.effort()})",
+                f"/ask: Anthropic ({claude.model()}, effort {claude.effort()}), "
+                f"{len(notes)} campaign note{'s' if len(notes) != 1 else ''}",
                 critical=False,
             )
         else:

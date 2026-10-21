@@ -736,6 +736,7 @@ def test_ask_answers_from_the_live_session(
         "input_tokens": 120,
         "cached_tokens": 100,
         "output_tokens": 12,
+        "notes_used": [],
     }
     # The model saw the session file verbatim, not a re-rendered version.
     assert calls == [(live_transcript.read_text(encoding="utf-8"), "Where next?")]
