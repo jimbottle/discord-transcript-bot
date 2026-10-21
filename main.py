@@ -13,7 +13,7 @@ from src.config.cliargs import CLIArgs
 from src import library, question_log, sessions
 from src.llm.claude import AskBlocked, AskFailed, ask as llm_ask
 from src.session_capture import scribe_notice
-from src.utils.answer import clamp_message, clean_answer
+from src.utils.answer import answer_budget, clean_answer, discord_messages
 from src.utils.commandline import CommandLine
 from src.utils.pdf_generator import pdf_generator
 from src.utils.voice import disconnect_targets
@@ -625,7 +625,9 @@ if __name__ == "__main__":
                 question,
                 header=header,
                 note_dirs=note_dirs,
+                max_chars=answer_budget(question),
             )
+            # No truncation: anything past Discord's limit is split below.
             answer = clean_answer(result.answer)
             logger.info(
                 f"/ask answered by {result.model} (input={result.input_tokens}, "
@@ -638,18 +640,22 @@ if __name__ == "__main__":
                 _log(question_log.FAILED, started, error=empty, result=result)
                 await ctx.followup.send(empty)
                 return
-            # clean_answer only caps the answer; a long /ask
-            # question can still push the composed message past Discord's
-            # hard limit. clamp_message is the unit-tested final guard.
-            message = clamp_message(
-                f"**Q:** {question}\n\n{answer}", DISCORD_MESSAGE_LIMIT
-            )
+            # The model was given a budget (answer_budget) so this is
+            # normally one message; if it ran long, post the rest as
+            # follow-ups instead of cutting it off.
+            messages = discord_messages(question, answer, DISCORD_MESSAGE_LIMIT)
+            if len(messages) > 1:
+                logger.warning(
+                    f"/ask answer ran {len(answer)} chars (budget "
+                    f"{answer_budget(question)}); sent as {len(messages)} messages"
+                )
             # Record exactly once, after delivery is known (roborev #6459):
-            # the full answer goes to the history either way, Discord only
-            # shows a clamped copy, and a failed send is noted, not logged
-            # a second time as a FAILED question by the handler below.
+            # the full answer goes to the history either way, and a failed
+            # send is noted, not logged a second time as a FAILED question
+            # by the handler below.
             try:
-                await ctx.followup.send(message)
+                for part in messages:
+                    await ctx.followup.send(part)
             except Exception as send_err:
                 _log(
                     question_log.ANSWERED,
@@ -666,11 +672,10 @@ if __name__ == "__main__":
             # refusal; it went through the same deferred response, so
             # /ask-public refusals are visible like answers would be.
             _log(question_log.BLOCKED, started, error=e.user_message, verdict=e.verdict)
-            await ctx.followup.send(
-                clamp_message(
-                    f"**Q:** {question}\n\n{e.user_message}", DISCORD_MESSAGE_LIMIT
-                )
-            )
+            for part in discord_messages(
+                question, e.user_message, DISCORD_MESSAGE_LIMIT
+            ):
+                await ctx.followup.send(part)
         except AskFailed as e:
             # claude.ask has already chosen the message that fits the reason
             # (bad key, rate limit, out of credit, unreachable, refusal), so

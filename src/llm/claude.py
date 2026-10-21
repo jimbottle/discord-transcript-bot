@@ -245,6 +245,21 @@ def _api_failure(e: Exception) -> "AskFailed":
     return None
 
 
+def length_instruction(max_chars: int) -> str:
+    """Tell the model its hard output budget (Discord messages are capped).
+    Models overshoot a stated character count by up to about a third
+    (measured: 1700 asked, 2241 written), so the target is ~70% of the
+    hard limit and the limit itself is stated as a ceiling."""
+    target = int(max_chars * 0.7)
+    return (
+        f"OUTPUT LIMIT: this answer is posted as one Discord message with a "
+        f"hard cap. Aim for about {target} characters (roughly {target // 6} "
+        f"words) and never exceed {max_chars}. For broad requests like a full "
+        "recap, summarise the highlights instead of covering everything. Lead "
+        "with what was asked and finish cleanly within the limit."
+    )
+
+
 def _create(request: dict):
     """One API call with every SDK error mapped to an :class:`AskFailed`."""
     try:
@@ -278,7 +293,14 @@ def _tool_results(response, notes, used: list) -> list:
     return results
 
 
-def ask(transcript: str, question: str, *, header: str = "", note_dirs=()) -> AskResult:
+def ask(
+    transcript: str,
+    question: str,
+    *,
+    header: str = "",
+    note_dirs=(),
+    max_chars=None,
+) -> AskResult:
     """Answer ``question`` from ``transcript``. Blocking. Raises
     :class:`AskFailed` with a Discord-ready message on any failure.
 
@@ -292,6 +314,12 @@ def ask(transcript: str, question: str, *, header: str = "", note_dirs=()) -> As
     request = build_request(
         transcript, question, campaign.index_text(notes), header=header
     )
+    if max_chars:
+        # After the cached blocks, so Discord and dashboard questions about
+        # the same session still share the cached transcript.
+        request["system"].append(
+            {"type": "text", "text": length_instruction(max_chars)}
+        )
     result = _run(request, notes)
     result.guard = verdict
     return result

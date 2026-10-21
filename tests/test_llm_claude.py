@@ -583,3 +583,22 @@ def test_guard_api_errors_keep_their_specific_message(monkeypatch, error, expect
     want = getattr(claude, expected) if expected else claude.guard.GUARD_ERROR_MSG
     assert e.value.user_message == want
     assert client.calls == []  # still fails closed
+
+
+def test_discord_budget_goes_after_the_cached_blocks(monkeypatch):
+    client = _use(monkeypatch, _FakeClient(_response()))
+    claude.ask("t", "q", max_chars=1500)
+    system = client.calls[0]["system"]
+    assert system[-1] == {"type": "text", "text": claude.length_instruction(1500)}
+    assert "cache_control" not in system[-1]
+    assert system[1]["cache_control"] == {
+        "type": "ephemeral"
+    }  # transcript still cached
+    assert "never exceed 1500" in system[-1]["text"]
+    assert "about 1050 characters" in system[-1]["text"]
+
+
+def test_no_budget_without_max_chars(monkeypatch):
+    client = _use(monkeypatch, _FakeClient(_response()))
+    claude.ask("t", "q")
+    assert all("OUTPUT LIMIT" not in b["text"] for b in client.calls[0]["system"])

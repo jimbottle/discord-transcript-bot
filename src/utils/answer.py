@@ -18,7 +18,7 @@ DISCORD_LIMIT = 1900
 TRUNCATION_SUFFIX = "\n\n...(truncated)"
 
 
-def clean_answer(text: str, limit: int = DISCORD_LIMIT) -> str:
+def clean_answer(text: str, limit=None) -> str:
     """Strip reasoning blocks and enforce Discord's message-size limit.
 
     - Removes well-formed ``<think>...</think>`` blocks (incl. nested).
@@ -28,8 +28,9 @@ def clean_answer(text: str, limit: int = DISCORD_LIMIT) -> str:
     - Drops a dangling unterminated ``<think>`` (a reasoning trace cut
       off by ``num_predict``) and everything after it.
     - Trims surrounding whitespace.
-    - Truncates to ``limit`` with a suffix (behaviour preserved verbatim
-      from the previous inline logic in main.py).
+    - Truncates to ``limit`` with a suffix **only when a limit is given**.
+      /ask no longer passes one: a long answer is split across Discord
+      messages (:func:`discord_messages`) instead of being cut off.
 
     A plain answer with no reasoning blocks and length <= limit is
     returned unchanged apart from whitespace trimming.
@@ -65,7 +66,7 @@ def clean_answer(text: str, limit: int = DISCORD_LIMIT) -> str:
 
     cleaned = cleaned.strip()
 
-    if len(cleaned) > limit:
+    if limit is not None and len(cleaned) > limit:
         cleaned = cleaned[:limit] + TRUNCATION_SUFFIX
 
     return cleaned
@@ -87,3 +88,82 @@ def clamp_message(message: str, limit: int) -> str:
         return message
     keep = max(0, limit - len(TRUNCATION_SUFFIX))
     return message[:keep] + TRUNCATION_SUFFIX
+
+
+# ── Discord delivery: budget the model, split instead of truncating ──────
+# Discord rejects a message over 2000 characters. /ask tells the model a
+# character budget (answer_budget) so answers normally fit in one message;
+# when one still runs long it is split at paragraph, then line, then word
+# boundaries into several messages, so nothing is ever cut off.
+
+DISCORD_HARD_LIMIT = 2000
+_FENCE = "```"
+
+
+def answer_budget(question: str, limit: int = DISCORD_HARD_LIMIT) -> int:
+    """Characters the model should aim for so ``**Q:** <question>`` plus the
+    answer fits in one Discord message, with headroom because models count
+    characters loosely. Never below 600 (a long question still gets a real
+    answer; the split below catches any overflow)."""
+    overhead = len("**Q:** ") + len(question) + len("\n\n")
+    return max(600, min(1700, limit - overhead - 200))
+
+
+def _pieces(text: str, limit: int) -> list:
+    """Break ``text`` into pieces no longer than ``limit``, preferring
+    paragraph, then line, then word boundaries; hard-cut only a single
+    token longer than ``limit``."""
+    if len(text) <= limit:
+        return [text]
+    for sep in ("\n\n", "\n", " "):
+        parts = text.split(sep)
+        if len(parts) > 1:
+            out, cur = [], ""
+            for part in parts:
+                cand = part if not cur else cur + sep + part
+                if len(cand) <= limit:
+                    cur = cand
+                    continue
+                if cur:
+                    out.append(cur)
+                if len(part) <= limit:
+                    cur = part
+                else:
+                    sub = _pieces(part, limit)
+                    out.extend(sub[:-1])
+                    cur = sub[-1]
+            if cur:
+                out.append(cur)
+            return out
+    return [text[i : i + limit] for i in range(0, len(text), limit)]
+
+
+def split_message(text: str, limit: int = DISCORD_HARD_LIMIT) -> list:
+    """Split ``text`` into Discord-sized messages without losing anything.
+    A code block split across messages is closed at the end of one and
+    reopened at the start of the next, so formatting survives."""
+    text = text.strip()
+    if not text:
+        return []
+    reserve = len("\n" + _FENCE) + len(_FENCE + "\n")
+    chunks = [c.strip("\n") for c in _pieces(text, limit - reserve) if c.strip()]
+    out, open_fence = [], False
+    for chunk in chunks:
+        if open_fence:
+            chunk = _FENCE + "\n" + chunk
+        if chunk.count(_FENCE) % 2 == 1:
+            chunk += "\n" + _FENCE
+            open_fence = True
+        else:
+            open_fence = False
+        out.append(chunk)
+    return out
+
+
+def discord_messages(
+    question: str, answer: str, limit: int = DISCORD_HARD_LIMIT
+) -> list:
+    """The messages to post for one /ask answer, in order: the first opens
+    with the question; every message fits Discord's limit; the joined text
+    is the whole answer."""
+    return split_message(f"**Q:** {question}\n\n{answer}", limit)
