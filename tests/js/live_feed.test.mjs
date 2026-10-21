@@ -143,4 +143,16 @@ const mem = () => { const m = {}; return { getItem: (k) => (k in m ? m[k] : null
   assert.equal(broken.FeedOrder.get("k", "oldest"), "oldest");
   broken.FeedOrder.set("k", "newest"); // must not throw
 }
+// roborev #6495: no session at all -> exactly one placeholder, across
+// repeated polls and an order switch before any lines arrive
+{
+  const ctx = env(mem()); const feed = new El();
+  const f = ctx.createLiveFeed(feed, { order: "newest" });
+  f.update([], null, "No session transcript yet.");
+  f.update([], null, "No session transcript yet.");
+  assert.equal(feed.children.length, 1);
+  f.setOrder("oldest");
+  assert.equal(feed.children.length, 1, "placeholder restored after switching");
+  assert.equal(feed.children[0].textContent, "No session transcript yet.");
+}
 console.log("live feed + order toggle: all checks passed");

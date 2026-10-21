@@ -51,6 +51,9 @@
         let renderedCount = 0;
         let renderedFile = null;
         let lastEntries = [];
+        let lastEmptyText = "No session transcript yet.";
+        // The feed starts empty in the page; this script owns the
+        // placeholder, so there is only ever one (roborev #6495).
         let emptyNode = null;
 
         function clear() {
@@ -103,7 +106,8 @@
                 renderedFile = filename;
             }
             if (entries.length === 0) {
-                showEmpty(emptyText || "No session transcript yet.");
+                lastEmptyText = emptyText || "No session transcript yet.";
+                showEmpty(lastEmptyText);
                 return;
             }
             if (emptyNode) { emptyNode.remove(); emptyNode = null; }
@@ -115,6 +119,7 @@
             order = next;
             clear();
             if (lastEntries.length) addNew(lastEntries, true);
+            else showEmpty(lastEmptyText);
         }
 
         return { update: update, setOrder: setOrder, order: function () { return order; } };

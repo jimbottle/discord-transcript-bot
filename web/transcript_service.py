@@ -131,15 +131,25 @@ def list_transcripts():
 
     lib = _library()
     files = sorted(TRANSCRIPTS_DIR.glob("*.txt"), reverse=True)
+    metas = {f: sessions.read_meta(f) for f in files}
+    # Real session sizes (one pass, not session_files per row), so each
+    # row's tag editor offers "Apply to all N recordings" like the
+    # transcript page does (roborev #6491).
+    sizes = {}
+    for m in metas.values():
+        if m is not None:
+            sizes[m.key] = sizes.get(m.key, 0) + 1
     results = []
     for f in files:
-        meta = sessions.read_meta(f)
+        meta = metas[f]
         results.append(
             {
                 "filename": f.name,
                 "size": f.stat().st_size,
                 "modified": f.stat().st_mtime,
-                "session": sessions.describe(lib, meta),
+                "session": sessions.describe(
+                    lib, meta, sizes.get(meta.key, 1) if meta else 1
+                ),
             }
         )
     return results
@@ -331,6 +341,11 @@ def is_being_recorded(filename) -> bool:
     the file was written within LIVE_FRESH_SECONDS (a bot running without a
     state file is still caught)."""
     state = get_bot_state() or {}
+    # A dead bot leaves "recording: true" behind; only trust a state file
+    # that is still being refreshed (roborev #6491).
+    hb = heartbeat_age(state)
+    if hb is None or hb > STATE_STALE_SECONDS:
+        state = {}
     for g in state.get("guilds") or []:
         if not isinstance(g, dict):
             continue

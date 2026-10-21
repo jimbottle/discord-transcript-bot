@@ -1,6 +1,6 @@
-import re
-
 """Unit tests for src.utils.answer."""
+
+import re
 
 from src.utils.answer import (
     DISCORD_LIMIT,
@@ -226,3 +226,20 @@ def test_split_code_block_reopens_with_its_language():
         assert m.startswith("```python\n")
         assert len(m) <= DISCORD_HARD_LIMIT
         assert len(re.findall(r"^```", m, re.M)) % 2 == 0
+
+
+def test_mid_line_closing_fence_counts_for_parity():
+    # roborev #6488: "foo()```" closes the block even though the ``` is
+    # mid-line; the prose after it must not be reopened as code.
+    answer = (
+        "```python\n"
+        + "\n".join("x = 1" for _ in range(5))
+        + "\nfoo()```\n\n"
+        + "word " * 500
+    )
+    msgs = split_message(answer)
+    assert len(msgs) >= 2
+    for m in msgs[1:]:
+        assert not m.startswith("```")
+    for m in msgs:
+        assert m.count("```") % 2 == 0

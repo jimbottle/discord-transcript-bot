@@ -156,10 +156,11 @@ def split_message(text: str, limit: int = DISCORD_HARD_LIMIT) -> list:
     for chunk in chunks:
         if opener:
             chunk = opener + "\n" + chunk
-        fences = _FENCE_LINE.findall(chunk)
-        if len(fences) % 2 == 1:
-            # the last fence line opens a block that continues past here
-            opener = fences[-1]
+        # Parity over every ``` (Discord treats a mid-line ``` as a fence
+        # too); the opener text comes from the last line-start fence.
+        if chunk.count(_FENCE) % 2 == 1:
+            starts = _FENCE_LINE.findall(chunk)
+            opener = starts[-1] if starts else _FENCE
             chunk += "\n" + _FENCE
         else:
             opener = None

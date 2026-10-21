@@ -1534,3 +1534,27 @@ def test_order_toggle_is_on_live_and_transcript_pages(client, live_transcript):
     page = client.get("/transcripts/" + live_transcript.name).get_data(as_text=True)
     assert 'id="order-toggle"' in page and 'data-idx="0"' in page
     assert 'FeedOrder.get(KEY, "oldest")' in page
+
+
+def test_list_page_offers_whole_session_choice(client, tagged_session):
+    # roborev #6491: each list row knows its real session size
+    listing = client.get("/transcripts").get_data(as_text=True)
+    assert listing.count("Apply to all 2 recordings") == 2
+
+
+def test_stale_bot_state_does_not_block_delete(client, deletable, tmp_path):
+    # roborev #6491: a dead bot's leftover "recording: true" is ignored
+    _, _, files = deletable
+    (tmp_path / "bot_state.json").write_text(
+        json.dumps(
+            {
+                "updated_at": _time.time() - 3600,
+                "guilds": [{"recording": True, "session_file": files[1].name}],
+            }
+        )
+    )
+    assert _delete(client, files[1].name, confirm=True).status_code == 200
+
+
+def test_live_page_has_no_server_rendered_placeholder(client):
+    assert b'id="empty-state"' not in client.get("/live").data
