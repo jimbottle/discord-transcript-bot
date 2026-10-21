@@ -255,6 +255,49 @@
     margin-top: 0.5rem;
 }
 
+/* Newest/oldest toggle */
+.order-toggle {
+    display: inline-flex;
+    gap: 0;
+    float: right;
+    width: auto;
+}
+
+.feed-controls {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 0.4rem;
+}
+
+.feed-controls .order-toggle {
+    float: none;
+}
+
+.order-btn {
+    width: auto;
+    margin: 0;
+    padding: 0.15rem 0.6rem;
+    font-size: 0.78rem;
+    background: transparent;
+    color: var(--pico-muted-color);
+    border: 1px solid var(--pico-muted-border-color, #8885);
+}
+
+.order-btn:first-child {
+    border-radius: var(--pico-border-radius) 0 0 var(--pico-border-radius);
+}
+
+.order-btn:last-child {
+    border-radius: 0 var(--pico-border-radius) var(--pico-border-radius) 0;
+    border-left: none;
+}
+
+.order-btn.active {
+    background: var(--pico-primary-background);
+    border-color: var(--pico-primary-background);
+    color: var(--pico-primary-inverse);
+}
+
 /* Session-tag editor */
 .tag-editor summary {
     font-size: 0.85rem;

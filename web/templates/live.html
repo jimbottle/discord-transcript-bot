@@ -13,6 +13,7 @@
     <header>
         <span id="live-badge" class="live-badge live-off">idle</span>
         <span id="updated" class="search-meta"></span>
+        <span id="order-toggle" class="order-toggle"></span>
     </header>
     <div id="live-feed" class="transcript-content" aria-live="polite">
         <p id="empty-state">No session transcript yet.</p>
@@ -22,8 +23,18 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="{{ url_for('static', filename='feed-order.js') }}"></script>
+<script src="{{ url_for('static', filename='live-feed.js') }}"></script>
 <script>
 const DATA_URL = "{{ url_for('live_data') }}";
+const ORDER_KEY = "liveFeedOrder";
+const liveFeed = createLiveFeed(document.getElementById("live-feed"), {
+    order: FeedOrder.get(ORDER_KEY, "newest"),
+});
+FeedOrder.mountToggle(document.getElementById("order-toggle"), liveFeed.order(), function (o) {
+    FeedOrder.set(ORDER_KEY, o);
+    liveFeed.setOrder(o);
+});
 const POLL_MS = 3000;
 
 let lastFetchAt = 0;
@@ -45,55 +56,9 @@ function tickUpdatedLabel() {
         "last write " + fmtAge(lastAge + extra);
 }
 
-// How many entries are already in the DOM, and for which session file.
-// Newest-first, prepend-only rendering: the latest line is always at the
-// top of the feed, and we never tear down existing nodes, so a user who
-// scrolled down to re-read keeps their place, text selection is
-// preserved, and a screen reader (aria-live) only announces NEW lines —
-// not the whole transcript every poll.
-let renderedCount = 0;
-let renderedFile = null;
-
-// "20:26:09" -> "8:26 PM" (same rule as src/utils/timefmt.clock).
-function clock12(hms) {
-    const m = /^(\d{1,2}):(\d{2})/.exec(hms || "");
-    if (!m) return hms;
-    const h = +m[1];
-    return (h % 12 || 12) + ":" + m[2] + (h < 12 ? " AM" : " PM");
-}
-
-function buildEntry(e) {
-    // createElement + textContent: transcript text is raw user speech
-    // and must never be parsed as HTML.
-    const entry = document.createElement("div");
-    entry.className = "entry";
-
-    let who = "";
-    if (e.player) {
-        who = e.player;
-        if (e.character && e.character !== e.player) who += " (" + e.character + ")";
-    }
-    if (who || e.time) {
-        const head = document.createElement("div");
-        head.className = "entry-meta";
-        const whoSpan = document.createElement("strong");
-        whoSpan.textContent = who || "Unknown";
-        head.appendChild(whoSpan);
-        if (e.time) head.appendChild(document.createTextNode(" · " + clock12(e.time)));
-        entry.appendChild(head);
-    }
-
-    const body = document.createElement("div");
-    body.className = "entry-text";
-    body.textContent = e.text;
-    entry.appendChild(body);
-    return entry;
-}
-
 function render(data) {
     const badge = document.getElementById("live-badge");
     const meta = document.getElementById("session-meta");
-    const feed = document.getElementById("live-feed");
 
     if (data.live) {
         badge.textContent = "● LIVE";
@@ -128,58 +93,11 @@ function render(data) {
     tickUpdatedLabel();
     updateAskAvailability(data);
 
-    const entries = data.entries || [];
-
-    // Full reset only when the session changed or the file shrank
-    // (new session / rotated / truncated) — otherwise it grows.
-    const reset =
-        data.filename !== renderedFile || entries.length < renderedCount;
-    if (reset) {
-        while (feed.firstChild) feed.removeChild(feed.firstChild);
-        renderedCount = 0;
-        renderedFile = data.filename;
-    }
-
-    if (entries.length === 0) {
-        if (!document.getElementById("empty-state")) {
-            const p = document.createElement("p");
-            p.id = "empty-state";
-            p.textContent = data.filename
-                ? "Session file is empty so far."
-                : "No session transcript yet.";
-            feed.appendChild(p);
-        }
-        return;
-    }
-
-    // Clear the empty-state placeholder before appending real entries.
-    // Unconditional: on the empty→content transition `reset` is false
-    // (same file, entries grew), so a reset-gated removal would leave
-    // "Session file is empty so far." pinned above the transcript.
-    const empty = document.getElementById("empty-state");
-    if (empty) empty.remove();
-
-    if (entries.length === renderedCount) return;  // nothing new
-
-    // Measure BEFORE prepending. If the reader is at the top (or this is
-    // a fresh session) keep them pinned to the newest line; otherwise
-    // grow the scroll offset by the inserted height so the lines they
-    // are reading don't jump.
-    const atTop = reset || feed.scrollTop < 80;
-    const prevHeight = feed.scrollHeight;
-
-    // The file is oldest-first; walk the new tail backwards so the
-    // newest line lands first in the fragment, then put the whole
-    // fragment above everything already shown.
-    const frag = document.createDocumentFragment();
-    for (let i = entries.length - 1; i >= renderedCount; i--) {
-        frag.appendChild(buildEntry(entries[i]));
-    }
-    feed.insertBefore(frag, feed.firstChild);
-    renderedCount = entries.length;
-
-    if (atTop) feed.scrollTop = 0;
-    else feed.scrollTop += feed.scrollHeight - prevHeight;
+    liveFeed.update(
+        data.entries,
+        data.filename,
+        data.filename ? "Session file is empty so far." : "No session transcript yet."
+    );
 }
 
 async function poll() {

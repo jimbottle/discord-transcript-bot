@@ -1309,7 +1309,7 @@ def test_dashboard_shows_12_hour_times(client, live_transcript):
     assert web_app.timefmt.when(e["ts"]) in client.get("/questions").get_data(
         as_text=True
     )
-    assert "clock12(e.time)" in client.get("/live").get_data(as_text=True)
+    assert "live-feed.js" in client.get("/live").get_data(as_text=True)
 
 
 # ── session-tag editor ───────────────────────────────────────────────────
@@ -1503,3 +1503,34 @@ def test_delete_controls_render_with_an_inline_confirmation(client, deletable):
     assert "Also delete its captured audio" in listing  # only the one with audio
     page = client.get(f"/transcripts/{files[0].name}").get_data(as_text=True)
     assert 'data-after="/transcripts"' in page
+
+
+# ── newest / oldest order toggle ─────────────────────────────────────────
+
+
+def _run_node_test(name):
+    import pathlib
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    script = pathlib.Path(__file__).parent / "js" / name
+    r = subprocess.run([node, str(script)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr or r.stdout
+
+
+def test_live_feed_order_behaviour():
+    """tests/js/live_feed.test.mjs: both orders, follow + place-keeping,
+    switching, empty state, and the remembered toggle."""
+    _run_node_test("live_feed.test.mjs")
+
+
+def test_order_toggle_is_on_live_and_transcript_pages(client, live_transcript):
+    live = client.get("/live").get_data(as_text=True)
+    assert 'id="order-toggle"' in live and "feed-order.js" in live
+    assert 'FeedOrder.get(ORDER_KEY, "newest")' in live
+    page = client.get("/transcripts/" + live_transcript.name).get_data(as_text=True)
+    assert 'id="order-toggle"' in page and 'data-idx="0"' in page
+    assert 'FeedOrder.get(KEY, "oldest")' in page
