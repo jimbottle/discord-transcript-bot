@@ -99,4 +99,8 @@ bd close <id>         # Complete work
 - If push fails, resolve and retry until it succeeds
 <!-- END BEADS INTEGRATION -->
 
+**This repo layers wyk over bd.** The block above is bd's generated boilerplate (the same block is in `CLAUDE.md`). Raw `bd create` is blocked by a hook here: file issues with `wyk create` (same flags), hand work to a human with `wyk handoff`, and start a session with `wyk inbox`. The full contract is the "wyk" section of `CLAUDE.md` and `wyk conventions`.
+
 **`.beads/` is gitignored (decision 2026-10-20).** Nothing under `.beads/` — the JSONL export, hooks, config — is committed to the git tree; `git ls-files .beads` is empty and must stay that way (no `git add -f`, no `chore(bd): sync export` commits). Issue data moves between machines only through bd's Dolt remote (`refs/dolt/data`, via `bd dolt push/pull`), never through the git tree; the JSONL export is a local convenience. This rule lives outside bd's managed block above on purpose, so `bd` regenerating that block cannot drop it.
+
+**File issues with `wyk create`, not `bd create`.** The bd block above says to use `bd` for all tracking; in this repo a PreToolUse hook blocks raw `bd create` and asks for `wyk create` (same flags, forwarded verbatim, plus a session stamp). See the "wyk — planning & handoff over bd" section in CLAUDE.md for the handoff conventions.
