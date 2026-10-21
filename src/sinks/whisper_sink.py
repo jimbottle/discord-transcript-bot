@@ -157,7 +157,6 @@ class WhisperSink(Sink):
         max_speakers=-1,
     ):
         self.queue = transcript_queue
-        self.transcription_output_queue = asyncio.Queue()
         self.loop = loop
 
         if filters is None:
@@ -595,36 +594,6 @@ class WhisperSink(Sink):
 
         return transcription
 
-    def get_transcriptions(self):
-        """Retrieve all transcriptions from the queue, format them to only include data, begin, and user_id."""
-        transcriptions = []
-        while not self.transcription_queue.empty():
-            log_message = self.transcription_queue.get_nowait()
-
-            # Assuming log_message is a dictionary (or string in JSON format)
-            if isinstance(log_message, str):
-                log_message = json.loads(
-                    log_message
-                )  # Convert from string to dictionary if needed
-
-            # Extract only the desired fields from the log message
-            begin = log_message.get("begin", "Unknown begin")
-            user_id = log_message.get("user_id", "Unknown user")
-            data = log_message.get("data", "")
-
-            # Format the transcription entry with only the relevant fields
-            formatted_entry = (
-                f"Begin: {begin}\n"
-                f"User ID: {user_id}\n"
-                f"Data: {data}\n"
-                "-------------------------\n"
-            )
-
-            # Add the formatted entry to the transcription list
-            transcriptions.append(formatted_entry)
-
-        return transcriptions
-
     # A speaker's buffer is submitted for transcription once they've gone
     # quiet for this long...
     SILENCE_GAP_S = 1.5
@@ -825,8 +794,6 @@ class WhisperSink(Sink):
         transcription_logger = logging.getLogger("transcription")
         # Log the message
         transcription_logger.info(log_message)
-        # Place into queue for processing
-        self.transcription_output_queue.put_nowait(log_message)
 
         # Pair this segment's captured clip with the text the engine produced,
         # as the draft a human corrects into reference data. Deliberately

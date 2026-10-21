@@ -1,6 +1,7 @@
-import json
+import asyncio
 import os
 import tempfile
+from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -25,14 +26,27 @@ def add_parchment_background(c, doc):
     c.drawImage(background_path, 0, 0, width=A4[0], height=A4[1], mask="auto")
 
 
-async def pdf_generator(transcriptions, logo_path=None):
-    """
-    Generates a PDF with aligned transcription columns, wrapping long data entries, and reduced margins.
+def speaker_label(entry) -> str:
+    """``Player (Character)``, or whichever of the two is known."""
+    player, character = entry.get("player"), entry.get("character")
+    if player and character and character != player:
+        return f"{player} ({character})"
+    return player or character or ""
 
-    :param transcriptions: List of transcriptions to include in the PDF.
-    :param logo_path: Optional path to a logo image to include in the PDF.
+
+async def pdf_generator(entries, logo_path=None):
+    """Build the transcript PDF off the event loop and return its path.
+
+    :param entries: parsed transcript lines
+        (``src.transcript_lines.parse_transcript_text``), oldest first.
+    :param logo_path: unused; kept for callers.
     :return: Path to the generated PDF file.
     """
+    return await asyncio.to_thread(build_pdf, entries)
+
+
+def build_pdf(entries) -> str:
+    """Write the PDF (blocking; reportlab) and return its path."""
     # Ensure the logs directory exists
     logs_dir = "./.logs/pdfs"
     os.makedirs(logs_dir, exist_ok=True)
@@ -77,7 +91,7 @@ async def pdf_generator(transcriptions, logo_path=None):
     elements.append(Spacer(1, 24))  # Add more space after the title
 
     # Column headers
-    header_text = f"{'Begin':<15} {'User ID':<25} {'Data':<50}\n"
+    header_text = f"{'Time':<10} {'Speaker':<30} {'Said':<50}\n"
     elements.append(Preformatted(header_text, content_style))
 
     # Divider line
@@ -85,20 +99,17 @@ async def pdf_generator(transcriptions, logo_path=None):
     elements.append(Preformatted(divider, content_style))
     elements.append(Spacer(1, 12))  # Add space after the header
 
-    # Add the transcriptions, wrapping long text in the data field
-    for log_message in transcriptions:
-        # try to see if log message is json
-        if isinstance(log_message, str):
-            try:
-                log_message = json.loads(log_message)
-            except json.JSONDecodeError:
-                continue
-        begin = clock(log_message.get("begin")) or "N/A"
-        user_id = log_message.get("user_id", "N/A")
-        data = log_message.get("data", "")
-
-        # Wrap the text in the Data column
-        formatted_entry = f"{begin:<15} {user_id:<25} {data}"
+    # One paragraph per line. Paragraph parses its text as markup, so a
+    # transcribed "<" or "&" must be escaped or reportlab raises.
+    for entry in entries:
+        text = entry.get("text", "")
+        if entry.get("time") is None:
+            # A line the parser didn't recognise, e.g. a restart marker.
+            formatted_entry = escape(text)
+        else:
+            formatted_entry = escape(
+                f"{clock(entry['time']):<10} {speaker_label(entry):<30} {text}"
+            )
         elements.append(Paragraph(formatted_entry, content_style))
         elements.append(Spacer(1, 12))
 

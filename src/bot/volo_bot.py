@@ -4,6 +4,7 @@ import logging
 import os
 import time
 from collections import defaultdict
+from typing import Optional
 
 import discord
 import yaml
@@ -80,6 +81,9 @@ class VoloBot(discord.Bot):
         self.guild_to_helper = {}
         self.guild_is_recording = {}
         self.guild_whisper_sinks = {}
+        # guild_id -> the .txt of the guild's latest recording; outlives the
+        # sink so /generate_pdf works after /stop and /disconnect.
+        self.guild_last_session_file = {}
         self.guild_whisper_message_tasks = {}
         self.player_map = {}
         self._is_ready = False
@@ -465,6 +469,7 @@ class VoloBot(discord.Bot):
         )
 
         self._tag_session(ctx, whisper_sink)
+        self.guild_last_session_file[ctx.guild_id] = whisper_sink.session_file
 
         # Registered before vc.start_recording so a failure there (e.g.
         # RecordingException) leaves a sink start_recording can find and
@@ -587,19 +592,17 @@ class VoloBot(discord.Bot):
             logger.error(f"end_recording_session: cleanup_sink failed: {e}")
         self._write_runtime_state()  # recording stopped (still connected)
 
-    async def get_transcription(self, ctx: discord.context.ApplicationContext):
-        # Get the transcription queue
-        if not (self.guild_whisper_sinks.get(ctx.guild_id)):
-            return
-        whisper_sink = self.guild_whisper_sinks[ctx.guild_id]
-        transcriptions = []
-        if whisper_sink is None:
-            return
-
-        transcriptions_queue = whisper_sink.transcription_output_queue
-        while not transcriptions_queue.empty():
-            transcriptions.append(await transcriptions_queue.get())
-        return transcriptions
+    def session_file_for_export(self, guild_id) -> Optional[str]:
+        """The recording /generate_pdf exports for ``guild_id``: the one
+        this process last started there, else (after a restart) the newest
+        tagged with the guild on disk. None when there is none."""
+        path = self.guild_last_session_file.get(guild_id)
+        if path and os.path.exists(path):
+            return path
+        found = sessions.latest_for_guild(
+            guild_id, os.path.join(os.getcwd(), "transcripts")
+        )
+        return str(found) if found else None
 
     async def update_player_map(self, ctx: discord.context.ApplicationContext):
         # Load existing file to preserve entries from other guilds and manual edits

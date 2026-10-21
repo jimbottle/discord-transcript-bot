@@ -17,6 +17,7 @@ from src.utils.answer import answer_budget, clean_answer, discord_messages
 from src.utils.discord_send import send_followups
 from src.utils.commandline import CommandLine
 from src.utils.pdf_generator import pdf_generator
+from src.transcript_lines import parse_transcript_text
 from src.utils.voice import disconnect_targets
 
 load_dotenv()
@@ -271,15 +272,6 @@ if __name__ == "__main__":
         _sink = bot.guild_whisper_sinks.get(guild_id)
         capture = getattr(_sink, "capture", None)
         teardown_ok = True
-        # Independent try blocks: a get_transcription failure must NOT
-        # skip the actual teardown (that would leave guild_is_recording
-        # stuck True and leak the sink — the exact class this path
-        # exists to prevent).
-        try:
-            await bot.get_transcription(ctx)
-        except Exception as e:
-            logger.error(f"/stop get_transcription error: {e}")
-            teardown_ok = False
         try:
             # end_recording_session keeps vc.stop_recording() on the
             # loop thread (thread-safe after-callback scheduling; carries
@@ -335,15 +327,9 @@ if __name__ == "__main__":
 
         # Archive/teardown any active recording BEFORE disconnecting so
         # the transcript is flushed and guild_is_recording is cleared.
-        # Independent try blocks so a get_transcription failure can't
-        # skip the actual teardown, and neither can skip the disconnect.
+        # Guarded so a teardown failure can't skip the disconnect.
         teardown_ok = True
         if bot.guild_is_recording.get(guild_id, False):
-            try:
-                await bot.get_transcription(ctx)
-            except Exception as e:
-                logger.error(f"/disconnect get_transcription error: {e}")
-                teardown_ok = False
             try:
                 # Keeps vc.stop_recording() on the loop thread (safe
                 # after-callback scheduling; bounded ~ms/≤5s router
@@ -390,32 +376,40 @@ if __name__ == "__main__":
         name="generate_pdf", description="Export the transcript as a PDF."
     )
     async def generate_pdf(ctx: discord.context.ApplicationContext):
-        guild_id = ctx.guild_id
-        helper = bot.guild_to_helper.get(guild_id, None)
-        if not helper:
-            await ctx.respond("Not connected. Nothing to export.", ephemeral=True)
-            return
-        transcription = await bot.get_transcription(ctx)
-        if not transcription:
+        # Built from the session's transcript files, not from the sink, so it
+        # works mid-session, after /stop or /disconnect, and after a restart,
+        # and covers every recording of the session (fwv).
+        path = bot.session_file_for_export(ctx.guild_id)
+        if not path:
             await ctx.respond(
                 "No transcript data yet. Start a recording first.", ephemeral=True
             )
             return
-        pdf_file_path = await pdf_generator(transcription)
-        # Send the PDF as an attachment
-        if os.path.exists(pdf_file_path):
-            try:
-                with open(pdf_file_path, "rb") as f:
-                    discord_file = discord.File(
-                        f, filename=f"session_transcription.pdf"
-                    )
-                    await ctx.respond(
-                        "Dossier compiled. Here's your transcript.", file=discord_file
-                    )
-            finally:
-                os.remove(pdf_file_path)
-        else:
-            await ctx.respond("PDF generation failed. Check the logs.", ephemeral=True)
+        text, _meta, _files = sessions.session_transcript(path)
+        entries = parse_transcript_text(text)
+        if not any(e.get("time") for e in entries):
+            await ctx.respond(
+                "No transcript data yet. Start a recording first.", ephemeral=True
+            )
+            return
+        # A long session takes reportlab more than Discord's 3s to lay out.
+        await ctx.defer()
+        try:
+            pdf_file_path = await pdf_generator(entries)
+        except Exception as e:
+            logger.error(f"/generate_pdf failed: {e}")
+            await ctx.followup.send("PDF generation failed. Check the logs.")
+            return
+        try:
+            with open(pdf_file_path, "rb") as f:
+                discord_file = discord.File(
+                    f, filename=f"{os.path.splitext(os.path.basename(path))[0]}.pdf"
+                )
+                await ctx.followup.send(
+                    "Dossier compiled. Here's your transcript.", file=discord_file
+                )
+        finally:
+            os.remove(pdf_file_path)
 
     @bot.slash_command(
         name="update_player_map",

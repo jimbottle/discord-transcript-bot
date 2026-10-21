@@ -156,6 +156,21 @@ def session_files(transcript_path) -> list:
     return files or [target]
 
 
+def latest_for_guild(guild_id, transcripts_dir) -> Optional[Path]:
+    """The newest recording tagged with ``guild_id`` in ``transcripts_dir``,
+    or None. Recording names are timestamps, so name order is time order.
+    Lets /generate_pdf find the last session after /stop, /disconnect or a
+    bot restart, when no sink is left to ask."""
+    d = Path(transcripts_dir)
+    if guild_id is None or not d.is_dir():
+        return None
+    for txt in sorted(d.glob("*.txt"), reverse=True):
+        meta = read_meta(txt)
+        if meta is not None and meta.guild_id == int(guild_id):
+            return txt
+    return None
+
+
 def session_transcript(transcript_path):
     """``(text, meta, files)``: all of a session's recordings joined in
     order with a restart marker between them. ``meta`` is the target

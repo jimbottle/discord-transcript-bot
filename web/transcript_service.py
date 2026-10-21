@@ -1,5 +1,4 @@
 import json
-import re
 import time
 from pathlib import Path
 
@@ -18,50 +17,13 @@ CAPTURES_DIR = PROJECT_ROOT / "captures"
 # latency without claiming a long-idle session is still recording).
 LIVE_FRESH_SECONDS = 30
 
-# Per-utterance line written by WhisperSink.write_transcription_log:
-#   [HH:MM:SS] Player (Character) [user_id]: text
-_LINE_RE = re.compile(
-    r"^\[(\d{2}:\d{2}:\d{2})\]\s+(.*?)\s+\(([^)]*)\)\s+\[([^\]]+)\]:\s?(.*)$"
+# The line parser is shared with the bot's /generate_pdf. roster_service (or
+# conftest) has put the project root on sys.path by the time this is imported.
+from src.transcript_lines import (  # noqa: E402,F401
+    _LINE_RE,
+    parse_transcript_line,
+    parse_transcript_text,
 )
-
-
-def parse_transcript_line(line):
-    """Parse one session-transcript line into a structured entry.
-
-    Lines that don't match the expected shape (older formats, manual
-    edits) are returned as a raw-text entry rather than dropped, so the
-    live view never silently loses content. Blank lines → None.
-    """
-    line = line.rstrip("\n")
-    if not line.strip():
-        return None
-    m = _LINE_RE.match(line)
-    if not m:
-        return {
-            "time": None,
-            "player": None,
-            "character": None,
-            "user_id": None,
-            "text": line,
-        }
-    t, player, character, user_id, text = m.groups()
-    return {
-        "time": t,
-        "player": player,
-        "character": character,
-        "user_id": user_id,
-        "text": text,
-    }
-
-
-def parse_transcript_text(raw):
-    """Parse a whole .txt body into entries (blank lines dropped).
-
-    Single place the line-parsing happens so the file viewer, the live
-    view, and get_transcript_entries all behave identically and each
-    only reads the file once.
-    """
-    return [e for e in (parse_transcript_line(ln) for ln in raw.splitlines()) if e]
 
 
 def get_live_session():
