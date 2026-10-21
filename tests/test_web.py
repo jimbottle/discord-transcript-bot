@@ -1561,8 +1561,9 @@ def test_live_page_has_no_server_rendered_placeholder(client):
 
 
 def test_dashboard_binds_loopback_unless_told_otherwise(monkeypatch):
-    """The dashboard has no login. Only the container (Dockerfile) sets
-    DASHBOARD_HOST=0.0.0.0, and compose publishes it on host loopback."""
+    """The dashboard has no login. Only compose.yaml sets
+    DASHBOARD_HOST=0.0.0.0, together with a host-loopback port mapping; the
+    image itself must not (security review 2026-10-21)."""
     import importlib
 
     monkeypatch.delenv("DASHBOARD_HOST", raising=False)
@@ -1571,6 +1572,18 @@ def test_dashboard_binds_loopback_unless_told_otherwise(monkeypatch):
     assert importlib.reload(web_app).DASHBOARD_HOST == "0.0.0.0"
     monkeypatch.delenv("DASHBOARD_HOST")
     importlib.reload(web_app)
+
+
+def test_only_compose_opens_the_dashboard_and_only_on_host_loopback():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "Dockerfile")) as f:
+        dockerfile = f.read()
+    assert "DASHBOARD_HOST=" not in dockerfile
+    with open(os.path.join(root, "compose.yaml")) as f:
+        compose = yaml.safe_load(f)
+    volo = compose["services"]["volo"]
+    assert volo["environment"]["DASHBOARD_HOST"] == "0.0.0.0"
+    assert all(str(p).startswith("127.0.0.1:") for p in volo["ports"])
 
 
 def test_docker_context_excludes_private_material():

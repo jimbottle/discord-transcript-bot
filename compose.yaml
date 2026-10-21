@@ -14,6 +14,10 @@ services:
       - path: .env
         required: false
     environment:
+      # Listen on the container's network so the port mapping above can
+      # reach it. Safe only together with that 127.0.0.1 mapping: the
+      # dashboard has no login. Never publish it as "5001:5001".
+      DASHBOARD_HOST: 0.0.0.0
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       PLAYER_MAP_FILE_PATH: /app/player_map.yml
     volumes:

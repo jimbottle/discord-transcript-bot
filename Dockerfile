@@ -17,9 +17,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# DASHBOARD_HOST is deliberately NOT set here: the dashboard has no login,
+# so the image binds the container's loopback and a bare `docker run -p`
+# reaches nothing. compose.yaml opts in to 0.0.0.0 and publishes the port on
+# the host's loopback only.
 ENV PYTHONUNBUFFERED=1 \
     HF_HOME=/models \
-    DASHBOARD_HOST=0.0.0.0 \
     ASR_BACKEND=faster-whisper
 
 EXPOSE 5001
