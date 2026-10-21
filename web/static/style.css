@@ -147,6 +147,48 @@
     word-break: break-word;
 }
 
+/* Live page: ask box */
+#ask-panel textarea {
+    margin-bottom: 0.5rem;
+    resize: vertical;
+}
+
+.ask-actions {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.ask-actions button {
+    width: auto;
+    margin-bottom: 0;
+}
+
+.qa {
+    padding: 0.6rem 0;
+    border-top: 1px solid var(--pico-muted-border-color, #e1e1e1);
+}
+
+.qa-q {
+    font-weight: 600;
+    margin-bottom: 0.25rem;
+}
+
+.qa-a {
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.qa-err {
+    color: var(--status-fail);
+}
+
+.qa-meta {
+    font-size: 0.75rem;
+    color: var(--pico-muted-color);
+    margin-top: 0.3rem;
+}
+
 /* Search results */
 .search-result {
     border-left: 3px solid var(--pico-primary);

@@ -23,6 +23,14 @@ from transcript_service import (
 # (the bot's own roster writer) is importable from web/.
 from src import player_map_store  # noqa: E402
 
+# The Live page's ask box goes through the very module the bot's /ask uses,
+# so the prompt, the transcript cache and the error messages are identical
+# whether the question comes from Discord or from the dashboard.
+from src.llm import claude  # noqa: E402
+
+# Upper bound on a posted question; the transcript is the real payload.
+MAX_QUESTION_CHARS = 2000
+
 # Load .env so a custom PLAYER_MAP_FILE_PATH (or other config) is honoured
 # by the dashboard process too — the bot already loads it. Best-effort:
 # a missing python-dotenv or .env just falls back to the defaults.
@@ -109,7 +117,76 @@ def live():
 
 @app.route("/live/data")
 def live_data():
-    return jsonify(get_live_session())
+    data = get_live_session()
+    # Lets the Live page disable its ask box, with the reason, instead of
+    # finding out on the first question.
+    data["ask_configured"] = claude.configured()
+    return jsonify(data)
+
+
+@app.route("/ask", methods=["POST"])
+def ask_session():
+    """Answer a question about a session transcript with Claude.
+
+    JSON body: ``{"question": str, "filename": optional str}``. Without
+    ``filename`` the newest session file (the live one) is used.
+    Blocking for the length of the API call (tens of seconds at most);
+    Flask's threaded dev server keeps serving the live poll meanwhile.
+    Errors come back as ``{"error": msg}`` with a status that says why:
+    400 bad question, 404 unknown transcript, 409 nothing transcribed
+    yet, 502 Anthropic said no (``AskFailed.user_message``), 503 no key.
+    """
+    _require_csrf_header()
+    data = request.get_json(silent=True) or {}
+    question = str(data.get("question") or "").strip()
+    if not question:
+        return jsonify({"error": "question is required"}), 400
+    if len(question) > MAX_QUESTION_CHARS:
+        return (
+            jsonify(
+                {"error": f"question is too long (max {MAX_QUESTION_CHARS} characters)"}
+            ),
+            400,
+        )
+    if not claude.configured():
+        return jsonify({"error": claude.NO_KEY_MSG}), 503
+
+    filename = data.get("filename") or get_live_session()["filename"]
+    transcript = get_transcript(filename) if filename else None
+    if filename and transcript is None:
+        return jsonify({"error": "transcript not found"}), 404
+    if not transcript or not transcript.strip():
+        return (
+            jsonify({"error": "No transcript data in the current session yet."}),
+            409,
+        )
+
+    try:
+        result = claude.ask(transcript, question)
+    except claude.AskFailed as e:
+        app.logger.error("ask failed: %s (%r)", e.user_message, e.__cause__)
+        return jsonify({"error": e.user_message}), 502
+    answer = result.answer.strip()
+    if not answer:
+        return jsonify({"error": claude.EMPTY_MSG}), 502
+    app.logger.info(
+        "ask answered by %s (input=%s, cached=%s, output=%s)",
+        result.model,
+        result.input_tokens,
+        result.cached_tokens,
+        result.output_tokens,
+    )
+    return jsonify(
+        {
+            "filename": filename,
+            "question": question,
+            "answer": answer,
+            "model": result.model,
+            "input_tokens": result.input_tokens,
+            "cached_tokens": result.cached_tokens,
+            "output_tokens": result.output_tokens,
+        }
+    )
 
 
 @app.route("/search")

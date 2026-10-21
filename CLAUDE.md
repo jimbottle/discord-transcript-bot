@@ -10,7 +10,7 @@ Discord bot that transcribes voice channel audio to text in real-time using Fast
 
 ```bash
 make start          # Run the bot (python main.py)
-make web            # Run the web dashboard (Flask on port 5001)
+make web            # Run the web dashboard (Flask on http://127.0.0.1:5001; under `op run` too)
 python main.py -v   # Run with verbose/debug logging
 ```
 
@@ -57,6 +57,8 @@ Required in `.env` (a derived copy; 1Password is the source of truth for the sec
 ### `/ask` (`src/llm/claude.py`)
 
 `/ask` is one call to Claude through the Anthropic SDK. The transcript goes in a cached system block (`cache_control: ephemeral`) so follow-up questions re-read it at the cache rate; the question is the single user message; `output_config.effort` is `ASK_EFFORT`. The SDK's own retries handle 429/5xx; everything else maps to a Discord-ready message (`AskFailed.user_message`: bad key, rate limit, out of credit, unreachable, refusal, empty answer), covered by `tests/test_llm_claude.py`. There is no local fallback: without wifi there is no Discord voice either, so a local tier only ever covered "Anthropic down while Discord up". This replaced a three-tier OpenRouter → Cerebras → Ollama chain (discord-transcript-bot-gh7); do not reintroduce provider failover here.
+
+The dashboard's Live page has the same ask box: `POST /ask` in `web/app.py` reads the newest session file (or a named transcript) and calls the same `claude.ask`, so `make web` also runs under `op run` when `op.env` exists. Its HTTP contract is in `tests/test_web.py` (400 bad question, 404 unknown file, 409 nothing transcribed, 502 `AskFailed.user_message`, 503 no key).
 
 `health.py:_check_ask_provider` only reports whether the key is present (a test call would spend money on every start) and is never critical: transcription does not depend on `/ask`.
 

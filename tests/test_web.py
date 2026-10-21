@@ -626,3 +626,173 @@ def test_get_unmapped_speakers_excludes_mapped_includes_members(
     assert by_id[9]["source"] == "spoke" and by_id[9]["suggested_name"] == "Bob"
     assert by_id[9]["last_text"] == "hello"
     assert result[0]["user_id"] == 8  # on-call sorted first
+
+
+# ── /ask: question the live session from the dashboard ──────────────────
+# Same module as Discord's /ask (src.llm.claude); these tests stub it so no
+# API call is ever made and check the HTTP contract the Live page relies on.
+
+
+@pytest.fixture
+def live_transcript(tmp_path, monkeypatch):
+    """A transcripts dir with one session file, the 'live' one."""
+    monkeypatch.setattr(transcript_service, "TRANSCRIPTS_DIR", tmp_path)
+    f = tmp_path / "2026-10-20_19-38-38.txt"
+    f.write_text(
+        "[19:40:01] Jobby Jill (Jim) [371442040141119490]: We head for the keep.\n",
+        encoding="utf-8",
+    )
+    return f
+
+
+@pytest.fixture
+def ask_configured(monkeypatch):
+    monkeypatch.setattr(web_app.claude, "configured", lambda: True)
+
+
+def _fake_ask(calls, answer="They decided to head for the keep."):
+    def ask(transcript, question):
+        calls.append((transcript, question))
+        return web_app.claude.AskResult(
+            answer=answer,
+            model="claude-opus-5-5",
+            input_tokens=120,
+            cached_tokens=100,
+            output_tokens=12,
+        )
+
+    return ask
+
+
+def test_ask_requires_csrf_header(client, live_transcript, ask_configured):
+    r = client.post("/ask", json={"question": "What happened?"})
+    assert r.status_code == 403
+
+
+def test_ask_rejects_empty_question(client, live_transcript, ask_configured):
+    r = client.post("/ask", json={"question": "   "}, headers=_XHR)
+    assert r.status_code == 400
+    assert "question" in r.get_json()["error"]
+
+
+def test_ask_rejects_oversized_question(client, live_transcript, ask_configured):
+    r = client.post(
+        "/ask",
+        json={"question": "x" * (web_app.MAX_QUESTION_CHARS + 1)},
+        headers=_XHR,
+    )
+    assert r.status_code == 400
+
+
+def test_ask_without_key_is_503(client, live_transcript, monkeypatch):
+    monkeypatch.setattr(web_app.claude, "configured", lambda: False)
+    called = []
+    monkeypatch.setattr(web_app.claude, "ask", _fake_ask(called))
+    r = client.post("/ask", json={"question": "Why?"}, headers=_XHR)
+    assert r.status_code == 503
+    assert r.get_json()["error"] == web_app.claude.NO_KEY_MSG
+    assert called == []  # never reaches the API without a key
+
+
+def test_ask_with_no_session_is_409(client, tmp_path, monkeypatch, ask_configured):
+    monkeypatch.setattr(transcript_service, "TRANSCRIPTS_DIR", tmp_path)
+    r = client.post("/ask", json={"question": "Why?"}, headers=_XHR)
+    assert r.status_code == 409
+
+
+def test_ask_with_empty_session_is_409(client, live_transcript, ask_configured):
+    live_transcript.write_text("", encoding="utf-8")
+    r = client.post("/ask", json={"question": "Why?"}, headers=_XHR)
+    assert r.status_code == 409
+
+
+def test_ask_unknown_filename_is_404(client, live_transcript, ask_configured):
+    r = client.post(
+        "/ask", json={"question": "Why?", "filename": "nope.txt"}, headers=_XHR
+    )
+    assert r.status_code == 404
+
+
+def test_ask_path_traversal_is_404(client, live_transcript, ask_configured):
+    r = client.post(
+        "/ask", json={"question": "Why?", "filename": "../.env"}, headers=_XHR
+    )
+    assert r.status_code == 404
+
+
+def test_ask_answers_from_the_live_session(
+    client, live_transcript, ask_configured, monkeypatch
+):
+    calls = []
+    monkeypatch.setattr(web_app.claude, "ask", _fake_ask(calls))
+    r = client.post("/ask", json={"question": "Where next?"}, headers=_XHR)
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body == {
+        "filename": "2026-10-20_19-38-38.txt",
+        "question": "Where next?",
+        "answer": "They decided to head for the keep.",
+        "model": "claude-opus-5-5",
+        "input_tokens": 120,
+        "cached_tokens": 100,
+        "output_tokens": 12,
+    }
+    # The model saw the session file verbatim, not a re-rendered version.
+    assert calls == [(live_transcript.read_text(encoding="utf-8"), "Where next?")]
+
+
+def test_ask_picks_the_newest_session_by_default(
+    client, live_transcript, ask_configured, monkeypatch
+):
+    newer = live_transcript.parent / "2026-10-21_09-00-00.txt"
+    newer.write_text("[09:00:01] A (B) [1]: newer session\n", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(web_app.claude, "ask", _fake_ask(calls))
+    r = client.post("/ask", json={"question": "q"}, headers=_XHR)
+    assert r.status_code == 200
+    assert r.get_json()["filename"] == newer.name
+    assert "newer session" in calls[0][0]
+
+
+def test_ask_named_transcript(client, live_transcript, ask_configured, monkeypatch):
+    calls = []
+    monkeypatch.setattr(web_app.claude, "ask", _fake_ask(calls))
+    r = client.post(
+        "/ask",
+        json={"question": "q", "filename": live_transcript.name},
+        headers=_XHR,
+    )
+    assert r.status_code == 200
+    assert r.get_json()["filename"] == live_transcript.name
+
+
+def test_ask_failed_maps_to_502_with_user_message(
+    client, live_transcript, ask_configured, monkeypatch
+):
+    def boom(transcript, question):
+        raise web_app.claude.AskFailed(web_app.claude.RATE_LIMIT_MSG)
+
+    monkeypatch.setattr(web_app.claude, "ask", boom)
+    r = client.post("/ask", json={"question": "q"}, headers=_XHR)
+    assert r.status_code == 502
+    assert r.get_json()["error"] == web_app.claude.RATE_LIMIT_MSG
+
+
+def test_ask_empty_answer_is_502(client, live_transcript, ask_configured, monkeypatch):
+    monkeypatch.setattr(web_app.claude, "ask", _fake_ask([], answer="  "))
+    r = client.post("/ask", json={"question": "q"}, headers=_XHR)
+    assert r.status_code == 502
+    assert r.get_json()["error"] == web_app.claude.EMPTY_MSG
+
+
+def test_live_data_reports_ask_configured(client, monkeypatch):
+    monkeypatch.setattr(web_app.claude, "configured", lambda: False)
+    assert client.get("/live/data").get_json()["ask_configured"] is False
+    monkeypatch.setattr(web_app.claude, "configured", lambda: True)
+    assert client.get("/live/data").get_json()["ask_configured"] is True
+
+
+def test_live_page_has_the_ask_box(client):
+    r = client.get("/live")
+    assert b'id="ask-form"' in r.data
+    assert b'id="ask-question"' in r.data
