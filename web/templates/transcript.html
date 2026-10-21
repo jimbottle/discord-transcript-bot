@@ -14,6 +14,8 @@
     <button type="button" id="toggle-raw" class="secondary">Raw</button>
 </fieldset>
 
+{% with ask_filename=filename, ask_static=True, ask_empty=(not entries) %}{% include "_ask.html" %}{% endwith %}
+
 <div id="parsed-view" class="transcript-content">
     {% if entries %}
     {% for e in entries %}

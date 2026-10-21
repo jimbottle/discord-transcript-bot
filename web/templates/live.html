@@ -6,6 +6,8 @@
     <p id="session-meta">Loading…</p>
 </hgroup>
 
+{% with ask_static=False %}{% include "_ask.html" %}{% endwith %}
+
 <article>
     <header>
         <span id="live-badge" class="live-badge live-off">idle</span>
@@ -16,28 +18,11 @@
     </div>
 </article>
 
-<article id="ask-panel">
-    <header>
-        <strong>Ask about this session</strong>
-        <span id="ask-meta" class="search-meta"></span>
-    </header>
-    <form id="ask-form" autocomplete="off">
-        <textarea id="ask-question" name="question" rows="2"
-                  maxlength="2000" required
-                  placeholder="e.g. What did the party agree to do next?"></textarea>
-        <div class="ask-actions">
-            <button type="submit" id="ask-submit">Ask</button>
-            <span id="ask-status" class="search-meta" aria-live="polite"></span>
-        </div>
-    </form>
-    <div id="ask-answers" aria-live="polite"></div>
-</article>
 {% endblock %}
 
 {% block scripts %}
 <script>
 const DATA_URL = "{{ url_for('live_data') }}";
-const ASK_URL = "{{ url_for('ask_session') }}";
 const POLL_MS = 3000;
 
 let lastFetchAt = 0;
@@ -185,110 +170,15 @@ poll();
 setInterval(poll, POLL_MS);
 setInterval(tickUpdatedLabel, 1000);
 
-// ── Ask about this session ─────────────────────────────────────────────
-// One question at a time; answers stack newest-first under the form so a
-// long session's Q&A stays readable. Same backend module as Discord's /ask.
-const askForm = document.getElementById("ask-form");
-const askInput = document.getElementById("ask-question");
-const askSubmit = document.getElementById("ask-submit");
-const askStatus = document.getElementById("ask-status");
-const askMeta = document.getElementById("ask-meta");
-const askAnswers = document.getElementById("ask-answers");
-let askBusy = false;
-let askReady = false;
-
+// The ask box (templates/_ask.html + static/ask.js) follows the newest
+// session; tell it on every poll whether there is anything to ask about.
 function updateAskAvailability(data) {
+    if (!window.AskBox) return;
     let reason = "";
-    if (data.ask_configured === false) {
-        reason = "ANTHROPIC_API_KEY is not set for the dashboard — start it with `make web` (reads op.env).";
-    } else if (!data.filename) {
-        reason = "No session transcript yet.";
-    } else if (!data.entries || data.entries.length === 0) {
-        reason = "Nothing transcribed yet.";
-    }
-    askReady = !reason;
-    askMeta.textContent = reason;
-    askInput.disabled = !askReady || askBusy;
-    askSubmit.disabled = !askReady || askBusy;
+    if (data.ask_configured === false) reason = window.AskBox.NO_KEY_REASON;
+    else if (!data.filename) reason = "No session transcript yet.";
+    else if (!data.entries || data.entries.length === 0) reason = "Nothing transcribed yet.";
+    window.AskBox.setAvailability(reason);
 }
-
-function addQA(question, result, errorText) {
-    // textContent only: the question is user input and the answer is
-    // model output; neither may be parsed as HTML.
-    const block = document.createElement("div");
-    block.className = "qa" + (errorText ? " qa-failed" : "");
-
-    const q = document.createElement("div");
-    q.className = "qa-q";
-    q.textContent = question;
-    block.appendChild(q);
-
-    const a = document.createElement("div");
-    a.className = errorText ? "qa-err" : "qa-a";
-    a.textContent = errorText || result.answer;
-    block.appendChild(a);
-
-    if (result && result.model) {
-        const m = document.createElement("div");
-        m.className = "qa-meta";
-        m.textContent = result.model
-            + " · in " + result.input_tokens
-            + (result.cached_tokens ? " (" + result.cached_tokens + " cached)" : "")
-            + " · out " + result.output_tokens
-            + " · " + new Date().toLocaleTimeString();
-        block.appendChild(m);
-    }
-    askAnswers.prepend(block);
-}
-
-async function submitAsk(ev) {
-    ev.preventDefault();
-    const question = askInput.value.trim();
-    if (!question || askBusy || !askReady) return;
-
-    askBusy = true;
-    askInput.disabled = true;
-    askSubmit.disabled = true;
-    askSubmit.setAttribute("aria-busy", "true");
-    askStatus.textContent = "Asking…";
-    const started = Date.now();
-
-    try {
-        const res = await fetch(ASK_URL, {
-            method: "POST",
-            headers: {
-                "X-Requested-With": "XMLHttpRequest",
-                "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ question: question }),
-        });
-        let body = null;
-        try { body = await res.json(); } catch (e) { body = null; }
-        if (res.ok && body && body.answer) {
-            addQA(question, body, null);
-            askInput.value = "";
-            askStatus.textContent = "Answered in " + Math.round((Date.now() - started) / 1000) + "s";
-        } else {
-            const msg = (body && body.error) ? body.error : ("Request failed (" + res.status + ")");
-            addQA(question, null, msg);
-            askStatus.textContent = "";
-        }
-    } catch (e) {
-        addQA(question, null, "Couldn't reach the dashboard: " + e);
-        askStatus.textContent = "";
-    } finally {
-        askBusy = false;
-        askSubmit.removeAttribute("aria-busy");
-        askInput.disabled = !askReady;
-        askSubmit.disabled = !askReady;
-        if (askReady) askInput.focus();
-    }
-}
-
-askForm.addEventListener("submit", submitAsk);
-// Cmd/Ctrl+Enter submits from inside the textarea; plain Enter stays a newline.
-askInput.addEventListener("keydown", function (e) {
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submitAsk(e);
-});
 </script>
 {% endblock %}

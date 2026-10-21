@@ -124,7 +124,11 @@ def view_transcript(filename):
         return "Not found", 404
     entries = parse_transcript_text(raw)
     return render_template(
-        "transcript.html", filename=filename, entries=entries, raw=raw
+        "transcript.html",
+        filename=filename,
+        entries=entries,
+        raw=raw,
+        ask_configured=claude.configured(),
     )
 
 
@@ -177,7 +181,12 @@ def ask_session():
     if not claude.configured():
         return jsonify({"error": claude.NO_KEY_MSG}), 503
 
-    filename = data.get("filename") or get_live_session()["filename"]
+    filename = data.get("filename")
+    if filename is not None and not isinstance(filename, str):
+        # _safe_path does substring tests on it; anything but a string is
+        # an unknown transcript, not a 500.
+        return jsonify({"error": "transcript not found"}), 404
+    filename = filename or get_live_session()["filename"]
     transcript = get_transcript(filename) if filename else None
     if filename and transcript is None:
         return jsonify({"error": "transcript not found"}), 404

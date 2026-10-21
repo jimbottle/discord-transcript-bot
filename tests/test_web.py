@@ -796,6 +796,24 @@ def test_live_page_has_the_ask_box(client):
     r = client.get("/live")
     assert b'id="ask-form"' in r.data
     assert b'id="ask-question"' in r.data
+    assert b'data-filename=""' in r.data  # follows the newest session
+    assert b'data-static="false"' in r.data
+
+
+def test_transcript_page_has_an_ask_box_for_that_file(client, live_transcript):
+    r = client.get("/transcripts/" + live_transcript.name)
+    assert r.status_code == 200
+    assert b'id="ask-form"' in r.data
+    assert ('data-filename="%s"' % live_transcript.name).encode() in r.data
+    assert b'data-static="true"' in r.data
+
+
+def test_ask_non_string_filename_is_404(client, live_transcript, ask_configured):
+    # roborev #6442: an int used to reach _safe_path's substring tests → 500.
+    r = client.post("/ask", json={"question": "q", "filename": 123}, headers=_XHR)
+    assert r.status_code == 404
+    r = client.post("/ask", json={"question": "q", "filename": ["a.txt"]}, headers=_XHR)
+    assert r.status_code == 404
 
 
 # ── Host / Origin allowlist (DNS rebinding) ──────────────────────────────

@@ -89,8 +89,11 @@
 }
 
 /* Transcript content */
+/* No white-space: pre-wrap here: the parsed views are Jinja-rendered, so
+   the template's own indentation and newlines would render as blank
+   rows and indented names. Only the raw <pre> (and .entry-text) keep
+   whitespace. */
 .transcript-content {
-    white-space: pre-wrap;
     font-family: var(--pico-font-family-monospace);
     font-size: 0.85rem;
     background: var(--pico-card-background-color);
@@ -100,7 +103,18 @@
     overflow-y: auto;
 }
 
+#raw-view {
+    white-space: pre-wrap;
+}
+
 /* Live session */
+/* The feed renders newest-first and compensates scrollTop itself when it
+   prepends; native scroll anchoring would adjust a second time
+   (roborev #6442). */
+#live-feed {
+    overflow-anchor: none;
+}
+
 .live-badge {
     display: inline-block;
     padding: 0.2rem 0.7rem;
