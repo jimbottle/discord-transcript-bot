@@ -310,3 +310,66 @@ def test_ask_context_gives_the_model_12_hour_times(lib, tmp_path):
     assert "19:40" not in text and "20:15" not in text
     # the files themselves keep 24-hour stamps
     assert a.read_text().startswith("[19:40:00]")
+
+
+# ── retag (dashboard tag editor) ─────────────────────────────────────
+
+
+def test_retag_whole_session_moves_every_recording(lib, tmp_path):
+    t = tmp_path / "rt"
+    t.mkdir()
+    a = _rec(t, "2026-10-20_19-38-38", "x\n", lib, guild_id=111)
+    b = _rec(t, "2026-10-20_20-15-26", "y\n", lib, guild_id=111)
+    written = sessions.retag(b, lib, campaign="lost-mine")
+    assert written == [a, b]
+    for f in (a, b):
+        m = sessions.read_meta(f)
+        assert (m.campaign, m.group, m.game) == ("lost-mine", "side-table", "dnd-5e")
+        assert m.source == "manual" and m.guild_id == 111  # Discord fields kept
+        assert m.session_day == "2026-10-20"
+
+
+def test_retag_one_recording_only(lib, tmp_path):
+    t = tmp_path / "rt1"
+    t.mkdir()
+    a = _rec(t, "2026-10-20_19-38-38", "x\n", lib, guild_id=111)
+    b = _rec(t, "2026-10-20_20-15-26", "y\n", lib, guild_id=111)
+    sessions.retag(b, lib, campaign="lost-mine", whole_session=False)
+    assert sessions.read_meta(a).campaign == "return-to-night-city"
+    assert sessions.read_meta(b).campaign == "lost-mine"
+
+
+def test_retag_explicit_game_and_group_override_the_campaigns(lib, tmp_path):
+    t = tmp_path / "rt2"
+    t.mkdir()
+    a = _rec(t, "2026-10-20_19-38-38", "x\n", lib, guild_id=111)
+    sessions.retag(
+        a, lib, campaign="return-to-night-city", game="dnd-5e", group="side-table"
+    )
+    m = sessions.read_meta(a)
+    assert (m.campaign, m.game, m.group) == (
+        "return-to-night-city",
+        "dnd-5e",
+        "side-table",
+    )
+
+
+def test_retag_clears_with_empty_and_tags_an_untagged_file(lib, tmp_path):
+    txt = tmp_path / "2026-10-21_00-30-00.txt"
+    txt.write_text("x")
+    sessions.retag(txt, lib, campaign="return-to-night-city")
+    m = sessions.read_meta(txt)
+    assert m.key == "return-to-night-city/2026-10-20"  # 6am cutoff
+    sessions.retag(txt, lib, campaign="", group="", game="")
+    m = sessions.read_meta(txt)
+    assert (m.campaign, m.group, m.game) == (None, None, None)
+
+
+def test_retag_rejects_unknown_ids(lib, tmp_path):
+    t = tmp_path / "rt3"
+    t.mkdir()
+    a = _rec(t, "2026-10-20_19-38-38", "x\n", lib, guild_id=111)
+    for kw in ({"campaign": "nope"}, {"group": "nope"}, {"game": "nope"}):
+        with pytest.raises(sessions.TagError):
+            sessions.retag(a, lib, **kw)
+    assert sessions.read_meta(a).campaign == "return-to-night-city"  # untouched

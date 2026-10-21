@@ -9,6 +9,8 @@ LOGS_DIR = PROJECT_ROOT / ".logs" / "transcripts"
 # Runtime state the bot writes (volo_bot.BOT_STATE_FILE) — true
 # connected-guild / recording / uptime, vs. the file-freshness guess.
 BOT_STATE_FILE = PROJECT_ROOT / ".logs" / "bot_state.json"
+# Reference-audio captures, one folder per recording (src/session_capture.py).
+CAPTURES_DIR = PROJECT_ROOT / "captures"
 
 # A session .txt modified within this many seconds is treated as "live"
 # (the bot writes a line per finished utterance, so a brief silence gap
@@ -318,3 +320,62 @@ def search_logs(query):
                     }
                 )
     return results
+
+
+class DeleteRefused(Exception):
+    """The transcript must not be deleted (it is being recorded right now)."""
+
+
+def is_being_recorded(filename) -> bool:
+    """True if the bot reports this file as a guild's live session file, or
+    the file was written within LIVE_FRESH_SECONDS (a bot running without a
+    state file is still caught)."""
+    state = get_bot_state() or {}
+    for g in state.get("guilds") or []:
+        if not isinstance(g, dict):
+            continue
+        live = g.get("session_file")
+        if g.get("recording") and live and Path(str(live)).name == filename:
+            return True
+    path = _safe_path(TRANSCRIPTS_DIR, filename)
+    if path is not None:
+        try:
+            return time.time() - path.stat().st_mtime <= LIVE_FRESH_SECONDS
+        except OSError:
+            return False
+    return False
+
+
+def delete_transcript(filename, *, include_audio=False) -> list:
+    """Permanently delete a recording's transcript and its session tag, and
+    optionally its captured audio folder. The shared per-day JSON log and
+    the question history are left alone. Returns what was removed
+    (paths relative to the project). Raises DeleteRefused for a live
+    recording; returns [] for an unknown or unsafe filename."""
+    import shutil
+
+    path = _safe_path(TRANSCRIPTS_DIR, filename)
+    if path is None or path.suffix != ".txt":
+        return []
+    if is_being_recorded(filename):
+        raise DeleteRefused(
+            "That recording is still being written. Stop recording first, then delete it."
+        )
+    removed = []
+    meta = path.with_name(path.stem + ".meta.json")
+    for f in (path, meta):
+        try:
+            f.unlink()
+            removed.append(f"{f.parent.name}/{f.name}")
+        except FileNotFoundError:
+            pass
+    if include_audio:
+        cap = CAPTURES_DIR / path.stem
+        if cap.is_dir() and cap.resolve().parent == CAPTURES_DIR.resolve():
+            shutil.rmtree(cap)
+            removed.append(f"{cap.parent.name}/{cap.name}/")
+    return removed
+
+
+def has_captured_audio(filename) -> bool:
+    return (CAPTURES_DIR / Path(filename).stem).is_dir()

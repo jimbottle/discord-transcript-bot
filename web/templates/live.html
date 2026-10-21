@@ -4,6 +4,7 @@
 <hgroup>
     <h1>Live Session</h1>
     <p id="session-meta">Loading…</p>
+    <p><a id="edit-tag-link" class="search-meta" href="#" hidden>Edit campaign / game / group</a></p>
 </hgroup>
 
 {% with ask_static=False %}{% include "_ask.html" %}{% endwith %}
@@ -102,6 +103,13 @@ function render(data) {
         badge.className = "live-badge live-off";
     }
 
+    const editLink = document.getElementById("edit-tag-link");
+    if (data.filename) {
+        editLink.href = "{{ url_for('transcripts') }}/" + encodeURIComponent(data.filename);
+        editLink.hidden = false;
+    } else {
+        editLink.hidden = true;
+    }
     const s = data.session || {};
     if (!data.filename) {
         meta.textContent = "No active session.";

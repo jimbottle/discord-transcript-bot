@@ -1,0 +1,25 @@
+{#
+  Delete control for one recording, with an inline "are you sure" step.
+  Variables: filename, has_audio (bool), is_live (bool), after_delete
+  ("reload" or a URL to go to). Needs static/delete-transcript.js.
+#}
+<div class="delete-transcript" data-url="{{ url_for('delete_transcript_route', filename=filename) }}"
+     data-after="{{ after_delete }}">
+    {% if is_live %}
+    <span class="search-meta">Recording in progress: stop recording before deleting.</span>
+    {% else %}
+    <button type="button" class="secondary outline delete-start">Delete…</button>
+    <div class="delete-confirm" hidden>
+        <p><strong>Permanently delete {{ filename }}?</strong> The transcript and its session tag are
+           removed and can't be recovered. Questions already asked about it stay in the history.</p>
+        {% if has_audio %}
+        <label class="inline-check"><input type="checkbox" class="delete-audio"> Also delete its captured audio</label>
+        {% endif %}
+        <div class="ask-actions">
+            <button type="button" class="delete-yes danger">Yes, delete</button>
+            <button type="button" class="secondary delete-cancel">Cancel</button>
+            <span class="delete-status search-meta" aria-live="polite"></span>
+        </div>
+    </div>
+    {% endif %}
+</div>

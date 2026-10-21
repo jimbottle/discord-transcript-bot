@@ -20,6 +20,10 @@ from transcript_service import (
     search_logs,
     session_info,
     transcript_path,
+    DeleteRefused,
+    delete_transcript,
+    has_captured_audio,
+    is_being_recorded,
 )
 
 # roster_service put the project root on sys.path so the shared store
@@ -123,7 +127,101 @@ def index():
 def transcripts():
     txt_files = list_transcripts()
     log_files = list_logs()
-    return render_template("transcripts.html", txt_files=txt_files, log_files=log_files)
+    return render_template(
+        "transcripts.html",
+        txt_files=txt_files,
+        log_files=log_files,
+        tag_choices=_tag_choices(),
+        has_audio=has_captured_audio,
+        is_live=is_being_recorded,
+    )
+
+
+def _tag_choices():
+    """Campaigns (with their group and game), groups and games from
+    library.yml, for the tag editor's dropdowns."""
+    lib = sessions_library()
+    return {
+        "campaigns": sorted(
+            (
+                {
+                    "id": c.id,
+                    "name": c.name,
+                    "group": c.group or "",
+                    "game": c.game or "",
+                }
+                for c in lib.campaigns.values()
+            ),
+            key=lambda c: c["name"].lower(),
+        ),
+        "groups": sorted(
+            ({"id": g.id, "name": g.name} for g in lib.groups.values()),
+            key=lambda g: g["name"].lower(),
+        ),
+        "games": sorted(
+            ({"id": g.id, "name": g.name} for g in lib.games.values()),
+            key=lambda g: g["name"].lower(),
+        ),
+    }
+
+
+@app.route("/transcripts/<filename>/delete", methods=["POST"])
+def delete_transcript_route(filename):
+    """Permanently delete a recording. JSON ``{"confirm": true,
+    "include_audio"?: bool}``; without an explicit ``confirm: true`` nothing
+    is deleted (the page's Yes button sends it). Refuses (409) while the
+    bot is still writing the file."""
+    _require_csrf_header()
+    data = request.get_json(silent=True) or {}
+    if data.get("confirm") is not True:
+        return jsonify({"error": "confirmation required"}), 400
+    if transcript_path(filename) is None:
+        return jsonify({"error": "transcript not found"}), 404
+    try:
+        removed = delete_transcript(
+            filename, include_audio=data.get("include_audio") is True
+        )
+    except DeleteRefused as e:
+        return jsonify({"error": str(e)}), 409
+    if not removed:
+        return jsonify({"error": "transcript not found"}), 404
+    app.logger.warning("deleted from the dashboard: %s", ", ".join(removed))
+    return jsonify({"deleted": removed})
+
+
+@app.route("/transcripts/<filename>/tag", methods=["POST"])
+def retag_transcript(filename):
+    """JSON ``{"campaign", "group", "game", "whole_session"}`` -> rewrite the
+    recording's session tag (``.meta.json``). Ids must exist in
+    library.yml; empty clears. ``whole_session`` (default true) applies the
+    change to every recording of the session."""
+    _require_csrf_header()
+    path = transcript_path(filename)
+    if path is None:
+        return jsonify({"error": "transcript not found"}), 404
+    data = request.get_json(silent=True) or {}
+    fields = {}
+    for key in ("campaign", "group", "game"):
+        v = data.get(key)
+        if v is not None and not isinstance(v, str):
+            return jsonify({"error": f"{key} must be a string"}), 400
+        if key in data:
+            fields[key] = (v or "").strip()
+    try:
+        written = sessions.retag(
+            path,
+            sessions_library(),
+            whole_session=data.get("whole_session", True) is not False,
+            **fields,
+        )
+    except sessions.TagError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify(
+        {
+            "updated": [p.name for p in written],
+            "session": session_info(filename),
+        }
+    )
 
 
 @app.route("/transcripts/<filename>")
@@ -141,6 +239,9 @@ def view_transcript(filename):
         raw=raw,
         ask_configured=claude.configured(),
         session=session_info(filename),
+        tag_choices=_tag_choices(),
+        has_audio=has_captured_audio(filename),
+        is_live=is_being_recorded(filename),
     )
 
 

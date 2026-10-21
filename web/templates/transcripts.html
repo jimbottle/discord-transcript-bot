@@ -18,6 +18,12 @@
             <td><a href="{{ url_for('view_transcript', filename=t.filename) }}">{{ t.filename }}</a></td>
             <td>{{ "%.1f"|format(t.size / 1024) }} KB</td>
         </tr>
+        <tr class="tag-row">
+            <td colspan="6">
+                {% with filename=t.filename, session=t.session %}{% include "_tag_editor.html" %}{% endwith %}
+                {% with filename=t.filename, has_audio=has_audio(t.filename), is_live=is_live(t.filename), after_delete="reload" %}{% include "_delete_transcript.html" %}{% endwith %}
+            </td>
+        </tr>
     {% endfor %}
     </tbody>
 </table>
@@ -41,4 +47,8 @@
 {% else %}
 <p>No log files found.</p>
 {% endif %}
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='tag-editor.js') }}"></script>
+<script src="{{ url_for('static', filename='delete-transcript.js') }}"></script>
 {% endblock %}

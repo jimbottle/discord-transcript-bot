@@ -16,6 +16,8 @@
     {% else %}
     <p class="session-tag">Untagged recording: not tied to a group or campaign.</p>
     {% endif %}
+    {% include "_tag_editor.html" %}
+    {% with after_delete=url_for('transcripts') %}{% include "_delete_transcript.html" %}{% endwith %}
 </hgroup>
 
 <fieldset role="group">
@@ -47,6 +49,8 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="{{ url_for('static', filename='tag-editor.js') }}"></script>
+<script src="{{ url_for('static', filename='delete-transcript.js') }}"></script>
 <script>
 // Filtering is handled by the shared transcript-filter.js. Only the
 // raw/styled toggle is page-specific.

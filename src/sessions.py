@@ -261,3 +261,52 @@ def campaign_header(lib, campaign_id: str) -> str:
     if game and game.voice:
         line += "\nSTYLE: " + game.voice
     return line
+
+
+class TagError(ValueError):
+    """A retag request names an id the library does not have."""
+
+
+def retag(
+    transcript_path, lib, *, campaign=None, group=None, game=None, whole_session=True
+):
+    """Set a recording's (or its whole session's) campaign/group/game.
+
+    Ids are validated against the library; ``None``/"" clears a field.
+    Choosing a campaign fills in its group and game unless those are given
+    explicitly. Discord fields and the session day are kept; ``source``
+    becomes "manual". Returns the rewritten paths (oldest first)."""
+    for kind, value, table in (
+        ("campaign", campaign, lib.campaigns),
+        ("group", group, lib.groups),
+        ("game", game, lib.games),
+    ):
+        if value and value not in table:
+            raise TagError(f"unknown {kind} '{value}'")
+    if campaign:
+        c = lib.campaigns[campaign]
+        group = group if group is not None else c.group
+        game = game if game is not None else c.game
+    targets = (
+        session_files(transcript_path) if whole_session else [Path(transcript_path)]
+    )
+    written = []
+    for txt in targets:
+        old = read_meta(txt)
+        started = started_at_from_name(txt)
+        if old is not None:
+            meta = old
+        else:
+            if started is None:
+                raise TagError(f"{Path(txt).name} has no timestamp to date it by")
+            meta = SessionMeta(
+                session_day=session_day(started),
+                started_at=started.isoformat(timespec="seconds"),
+            )
+        meta.campaign = campaign or None
+        meta.group = group or None
+        meta.game = game or None
+        meta.source = "manual"
+        write_meta(txt, meta)
+        written.append(Path(txt))
+    return written

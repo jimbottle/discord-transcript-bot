@@ -1310,3 +1310,196 @@ def test_dashboard_shows_12_hour_times(client, live_transcript):
         as_text=True
     )
     assert "clock12(e.time)" in client.get("/live").get_data(as_text=True)
+
+
+# ── session-tag editor ───────────────────────────────────────────────────
+
+
+def test_retag_endpoint_updates_the_whole_session(client, tagged_session):
+    from src import sessions
+
+    r = client.post(
+        "/transcripts/2026-10-20_20-15-26.txt/tag",
+        json={"campaign": "", "group": "noah-gm", "game": "cyberpunk-red"},
+        headers=_XHR,
+    )
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["updated"] == ["2026-10-20_19-38-38.txt", "2026-10-20_20-15-26.txt"]
+    for f in tagged_session:
+        m = sessions.read_meta(f)
+        assert (m.campaign, m.group, m.game, m.source) == (
+            None,
+            "noah-gm",
+            "cyberpunk-red",
+            "manual",
+        )
+
+
+def test_retag_endpoint_single_recording(client, tagged_session):
+    from src import sessions
+
+    r = client.post(
+        "/transcripts/2026-10-20_20-15-26.txt/tag",
+        json={"campaign": "", "whole_session": False},
+        headers=_XHR,
+    )
+    assert r.get_json()["updated"] == ["2026-10-20_20-15-26.txt"]
+    assert sessions.read_meta(tagged_session[0]).campaign == "rtnc"
+
+
+def test_retag_endpoint_tags_an_untagged_recording(client, tagged_session):
+    from src import sessions
+
+    r = client.post(
+        "/transcripts/2026-05-18_17-39-56.txt/tag",
+        json={"campaign": "rtnc"},
+        headers=_XHR,
+    )
+    assert r.status_code == 200
+    m = sessions.read_meta(tagged_session[0].parent / "2026-05-18_17-39-56.txt")
+    assert (m.campaign, m.group, m.game) == ("rtnc", "noah-gm", "cyberpunk-red")
+
+
+def test_retag_endpoint_rejects_bad_input(client, tagged_session):
+    url = "/transcripts/2026-10-20_20-15-26.txt/tag"
+    assert client.post(url, json={"campaign": "rtnc"}).status_code == 403  # CSRF
+    assert client.post(url, json={"campaign": "nope"}, headers=_XHR).status_code == 400
+    assert client.post(url, json={"campaign": 5}, headers=_XHR).status_code == 400
+    assert (
+        client.post("/transcripts/missing.txt/tag", json={}, headers=_XHR).status_code
+        == 404
+    )
+    assert (
+        client.post("/transcripts/..%2F.env/tag", json={}, headers=_XHR).status_code
+        == 404
+    )
+
+
+def test_tag_editor_is_on_the_list_and_transcript_pages(client, tagged_session):
+    listing = client.get("/transcripts").get_data(as_text=True)
+    assert listing.count('class="tag-form"') == 3
+    assert 'data-group="noah-gm"' in listing and "tag-editor.js" in listing
+    page = client.get("/transcripts/2026-10-20_19-38-38.txt").get_data(as_text=True)
+    assert 'class="tag-form"' in page
+    import re
+
+    assert re.search(
+        r'<option value="rtnc"[^>]*\bselected>Return to Night City</option>', page
+    )
+    assert "Apply to all 2 recordings" in page
+    assert 'id="edit-tag-link"' in client.get("/live").get_data(as_text=True)
+
+
+# ── deleting a transcript ────────────────────────────────────────────────
+
+
+@pytest.fixture
+def deletable(tmp_path, monkeypatch):
+    """Two old recordings (one tagged, one with captured audio) in temp
+    transcripts/ and captures/ dirs, plus a bot state file."""
+    import os as _os
+    from datetime import datetime
+
+    from src import library, sessions
+
+    tdir, cdir = tmp_path / "transcripts", tmp_path / "captures"
+    tdir.mkdir()
+    cdir.mkdir()
+    monkeypatch.setattr(transcript_service, "TRANSCRIPTS_DIR", tdir)
+    monkeypatch.setattr(transcript_service, "CAPTURES_DIR", cdir)
+    monkeypatch.setattr(
+        transcript_service, "BOT_STATE_FILE", tmp_path / "bot_state.json"
+    )
+    old = _time.time() - 3600
+    files = []
+    for stamp in ("2026-10-13_19-00-00", "2026-10-20_19-38-38"):
+        f = tdir / f"{stamp}.txt"
+        f.write_text("[19:40:00] A (B) [1]: hi\n")
+        sessions.write_meta(
+            f,
+            sessions.build_meta(
+                library.load(tmp_path / "nolib"),
+                guild_id=1,
+                started_at=datetime.strptime(stamp, "%Y-%m-%d_%H-%M-%S"),
+            ),
+        )
+        _os.utime(f, (old, old))
+        files.append(f)
+    (cdir / "2026-10-20_19-38-38").mkdir()
+    (cdir / "2026-10-20_19-38-38" / "0001.wav").write_bytes(b"RIFF")
+    return tdir, cdir, files
+
+
+def _delete(client, name, **body):
+    return client.post(f"/transcripts/{name}/delete", json=body, headers=_XHR)
+
+
+def test_delete_requires_csrf_and_explicit_confirmation(client, deletable):
+    tdir, _, files = deletable
+    url = f"/transcripts/{files[0].name}/delete"
+    assert client.post(url, json={"confirm": True}).status_code == 403
+    assert _delete(client, files[0].name).status_code == 400
+    assert _delete(client, files[0].name, confirm="yes").status_code == 400
+    assert files[0].exists()
+
+
+def test_delete_removes_transcript_and_tag_but_keeps_audio_by_default(
+    client, deletable
+):
+    tdir, cdir, files = deletable
+    r = _delete(client, files[1].name, confirm=True)
+    assert r.status_code == 200
+    assert not files[1].exists()
+    assert not (tdir / "2026-10-20_19-38-38.meta.json").exists()
+    assert (cdir / "2026-10-20_19-38-38").is_dir()  # audio kept unless asked
+    assert files[0].exists()  # other recordings untouched
+
+
+def test_delete_with_audio(client, deletable):
+    _, cdir, files = deletable
+    r = _delete(client, files[1].name, confirm=True, include_audio=True)
+    assert r.status_code == 200
+    assert not (cdir / "2026-10-20_19-38-38").exists()
+    assert any("captures" in p for p in r.get_json()["deleted"])
+
+
+def test_delete_refuses_the_live_recording(client, deletable, tmp_path):
+    _, _, files = deletable
+    (tmp_path / "bot_state.json").write_text(
+        json.dumps(
+            {
+                "updated_at": _time.time(),
+                "guilds": [{"recording": True, "session_file": files[1].name}],
+            }
+        )
+    )
+    r = _delete(client, files[1].name, confirm=True)
+    assert r.status_code == 409 and files[1].exists()
+    assert "Stop recording first" in r.get_json()["error"]
+
+
+def test_delete_refuses_a_file_written_seconds_ago(client, deletable):
+    _, _, files = deletable
+    files[0].write_text("still growing\n")  # fresh mtime, no bot state
+    assert _delete(client, files[0].name, confirm=True).status_code == 409
+
+
+def test_delete_rejects_unknown_and_traversal(client, deletable):
+    assert _delete(client, "nope.txt", confirm=True).status_code == 404
+    assert (
+        client.post(
+            "/transcripts/..%2F.env/delete", json={"confirm": True}, headers=_XHR
+        ).status_code
+        == 404
+    )
+
+
+def test_delete_controls_render_with_an_inline_confirmation(client, deletable):
+    _, _, files = deletable
+    listing = client.get("/transcripts").get_data(as_text=True)
+    assert listing.count('class="delete-transcript"') == 2
+    assert "Yes, delete" in listing and "delete-transcript.js" in listing
+    assert "Also delete its captured audio" in listing  # only the one with audio
+    page = client.get(f"/transcripts/{files[0].name}").get_data(as_text=True)
+    assert 'data-after="/transcripts"' in page
