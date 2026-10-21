@@ -1278,9 +1278,17 @@ def test_lore_shows_the_gm_only_hint_before_asking(client, lore_library):
     assert b'id="gm-only-hint"' in client.get("/lore").data
 
 
-def test_untagged_session_invalidates_in_flight_history():
+def test_ask_js_history_races_behaviourally():
+    """Runs tests/js/ask_history.test.mjs: the real ask.js against a DOM
+    stand-in with hand-released fetches (roborev #6472 replaced a
+    source-grep test). Verified to fail on the pre-fix script."""
     import pathlib
+    import shutil
+    import subprocess
 
-    js = (pathlib.Path(web_app.__file__).parent / "static" / "ask.js").read_text()
-    i = js.index("if (!key) {")
-    assert "historyToken++" in js[i : i + 200]
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    script = pathlib.Path(__file__).parent / "js" / "ask_history.test.mjs"
+    r = subprocess.run([node, str(script)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr or r.stdout
