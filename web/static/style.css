@@ -161,6 +161,11 @@
     word-break: break-word;
 }
 
+.session-tag {
+    font-size: 0.9rem;
+    color: var(--pico-muted-color);
+}
+
 /* Live page: ask box */
 #ask-panel textarea {
     margin-bottom: 0.5rem;

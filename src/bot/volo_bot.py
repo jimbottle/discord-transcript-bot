@@ -9,7 +9,7 @@ import discord
 import yaml
 from discord.sinks.errors import RecordingException
 
-from src import player_map_store
+from src import library, player_map_store, sessions
 from src.bot.health import HealthCheck
 from src.sinks.whisper_sink import WhisperSink
 
@@ -464,6 +464,8 @@ class VoloBot(discord.Bot):
             player_map=self.player_map,
         )
 
+        self._tag_session(ctx, whisper_sink)
+
         # Registered before vc.start_recording so a failure there (e.g.
         # RecordingException) leaves a sink start_recording can find and
         # close, rather than an orphaned executor + open capture.
@@ -482,6 +484,35 @@ class VoloBot(discord.Bot):
             self.loop.call_later(5, self.start_recording, ctx)
 
         whisper_sink.start_voice_thread(on_exception=on_thread_exception)
+
+    def _tag_session(self, ctx, whisper_sink) -> None:
+        """Write the recording's group/game/campaign/session sidecar
+        (src/sessions.py) next to its transcript. Best-effort: a missing or
+        broken library.yml leaves the recording untagged, never unrecorded."""
+        try:
+            helper = self.guild_to_helper.get(ctx.guild_id)
+            channel = getattr(getattr(helper, "vc", None), "channel", None)
+            meta = sessions.build_meta(
+                library.load(),
+                guild_id=ctx.guild_id,
+                guild=getattr(ctx.guild, "name", None),
+                channel_id=getattr(channel, "id", None),
+                channel=getattr(channel, "name", None),
+            )
+            sessions.write_meta(whisper_sink.session_file, meta)
+            whisper_sink.session_meta = meta
+            if meta.campaign:
+                logger.info(
+                    f"Session tagged {meta.key} (group={meta.group}, game={meta.game})"
+                )
+            else:
+                logger.warning(
+                    f"Recording in guild {ctx.guild_id} matches no group in "
+                    "library/library.yml; it is untagged (scripts/tag_session.py "
+                    "can tag it later)."
+                )
+        except Exception as e:  # noqa: BLE001 - tagging must never block /scribe
+            logger.warning(f"Could not tag session: {e}")
 
     def stop_recording(self, ctx: discord.context.ApplicationContext):
         vc = ctx.guild.voice_client

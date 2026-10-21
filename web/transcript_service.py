@@ -99,21 +99,53 @@ def get_live_session():
     }
 
 
+def _library():
+    from src import library  # project root is on sys.path (roster_service/conftest)
+
+    return library.load()
+
+
+def session_info(filename, lib=None):
+    """Display fields for the session ``filename`` belongs to (group, game,
+    campaign, session day, how many recordings), or ``{"tagged": False}``."""
+    from src import sessions
+
+    path = _safe_path(TRANSCRIPTS_DIR, filename) if filename else None
+    if path is None:
+        return {"tagged": False, "recordings": 0}
+    lib = lib or _library()
+    files = sessions.session_files(path)
+    info = sessions.describe(lib, sessions.read_meta(path), len(files))
+    info["files"] = [f.name for f in files]
+    return info
+
+
 def list_transcripts():
-    """Return transcript .txt files sorted newest first."""
+    """Return transcript .txt files sorted newest first, each with its
+    session tag (``session``: see session_info)."""
     if not TRANSCRIPTS_DIR.is_dir():
         return []
+    from src import sessions
+
+    lib = _library()
     files = sorted(TRANSCRIPTS_DIR.glob("*.txt"), reverse=True)
     results = []
     for f in files:
+        meta = sessions.read_meta(f)
         results.append(
             {
                 "filename": f.name,
                 "size": f.stat().st_size,
                 "modified": f.stat().st_mtime,
+                "session": sessions.describe(lib, meta),
             }
         )
     return results
+
+
+def transcript_path(filename):
+    """Validated path of a transcript, or None (same guard as get_transcript)."""
+    return _safe_path(TRANSCRIPTS_DIR, filename)
 
 
 def _safe_path(directory, filename):

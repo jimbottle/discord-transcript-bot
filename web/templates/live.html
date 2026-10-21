@@ -94,9 +94,18 @@ function render(data) {
         badge.className = "live-badge live-off";
     }
 
-    meta.textContent = data.filename
-        ? "session: " + data.filename + " · " + data.entries.length + " entries"
-        : "No active session.";
+    const s = data.session || {};
+    if (!data.filename) {
+        meta.textContent = "No active session.";
+    } else if (s.tagged && s.campaign) {
+        meta.textContent = [s.game, s.campaign, s.group, "session " + s.session_day]
+            .filter(Boolean).join(" · ")
+            + (s.recordings > 1 ? " · " + s.recordings + " recordings" : "")
+            + " · " + data.entries.length + " entries in " + data.filename;
+    } else {
+        meta.textContent = "untagged recording " + data.filename + " · "
+            + data.entries.length + " entries";
+    }
 
     lastAge = data.age_seconds;
     lastFetchAt = Date.now();

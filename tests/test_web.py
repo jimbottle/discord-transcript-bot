@@ -651,7 +651,7 @@ def ask_configured(monkeypatch):
 
 
 def _fake_ask(calls, answer="They decided to head for the keep."):
-    def ask(transcript, question):
+    def ask(transcript, question, header="", note_dirs=()):
         calls.append((transcript, question))
         return web_app.claude.AskResult(
             answer=answer,
@@ -737,6 +737,7 @@ def test_ask_answers_from_the_live_session(
         "cached_tokens": 100,
         "output_tokens": 12,
         "notes_used": [],
+        "recordings": 1,
     }
     # The model saw the session file verbatim, not a re-rendered version.
     assert calls == [(live_transcript.read_text(encoding="utf-8"), "Where next?")]
@@ -770,7 +771,7 @@ def test_ask_named_transcript(client, live_transcript, ask_configured, monkeypat
 def test_ask_failed_maps_to_502_with_user_message(
     client, live_transcript, ask_configured, monkeypatch
 ):
-    def boom(transcript, question):
+    def boom(transcript, question, **kw):
         raise web_app.claude.AskFailed(web_app.claude.RATE_LIMIT_MSG)
 
     monkeypatch.setattr(web_app.claude, "ask", boom)
@@ -848,3 +849,92 @@ def test_origin_must_be_loopback_even_when_host_matches(client, fake_bot):
         headers={**_XHR, "Host": "127.0.0.1:5001", "Origin": "http://127.0.0.1:5001"},
     )
     assert ok.status_code == 200
+
+
+# ── sessions: the dashboard asks over every recording of the session ─────
+
+
+@pytest.fixture
+def tagged_session(tmp_path, monkeypatch):
+    """Two recordings of one campaign night (a restart) plus an unrelated
+    recording, under a temp library and transcripts dir."""
+    from datetime import datetime
+
+    from src import library, sessions
+
+    libdir = tmp_path / "lib"
+    libdir.mkdir()
+    (libdir / "library.yml").write_text(
+        "games: {cyberpunk-red: {name: Cyberpunk RED}}\n"
+        "groups: {noah-gm: {name: Noah's group, gm: Noah, discord_guilds: [111],"
+        " active_campaign: rtnc}}\n"
+        "campaigns: {rtnc: {name: Return to Night City, group: noah-gm,"
+        " game: cyberpunk-red}}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LIBRARY_DIR", str(libdir))
+    tdir = tmp_path / "transcripts"
+    tdir.mkdir()
+    monkeypatch.setattr(transcript_service, "TRANSCRIPTS_DIR", tdir)
+    lib = library.load()
+    files = []
+    for stamp, line in (
+        ("2026-10-20_19-38-38", "[19:40:00] A (B) [1]: before the restart\n"),
+        ("2026-10-20_20-15-26", "[20:16:00] A (B) [1]: after the restart\n"),
+    ):
+        f = tdir / f"{stamp}.txt"
+        f.write_text(line, encoding="utf-8")
+        sessions.write_meta(
+            f,
+            sessions.build_meta(
+                lib,
+                guild_id=111,
+                started_at=datetime.strptime(stamp, "%Y-%m-%d_%H-%M-%S"),
+            ),
+        )
+        files.append(f)
+    (tdir / "2026-05-18_17-39-56.txt").write_text("[17:40:00] X (Y) [2]: old test\n")
+    return files
+
+
+def test_ask_covers_every_recording_of_the_session(
+    client, tagged_session, ask_configured, monkeypatch
+):
+    seen = {}
+
+    def ask(transcript, question, header="", note_dirs=()):
+        seen.update(transcript=transcript, header=header)
+        return web_app.claude.AskResult(answer="ok", model="m")
+
+    monkeypatch.setattr(web_app.claude, "ask", ask)
+    r = client.post("/ask", json={"question": "q"}, headers=_XHR)
+    assert r.status_code == 200
+    assert r.get_json()["recordings"] == 2
+    assert "before the restart" in seen["transcript"]
+    assert "--- recording restarted at 20:15:26 ---" in seen["transcript"]
+    assert seen["header"].startswith(
+        "SESSION: Game: Cyberpunk RED · Campaign: Return to Night City"
+    )
+
+
+def test_transcripts_page_shows_session_columns(client, tagged_session):
+    r = client.get("/transcripts")
+    assert r.status_code == 200
+    body = r.get_data(as_text=True)
+    assert "Return to Night City" in body and "Cyberpunk RED" in body
+    assert "untagged" in body  # the old test recording
+
+
+def test_live_data_carries_the_session(client, tagged_session):
+    s = client.get("/live/data").get_json()["session"]
+    assert s["campaign"] == "Return to Night City"
+    assert s["session_day"] == "2026-10-20"
+    assert s["recordings"] == 2
+    assert s["files"] == ["2026-10-20_19-38-38.txt", "2026-10-20_20-15-26.txt"]
+
+
+def test_transcript_page_shows_the_session_tag(client, tagged_session):
+    r = client.get("/transcripts/2026-10-20_19-38-38.txt")
+    body = r.get_data(as_text=True)
+    assert "Return to Night City" in body
+    assert "2 recordings" in body

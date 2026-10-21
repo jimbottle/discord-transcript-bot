@@ -7,6 +7,15 @@
         <a href="{{ url_for('transcripts') }}">&larr; All transcripts</a>
         &middot; {{ entries|length }} entr{{ 'y' if entries|length == 1 else 'ies' }}
     </p>
+    {% if session.tagged %}
+    <p class="session-tag">
+        {{ session.game or '—' }} &middot; <strong>{{ session.campaign or 'no campaign' }}</strong>
+        &middot; {{ session.group or '—' }} &middot; session {{ session.session_day }}
+        {% if session.recordings > 1 %}&middot; {{ session.recordings }} recordings (questions cover all of them){% endif %}
+    </p>
+    {% else %}
+    <p class="session-tag">Untagged recording: not tied to a group or campaign.</p>
+    {% endif %}
 </hgroup>
 
 <fieldset role="group">

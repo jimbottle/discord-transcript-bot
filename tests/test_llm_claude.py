@@ -20,9 +20,6 @@ def _key(monkeypatch, tmp_path):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     monkeypatch.delenv("ASK_MODEL", raising=False)
     monkeypatch.delenv("ASK_EFFORT", raising=False)
-    # No campaign notes unless a test writes some: the plain two-block
-    # request shape is the baseline the tests below assert on.
-    monkeypatch.setenv("CAMPAIGN_NOTES_DIR", str(tmp_path / "no-notes"))
     monkeypatch.delenv("CAMPAIGN_GM_NOTES", raising=False)
 
 
@@ -288,7 +285,6 @@ def notes_dir(tmp_path, monkeypatch):
     d = tmp_path / "notes"
     d.mkdir()
     (d / "npcs.md").write_text(NOTE, encoding="utf-8")
-    monkeypatch.setenv("CAMPAIGN_NOTES_DIR", str(d))
     return d
 
 
@@ -299,7 +295,7 @@ def test_request_without_notes_has_no_tools():
 
 
 def test_request_with_notes_adds_a_cached_index_block_and_the_tool(notes_dir):
-    notes = claude.campaign.load_notes()
+    notes = claude.campaign.load_notes([notes_dir])
     index = claude.campaign.index_text(notes)
     req = claude.build_request("t", "q", index)
     assert req["system"][1]["text"].startswith("TRANSCRIPT:")
@@ -321,7 +317,7 @@ def test_ask_answers_in_one_round_when_the_model_does_not_call_the_tool(
     monkeypatch, notes_dir
 ):
     client = _use(monkeypatch, _FakeClient(_response("From the transcript.")))
-    result = claude.ask("t", "q")
+    result = claude.ask("t", "q", note_dirs=[notes_dir])
     assert len(client.calls) == 1
     assert result.answer == "From the transcript."
     assert result.notes_used == []
@@ -333,7 +329,7 @@ def test_ask_feeds_requested_notes_back_and_sums_usage(monkeypatch, notes_dir):
         monkeypatch,
         _FakeClient([_tool_call(["npcs"]), _response("Kane runs Little Europe.")]),
     )
-    result = claude.ask("t", "who is kane?")
+    result = claude.ask("t", "who is kane?", note_dirs=[notes_dir])
     assert len(client.calls) == 2
     second = client.calls[1]["messages"]
     # user question, the assistant turn verbatim (thinking block included),
@@ -357,7 +353,7 @@ def test_unknown_note_id_is_an_error_result_not_a_crash(monkeypatch, notes_dir):
         monkeypatch,
         _FakeClient([_tool_call(["nope"]), _response("Can't say.")]),
     )
-    result = claude.ask("t", "q")
+    result = claude.ask("t", "q", note_dirs=[notes_dir])
     (tool_result,) = client.calls[1]["messages"][2]["content"]
     assert tool_result["is_error"] is True
     assert "Unknown note id(s): nope" in tool_result["content"]
@@ -371,7 +367,7 @@ def test_tool_rounds_are_capped(monkeypatch, notes_dir):
         monkeypatch,
         _FakeClient([looping, looping, looping, _response("Finally.")]),
     )
-    result = claude.ask("t", "q")
+    result = claude.ask("t", "q", note_dirs=[notes_dir])
     # MAX_TOOL_ROUNDS calls that asked for tools, then one forced answer
     assert len(client.calls) == claude.MAX_TOOL_ROUNDS + 1
     assert client.calls[-1]["tool_choice"] == {"type": "none"}
@@ -389,7 +385,23 @@ def test_gm_notes_are_hidden_unless_enabled(tmp_path, monkeypatch):
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("CAMPAIGN_NOTES_DIR", str(d))
-    assert [n.id for n in claude.campaign.load_notes()] == ["npcs"]
+    assert [n.id for n in claude.campaign.load_notes([d])] == ["npcs"]
     monkeypatch.setenv("CAMPAIGN_GM_NOTES", "1")
-    assert [n.id for n in claude.campaign.load_notes()] == ["npcs", "secrets"]
+    assert [n.id for n in claude.campaign.load_notes([d])] == ["npcs", "secrets"]
+
+
+def test_session_header_goes_before_the_transcript_in_the_cached_block():
+    req = claude.build_request(
+        "[19:00] a: hi", "q", header="SESSION: Game: Cyberpunk RED"
+    )
+    block = req["system"][1]
+    assert block["text"].startswith(
+        "SESSION: Game: Cyberpunk RED\n\nTRANSCRIPT:\n[19:00]"
+    )
+    assert block["cache_control"] == {"type": "ephemeral"}
+
+
+def test_ask_passes_header_through(monkeypatch):
+    client = _use(monkeypatch, _FakeClient(_response()))
+    claude.ask("t", "q", header="SESSION: X")
+    assert client.calls[0]["system"][1]["text"].startswith("SESSION: X")

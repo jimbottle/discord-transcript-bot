@@ -1,9 +1,10 @@
-"""Campaign reference notes for `/ask` (discord-transcript-bot-kda).
+"""Reference notes for `/ask` (discord-transcript-bot-kda, -157).
 
-A tiny retrieval layer: Markdown notes with YAML front matter under
-``campaign/notes/``. Only the *index* (one line per note) rides along with
-every question; the body of a note is sent only when the model asks for it
-by id through the ``read_campaign_notes`` tool. See campaign/README.md.
+A tiny retrieval layer: Markdown notes with YAML front matter, gathered
+from the session's game, group and campaign folders (src/library.py).
+Only the *index* (one line per note) rides along with every question; the
+body of a note is sent only when the model asks for it by id through the
+``read_campaign_notes`` tool. See library/README.md.
 
 Pure file reading, no network. Notes are re-read on every call: they are a
 few kilobytes and the GM edits them between sessions.
@@ -19,8 +20,6 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-DEFAULT_NOTES_DIR = PROJECT_ROOT / "campaign" / "notes"
 # Notes marked ``audience: gm`` hold spoilers. Players use /ask, so they are
 # left out of the index unless the operator opts in on the bot host.
 GM_NOTES_ENV = "CAMPAIGN_GM_NOTES"
@@ -73,11 +72,6 @@ class NoteError(ValueError):
     """A note file is malformed (bad front matter)."""
 
 
-def notes_dir() -> Path:
-    override = os.getenv("CAMPAIGN_NOTES_DIR", "").strip()
-    return Path(override) if override else DEFAULT_NOTES_DIR
-
-
 def gm_notes_enabled() -> bool:
     return os.getenv(GM_NOTES_ENV, "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -120,26 +114,31 @@ def parse_note(text: str, path: Optional[Path] = None) -> Note:
     )
 
 
-def load_notes(include_gm: Optional[bool] = None) -> list:
-    """Every parseable note, sorted by id. A broken note is logged and
+def load_notes(dirs: Iterable = (), include_gm: Optional[bool] = None) -> list:
+    """Every parseable note in ``dirs`` (general to specific), sorted by id.
+    A note in a later folder replaces an earlier one with the same id, so a
+    campaign can override a game-level note. A broken note is logged and
     skipped so one bad header never disables /ask. ``include_gm`` defaults
     to the CAMPAIGN_GM_NOTES setting."""
     if include_gm is None:
         include_gm = gm_notes_enabled()
-    directory = notes_dir()
-    if not directory.is_dir():
-        return []
-    notes = []
-    for path in sorted(directory.glob("*.md")):
-        try:
-            note = parse_note(path.read_text(encoding="utf-8"), path)
-        except (NoteError, OSError) as e:
-            logger.warning("campaign note skipped: %s", e)
+    by_id = {}
+    for directory in dirs:
+        directory = Path(directory)
+        if not directory.is_dir():
             continue
-        if note.audience == "gm" and not include_gm:
-            continue
-        notes.append(note)
-    return notes
+        for path in sorted(directory.glob("*.md")):
+            try:
+                note = parse_note(path.read_text(encoding="utf-8"), path)
+            except (NoteError, OSError) as e:
+                logger.warning("campaign note skipped: %s", e)
+                continue
+            if note.audience == "gm" and not include_gm:
+                continue
+            if note.id in by_id:
+                logger.debug("note %s overridden by %s", by_id[note.id].path, path)
+            by_id[note.id] = note
+    return [by_id[k] for k in sorted(by_id)]
 
 
 def index_text(notes: Iterable[Note]) -> str:

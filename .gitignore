@@ -24,9 +24,13 @@ captures/
 # beads tracker state is local-only (decision 2026-10-20): never commit the export
 .beads/
 
-# Campaign reference content stays on this machine: the GitHub repo is public
-# and the notes are the GM's private material (including spoilers players
-# must not read). Only the README and the example note are tracked.
-/campaign/*
-!/campaign/README.md
-!/campaign/example-note.md
+# Library content stays on this machine: the GitHub repo is public and the
+# notes are the GM's private material (including spoilers players must not
+# read). Only the README, the example config and the example note are tracked.
+/library/*
+!/library/README.md
+!/library/library.example.yml
+!/library/example-note.md
+# Per-recording session tags (transcripts/ is already ignored; explicit
+# so moving transcripts never leaks them).
+*.meta.json

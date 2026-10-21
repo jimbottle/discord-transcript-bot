@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 
 from src.bot.helper import BotHelper
 from src.config.cliargs import CLIArgs
+from src import library, sessions
 from src.llm.claude import AskFailed, ask as llm_ask
 from src.session_capture import scribe_notice
 from src.utils.answer import clamp_message, clean_answer
@@ -571,15 +572,18 @@ if __name__ == "__main__":
 
         whisper_sink = bot.guild_whisper_sinks.get(guild_id, None)
 
-        # Try to read the session transcript file
-        transcript_text = None
+        # The whole session, not just this recording: after a bot restart the
+        # earlier recordings of the same campaign night are joined in front
+        # (src/sessions.py). Plus the session's header and note folders.
+        transcript_text, header, note_dirs = None, "", []
         if (
             whisper_sink
             and hasattr(whisper_sink, "session_file")
             and os.path.exists(whisper_sink.session_file)
         ):
-            with open(whisper_sink.session_file, "r", encoding="utf-8") as f:
-                transcript_text = f.read()
+            transcript_text, header, note_dirs, _files = sessions.ask_context(
+                whisper_sink.session_file
+            )
 
         if not transcript_text or not transcript_text.strip():
             await ctx.respond(
@@ -597,7 +601,13 @@ if __name__ == "__main__":
             # llm_ask is blocking and can take tens of seconds, so it must
             # not run on the event loop — that would stall voice receive and
             # the gateway heartbeat, not just this command.
-            result = await asyncio.to_thread(llm_ask, transcript_text, question)
+            result = await asyncio.to_thread(
+                llm_ask,
+                transcript_text,
+                question,
+                header=header,
+                note_dirs=note_dirs,
+            )
             answer = clean_answer(result.answer)
             logger.info(
                 f"/ask answered by {result.model} (input={result.input_tokens}, "
@@ -668,6 +678,39 @@ if __name__ == "__main__":
     ):
         await _run_ask(ctx, question, server, public=True)
 
+    @bot.slash_command(
+        name="session",
+        description="Show which group, game, campaign and session this recording is tagged with.",
+    )
+    async def session_info(ctx: discord.context.ApplicationContext):
+        sink = bot.guild_whisper_sinks.get(ctx.guild_id)
+        path = getattr(sink, "session_file", None)
+        if not path:
+            await ctx.respond(
+                "Not recording right now. Use /scribe first.", ephemeral=True
+            )
+            return
+        lib = library.load()
+        meta = sessions.read_meta(path)
+        files = [f for f in sessions.session_files(path) if f.exists()]
+        d = sessions.describe(lib, meta, max(1, len(files)))
+        if not d["tagged"] or not d.get("campaign"):
+            await ctx.respond(
+                "This recording isn't tied to a campaign. Add this server to a group "
+                "in `library/library.yml` (or tag it later with "
+                "`scripts/tag_session.py`).",
+                ephemeral=True,
+            )
+            return
+        lines = [
+            f"**Group:** {d['group']}" + (f" (GM {d['gm']})" if d["gm"] else ""),
+            f"**Game:** {d['game']}",
+            f"**Campaign:** {d['campaign']}",
+            f"**Session:** {d['session_day']}"
+            + (f" · {d['recordings']} recordings" if d["recordings"] > 1 else ""),
+        ]
+        await ctx.respond("\n".join(lines), ephemeral=True)
+
     @bot.slash_command(name="help", description="Show available commands.")
     async def help(ctx: discord.context.ApplicationContext):
         embed_fields = [
@@ -689,6 +732,11 @@ if __name__ == "__main__":
             discord.EmbedField(
                 name="/ask-public",
                 value="Ask about the transcript (answer shown to everyone).",
+                inline=True,
+            ),
+            discord.EmbedField(
+                name="/session",
+                value="Show the group, game, campaign and session being recorded.",
                 inline=True,
             ),
             discord.EmbedField(

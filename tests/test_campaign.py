@@ -53,14 +53,13 @@ def test_load_notes_skips_a_broken_note_and_keeps_the_rest(
 ):
     (tmp_path / "places.md").write_text(GOOD, encoding="utf-8")
     (tmp_path / "broken.md").write_text("not a note", encoding="utf-8")
-    monkeypatch.setenv("CAMPAIGN_NOTES_DIR", str(tmp_path))
-    notes = campaign.load_notes()
+    notes = campaign.load_notes([tmp_path])
     assert [n.id for n in notes] == ["places"]
     assert any("broken.md" in r.message for r in caplog.records)
 
 
 def test_load_notes_with_missing_dir_is_empty(tmp_path, monkeypatch):
-    monkeypatch.setenv("CAMPAIGN_NOTES_DIR", str(tmp_path / "nope"))
+    assert campaign.load_notes([tmp_path / "nope"]) == []
     assert campaign.load_notes() == []
     assert campaign.index_text([]) == ""
 
@@ -82,48 +81,65 @@ def test_tool_schema_is_strict():
     assert campaign.TOOL["input_schema"]["required"] == ["ids"]
 
 
-# ── the local notes in campaign/notes (gitignored; absent on a fresh clone) ──
+def test_later_folder_overrides_an_earlier_note_with_the_same_id(tmp_path):
+    game, camp = tmp_path / "game", tmp_path / "camp"
+    game.mkdir()
+    camp.mkdir()
+    (game / "places.md").write_text(GOOD, encoding="utf-8")
+    (game / "rules.md").write_text(
+        GOOD.replace("id: places", "id: rules"), encoding="utf-8"
+    )
+    (camp / "places.md").write_text(
+        GOOD.replace("Where things are.", "Campaign places."), encoding="utf-8"
+    )
+    notes = {n.id: n for n in campaign.load_notes([game, camp])}
+    assert set(notes) == {"places", "rules"}
+    assert notes["places"].summary == "Campaign places."
 
-_LOCAL = sorted(campaign.DEFAULT_NOTES_DIR.glob("*.md"))
+
+# ── the local library (gitignored; absent on a fresh clone) ──
+
+from src import library  # noqa: E402
+
+_LOCAL = sorted(library.DEFAULT_LIBRARY_DIR.glob("*/*/notes/*.md"))
 _needs_local_notes = pytest.mark.skipif(
-    not _LOCAL, reason="campaign/notes is local-only and empty here"
+    not _LOCAL, reason="library notes are local-only and absent here"
 )
 
 
 def test_example_note_parses():
-    p = campaign.PROJECT_ROOT / "campaign" / "example-note.md"
+    p = library.PROJECT_ROOT / "library" / "example-note.md"
     campaign.parse_note(p.read_text(encoding="utf-8"), p)
 
 
 @_needs_local_notes
-def test_every_shipped_note_parses(monkeypatch):
-    monkeypatch.delenv("CAMPAIGN_NOTES_DIR", raising=False)
-    monkeypatch.setenv("CAMPAIGN_GM_NOTES", "1")
-    paths = _LOCAL
-    for p in paths:
+def test_every_local_note_parses():
+    for p in _LOCAL:
         campaign.parse_note(p.read_text(encoding="utf-8"), p)  # raises on a bad note
-    notes = campaign.load_notes()
-    assert len(notes) == len(paths)
-
-
-@pytest.mark.skipif(
-    not (campaign.DEFAULT_NOTES_DIR / "gm-secrets.md").exists(),
-    reason="no local gm-secrets note",
-)
-def test_shipped_gm_notes_are_hidden_by_default(monkeypatch):
-    monkeypatch.delenv("CAMPAIGN_NOTES_DIR", raising=False)
-    monkeypatch.delenv("CAMPAIGN_GM_NOTES", raising=False)
-    ids = [n.id for n in campaign.load_notes()]
-    assert "gm-secrets" not in ids
-    assert "npcs" in ids
 
 
 @_needs_local_notes
-def test_shipped_index_is_small(monkeypatch):
+def test_local_gm_notes_are_hidden_by_default(monkeypatch):
+    monkeypatch.delenv("CAMPAIGN_GM_NOTES", raising=False)
+    dirs = sorted({p.parent for p in _LOCAL})
+    all_ids = {p.stem for p in _LOCAL}
+    shown = {n.id for n in campaign.load_notes(dirs)}
+    hidden = {n.id for n in campaign.load_notes(dirs, include_gm=True)} - shown
+    assert shown | hidden == all_ids
+    for note_id in hidden:
+        assert (
+            campaign.parse_note(
+                next(p for p in _LOCAL if p.stem == note_id).read_text(encoding="utf-8")
+            ).audience
+            == "gm"
+        )
+
+
+@_needs_local_notes
+def test_local_index_is_small():
     """The index rides on every question; keep it cheap (~40 tokens/note)."""
-    monkeypatch.delenv("CAMPAIGN_NOTES_DIR", raising=False)
-    monkeypatch.setenv("CAMPAIGN_GM_NOTES", "1")
-    index = campaign.index_text(campaign.load_notes())
+    dirs = sorted({p.parent for p in _LOCAL})
+    notes = campaign.load_notes(dirs, include_gm=True)
     # 8 notes measured at ~800 tokens; this guards against a note whose
     # summary or keyword list grows into a second body.
-    assert len(index) < 400 * len(campaign.load_notes()), len(index)
+    assert len(campaign.index_text(notes)) < 400 * len(notes)

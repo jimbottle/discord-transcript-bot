@@ -13,7 +13,7 @@ receive and the gateway heartbeat, not just the command.
 The transcript goes in a cached system block, so repeated questions about
 the same session within the cache window are mostly cache reads.
 
-Campaign background (``campaign/notes``) is retrieved on demand: the
+Campaign background (``library/``: game, group and campaign notes) is retrieved on demand: the
 request carries only a one-line-per-note index and a tool; the model pulls
 a note's body only when the question needs it (discord-transcript-bot-kda).
 """
@@ -40,7 +40,7 @@ TIMEOUT_S = 120
 
 SYSTEM_PROMPT = (
     "You are an assistant that answers questions about a voice chat "
-    "transcript of a tabletop RPG session. Be concise and direct. Answer from "
+    "transcript of a tabletop RPG session (the SESSION line, when present, names the game and campaign). Be concise and direct. Answer from "
     "the transcript; if the answer isn't there, say so. When a CAMPAIGN NOTES "
     "INDEX is provided you may read campaign notes with the read_campaign_notes "
     "tool, but only when the question needs background the transcript lacks, "
@@ -133,7 +133,9 @@ def _client() -> anthropic.Anthropic:
     return anthropic.Anthropic(api_key=api_key(), max_retries=2, timeout=TIMEOUT_S)
 
 
-def build_request(transcript: str, question: str, index: str = "") -> dict:
+def build_request(
+    transcript: str, question: str, index: str = "", header: str = ""
+) -> dict:
     """The exact ``messages.create`` arguments for one question. Pure, so the
     request shape is unit-testable without a client.
 
@@ -141,12 +143,14 @@ def build_request(transcript: str, question: str, index: str = "") -> dict:
     ``read_campaign_notes`` tool; without one it is the plain two-block shape.
     The transcript keeps its own cache breakpoint either way, so editing a
     note (which changes the index) does not evict the cached transcript.
+    ``header`` is the one-line session context (game, campaign, group,
+    date) and is placed just before the transcript in the same cached block.
     """
     system = [
         {"type": "text", "text": SYSTEM_PROMPT},
         {
             "type": "text",
-            "text": "TRANSCRIPT:\n" + transcript,
+            "text": (header + "\n\n" if header else "") + "TRANSCRIPT:\n" + transcript,
             # Cached so follow-up questions about the same session re-read
             # the transcript at the cache rate instead of paying for it
             # every time.
@@ -217,13 +221,19 @@ def _tool_results(response, notes, used: list) -> list:
     return results
 
 
-def ask(transcript: str, question: str) -> AskResult:
+def ask(transcript: str, question: str, *, header: str = "", note_dirs=()) -> AskResult:
     """Answer ``question`` from ``transcript``. Blocking. Raises
-    :class:`AskFailed` with a Discord-ready message on any failure."""
+    :class:`AskFailed` with a Discord-ready message on any failure.
+
+    ``header`` and ``note_dirs`` come from the session's tag
+    (src/sessions.py, src/library.py); without them the question is
+    answered from the transcript alone."""
     if not configured():
         raise AskFailed(NO_KEY_MSG)
-    notes = campaign.load_notes()
-    request = build_request(transcript, question, campaign.index_text(notes))
+    notes = campaign.load_notes(note_dirs)
+    request = build_request(
+        transcript, question, campaign.index_text(notes), header=header
+    )
     totals = {"input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 0}
     used: list = []
     rounds = 0
