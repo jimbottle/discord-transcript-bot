@@ -547,7 +547,10 @@ if __name__ == "__main__":
             # process: after a restart the session is found on disk
             # (roborev #6515).
             for gid in {g.id for g in bot.guilds}:
-                if not bot.session_file_for_export(gid):
+                # A just-started session nobody has spoken in has a file
+                # but no text: not a candidate (roborev #6523).
+                path = bot.session_file_for_export(gid)
+                if not path or not sessions.session_transcript(path)[0].strip():
                     continue
                 guild = bot.get_guild(gid)
                 if not guild:
