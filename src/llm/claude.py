@@ -129,6 +129,13 @@ def _gate(question: str, *, context: str = "", gm: bool = False):
         verdict = guard.check(question, api_key=api_key(), context=context, gm=gm)
     except guard.GuardUnavailable as e:
         logger.error(f"GM check unavailable, refusing to answer: {e}")
+        # Still fail closed, but say why when the API said why: a bad key,
+        # no credit or a bad GUARD_MODEL won't fix itself on retry
+        # (roborev #6467). GUARD_ERROR_MSG is for transient/parse failures.
+        cause = e.__cause__
+        failure = _api_failure(cause) if cause is not None else None
+        if failure is not None and isinstance(cause, anthropic.APIStatusError):
+            raise failure from e
         raise AskFailed(guard.GUARD_ERROR_MSG, e) from e
     if not verdict.allowed:
         logger.info(
@@ -215,28 +222,38 @@ def build_request(
     return request
 
 
+def _api_failure(e: Exception) -> "AskFailed":
+    """The Discord-ready AskFailed for an SDK error, or None if ``e`` is not
+    one. Shared by the answer call and the GM check, so a bad key or an
+    empty credit balance reads the same whichever call hit it first."""
+    if isinstance(e, (anthropic.AuthenticationError, anthropic.PermissionDeniedError)):
+        return AskFailed(BAD_KEY_MSG, e)
+    if isinstance(e, anthropic.RateLimitError):
+        return AskFailed(RATE_LIMIT_MSG, e)
+    if isinstance(e, anthropic.BadRequestError):
+        detail = _api_error_message(e)
+        lowered = detail.lower()
+        if "credit" in lowered or "billing" in lowered:
+            return AskFailed(BILLING_MSG, e)
+        return AskFailed(f"Anthropic rejected the request: {detail}", e)
+    if isinstance(e, anthropic.APIStatusError):
+        if e.status_code >= 500:
+            return AskFailed(SERVER_ERROR_MSG, e)
+        return AskFailed(f"Anthropic returned HTTP {e.status_code}.", e)
+    if isinstance(e, anthropic.APIConnectionError):  # includes APITimeoutError
+        return AskFailed(UNREACHABLE_MSG, e)
+    return None
+
+
 def _create(request: dict):
     """One API call with every SDK error mapped to an :class:`AskFailed`."""
     try:
         return _client().messages.create(**request)
-    except anthropic.AuthenticationError as e:
-        raise AskFailed(BAD_KEY_MSG, e) from e
-    except anthropic.PermissionDeniedError as e:
-        raise AskFailed(BAD_KEY_MSG, e) from e
-    except anthropic.RateLimitError as e:
-        raise AskFailed(RATE_LIMIT_MSG, e) from e
-    except anthropic.BadRequestError as e:
-        detail = _api_error_message(e)
-        lowered = detail.lower()
-        if "credit" in lowered or "billing" in lowered:
-            raise AskFailed(BILLING_MSG, e) from e
-        raise AskFailed(f"Anthropic rejected the request: {detail}", e) from e
-    except anthropic.APIStatusError as e:
-        if e.status_code >= 500:
-            raise AskFailed(SERVER_ERROR_MSG, e) from e
-        raise AskFailed(f"Anthropic returned HTTP {e.status_code}.", e) from e
-    except anthropic.APIConnectionError as e:  # includes APITimeoutError
-        raise AskFailed(UNREACHABLE_MSG, e) from e
+    except anthropic.APIError as e:
+        failure = _api_failure(e)
+        if failure is None:
+            raise
+        raise failure from e
 
 
 def _tool_results(response, notes, used: list) -> list:

@@ -159,6 +159,8 @@ def check(
         category = "ok" if allowed else "strategy"
     if allowed and category != "ok":
         allowed = False  # a named violation wins over a contradictory flag
+    if not allowed and category == "ok":
+        category = "strategy"  # a block needs a blocking category (roborev #6467)
     usage = getattr(response, "usage", None)
     return Verdict(
         allowed=allowed,

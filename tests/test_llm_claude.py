@@ -552,3 +552,34 @@ def test_ask_lore_with_only_gm_notes_says_so(monkeypatch, tmp_path):
     assert e.value.user_message == claude.ONLY_GM_NOTES_MSG
     assert client.calls == []
     assert claude.ask_lore("q", note_dirs=[tmp_path], include_gm=True).answer == "x"
+
+
+@pytest.mark.parametrize(
+    "error, expected",
+    [
+        (lambda: _status_error(anthropic.AuthenticationError, 401), "BAD_KEY_MSG"),
+        (
+            lambda: _status_error(
+                anthropic.BadRequestError, 400, "Your credit balance is too low"
+            ),
+            "BILLING_MSG",
+        ),
+        (lambda: anthropic.APIConnectionError(request=None), None),
+    ],
+    ids=["bad-key", "billing", "connection"],
+)
+def test_guard_api_errors_keep_their_specific_message(monkeypatch, error, expected):
+    # roborev #6467: the GM check runs first, so its API errors must read
+    # like the answer call's (bad key, no credit), not "try again".
+    err = error()
+
+    def broken(q, **kw):
+        raise claude.guard.GuardUnavailable(str(err)) from err
+
+    monkeypatch.setattr(claude.guard, "check", broken)
+    client = _use(monkeypatch, _FakeClient(_response()))
+    with pytest.raises(claude.AskFailed) as e:
+        claude.ask("t", "q")
+    want = getattr(claude, expected) if expected else claude.guard.GUARD_ERROR_MSG
+    assert e.value.user_message == want
+    assert client.calls == []  # still fails closed

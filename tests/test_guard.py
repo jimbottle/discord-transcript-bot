@@ -108,15 +108,43 @@ def test_unparseable_verdict_is_unavailable(monkeypatch, text):
         guard.check("q", api_key="k")
 
 
-def test_api_error_is_unavailable(monkeypatch):
-    err = (
-        anthropic.APIConnectionError(request=None)
-        if False
-        else anthropic.APIError("down", request=None, body=None)
+def _status_error(cls, status, message="nope"):
+    try:
+        import httpx2 as httpx
+    except ImportError:  # older SDKs
+        import httpx
+    req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    body = {"type": "error", "error": {"type": "x", "message": message}}
+    return cls(
+        f"Error code: {status}",
+        response=httpx.Response(status, request=req, json=body),
+        body=body,
     )
+
+
+@pytest.mark.parametrize(
+    "make_error",
+    [
+        lambda: anthropic.APIConnectionError(request=None),
+        lambda: _status_error(anthropic.AuthenticationError, 401),
+    ],
+    ids=["connection", "status"],
+)
+def test_api_errors_are_unavailable_and_keep_the_cause(monkeypatch, make_error):
+    err = make_error()
     _use(monkeypatch, _Client(error=err))
-    with pytest.raises(guard.GuardUnavailable):
+    with pytest.raises(guard.GuardUnavailable) as e:
         guard.check("q", api_key="k")
+    assert e.value.__cause__ is err
+
+
+def test_blocked_with_category_ok_is_normalised(monkeypatch):
+    _use(
+        monkeypatch,
+        _Client(_verdict({"allowed": False, "category": "ok", "reason": "r"})),
+    )
+    v = guard.check("q", api_key="k")
+    assert (v.allowed, v.category) == (False, "strategy")
 
 
 def test_enabled_by_default(monkeypatch):
