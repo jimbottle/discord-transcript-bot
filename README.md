@@ -97,6 +97,15 @@ To set up and run this Discord bot, follow these steps:
    - `/health`: Show system health status.
    - `/help`: Show available commands.
 
+## Docker
+
+`docker compose up --build` builds one image with the bot and the dashboard and serves the dashboard on http://127.0.0.1:5001 (host loopback only; it has no login). Start the bot from the dashboard, or run it on its own with `docker compose run --rm volo python main.py`.
+
+- **Secrets:** run it under 1Password so the host resolves them: `op run --env-file=op.env -- docker compose up`. A local `.env` is read too, if present.
+- **Data stays on the host:** `transcripts/`, `captures/`, `history/`, `library/`, `.logs/` and `player_map.yml` are mounted, and `.dockerignore` keeps all of them (and every secret) out of the image. Create `player_map.yml` first (it can be empty), or Docker creates a directory in its place.
+- **Model weights:** about 3 GB, downloaded into the `models` volume on first start.
+- **Speed:** the container runs faster-whisper on the CPU. MLX-Whisper needs Apple's Metal GPU, so on a Mac the host install (`make start`) is much faster. Use Docker for Linux hosts.
+
 ## Contributing
 
 Contributions to this project are welcome. Please ensure to follow the project's coding style and submit pull requests for any new features or bug fixes.

@@ -145,6 +145,7 @@ class HealthCheck:
                     "/usr/local/lib/libopus.dylib",
                     "/usr/lib/libopus.so.0",
                     "/usr/lib/x86_64-linux-gnu/libopus.so.0",
+                    "/usr/lib/aarch64-linux-gnu/libopus.so.0",
                 ]
                 for path in candidates:
                     if os.path.exists(path):

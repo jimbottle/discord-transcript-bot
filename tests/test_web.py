@@ -1558,3 +1558,37 @@ def test_stale_bot_state_does_not_block_delete(client, deletable, tmp_path):
 
 def test_live_page_has_no_server_rendered_placeholder(client):
     assert b'id="empty-state"' not in client.get("/live").data
+
+
+def test_dashboard_binds_loopback_unless_told_otherwise(monkeypatch):
+    """The dashboard has no login. Only the container (Dockerfile) sets
+    DASHBOARD_HOST=0.0.0.0, and compose publishes it on host loopback."""
+    import importlib
+
+    monkeypatch.delenv("DASHBOARD_HOST", raising=False)
+    assert importlib.reload(web_app).DASHBOARD_HOST == "127.0.0.1"
+    monkeypatch.setenv("DASHBOARD_HOST", "0.0.0.0")
+    assert importlib.reload(web_app).DASHBOARD_HOST == "0.0.0.0"
+    monkeypatch.delenv("DASHBOARD_HOST")
+    importlib.reload(web_app)
+
+
+def test_docker_context_excludes_private_material():
+    """The repo is public and the image may be pushed: secrets, GM notes,
+    recordings, audio and history must never be copied into it."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, ".dockerignore")) as f:
+        rules = {ln.strip() for ln in f if ln.strip() and not ln.startswith("#")}
+    for must in (
+        ".env",
+        "op.env",
+        "transcripts",
+        "captures",
+        "history",
+        "library/*",
+        "*.meta.json",
+        "player_map.yml",
+        ".beads",
+        ".git",
+    ):
+        assert must in rules, must

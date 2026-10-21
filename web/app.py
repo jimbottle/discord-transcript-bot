@@ -69,7 +69,9 @@ app.jinja_env.filters["when"] = lambda v: timefmt.when(v)
 # name, and that is what the Host check and the Origin check below reject.
 # Both compare against these fixed values, never against the request's own
 # Host header, which is attacker-controlled in exactly that scenario.
-DASHBOARD_HOST = "127.0.0.1"
+# 0.0.0.0 only inside the container (Dockerfile), where compose publishes
+# the port on the host's loopback; the Host/Origin check below still applies.
+DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "127.0.0.1")
 DASHBOARD_PORT = 5001
 _LOOPBACK_NAMES = ("127.0.0.1", "localhost", "[::1]")
 

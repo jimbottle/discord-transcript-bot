@@ -1,0 +1,27 @@
+# Nothing private or bulky goes into the image: secrets, the GM's notes,
+# recordings, captured audio and question history are mounted at run time
+# (compose.yaml), never copied in.
+.git
+.beads
+.dolt
+.roborev
+.claude
+venv
+.venv
+**/__pycache__
+.logs
+.env
+op.env
+transcripts
+captures
+history
+library/*
+!library/README.md
+!library/library.example.yml
+!library/example-note.md
+player_map.yml
+player_map.yaml
+*.meta.json
+*.mp3
+*.wav
+.DS_Store

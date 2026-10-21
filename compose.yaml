@@ -1,0 +1,31 @@
+# docker compose up --build   (see README "Docker")
+#
+# Secrets: start it under 1Password so ANTHROPIC_API_KEY (and, once
+# migrated, DISCORD_BOT_TOKEN) are resolved on the host and passed through:
+#   op run --env-file=op.env -- docker compose up
+services:
+  volo:
+    build: .
+    image: discord-transcript-bot
+    # Loopback only: the dashboard has no login.
+    ports:
+      - "127.0.0.1:5001:5001"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      PLAYER_MAP_FILE_PATH: /app/player_map.yml
+    volumes:
+      - ./transcripts:/app/transcripts
+      - ./captures:/app/captures
+      - ./history:/app/history
+      - ./library:/app/library
+      - ./.logs:/app/.logs
+      - ./player_map.yml:/app/player_map.yml
+      - models:/models
+    restart: unless-stopped
+
+volumes:
+  # Whisper weights (~3 GB), downloaded on first start.
+  models:
