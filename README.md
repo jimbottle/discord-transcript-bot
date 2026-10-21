@@ -90,6 +90,8 @@ To set up and run this Discord bot, follow these steps:
    - `/stop`: Stop transcribing.
    - `/disconnect`: Disconnect from the voice channel.
    - `/ask <question>`: Ask a question about the current transcript (works in DMs).
+   - `/recap`: A summary of the current or most recent session (private; `public: True` posts it). Same path as `/ask`.
+   - `/transcript`: The full session as a text file, 12-hour times.
    - `/generate_pdf`: Export the current or most recent session (every recording of it) as a PDF. Works after `/stop`, `/disconnect` and a bot restart.
    - `/update_player_map`: Sync player names with the server roster.
    - `/health`: Show system health status.
