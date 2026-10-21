@@ -130,8 +130,10 @@ def load_notes(dirs: Iterable = (), include_gm: Optional[bool] = None) -> list:
         for path in sorted(directory.glob("*.md")):
             try:
                 note = parse_note(path.read_text(encoding="utf-8"), path)
-            except (NoteError, OSError) as e:
-                logger.warning("campaign note skipped: %s", e)
+            except (ValueError, OSError) as e:
+                # ValueError covers NoteError and UnicodeDecodeError (a note
+                # saved as cp1252/Latin-1); either way skip just this note.
+                logger.warning("campaign note skipped: %s: %s", path, e)
                 continue
             if note.audience == "gm" and not include_gm:
                 continue

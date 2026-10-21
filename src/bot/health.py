@@ -338,8 +338,11 @@ class HealthCheck:
         from src.llm import claude
 
         if claude.configured():
-            lib = library.load()
-            n = len(lib.campaigns)
+            try:
+                n = len(library.load().campaigns)
+            except Exception as e:  # noqa: BLE001 - never block startup on the library
+                logger.warning("library could not be loaded: %s", e)
+                n = 0
             self._record(
                 "ask_provider",
                 True,

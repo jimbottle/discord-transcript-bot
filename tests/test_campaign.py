@@ -58,6 +58,17 @@ def test_load_notes_skips_a_broken_note_and_keeps_the_rest(
     assert any("broken.md" in r.message for r in caplog.records)
 
 
+def test_load_notes_skips_a_note_that_is_not_utf8(tmp_path, caplog):
+    # roborev #6445: a cp1252-saved note raised UnicodeDecodeError out of
+    # load_notes, crashing /ask and the startup health check.
+    (tmp_path / "places.md").write_text(GOOD, encoding="utf-8")
+    (tmp_path / "bad.md").write_bytes(
+        b"---\nid: bad\ntitle: Caf\xe9\nsummary: s\n---\nbody\n"
+    )
+    assert [n.id for n in campaign.load_notes([tmp_path])] == ["places"]
+    assert any("bad.md" in r.message for r in caplog.records)
+
+
 def test_load_notes_with_missing_dir_is_empty(tmp_path, monkeypatch):
     assert campaign.load_notes([tmp_path / "nope"]) == []
     assert campaign.load_notes() == []

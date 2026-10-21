@@ -157,7 +157,8 @@ def load(root: Optional[Path] = None) -> Library:
         return lib
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError) as e:
+    except (OSError, ValueError, yaml.YAMLError) as e:
+        # ValueError: UnicodeDecodeError from a file saved as cp1252/Latin-1.
         logger.warning("library: cannot read %s: %s", path, e)
         return lib
     if not isinstance(raw, dict):

@@ -85,6 +85,28 @@ def test_missing_or_broken_library_is_empty_not_an_error(tmp_path):
     assert library.load(tmp_path).campaigns == {}
 
 
+def test_non_utf8_library_is_empty_not_an_error(tmp_path):
+    # roborev #6450: a cp1252-saved library.yml raised UnicodeDecodeError.
+    (tmp_path / "library.yml").write_bytes(b"games:\n  x: {name: Caf\xe9}\n")
+    assert library.load(tmp_path).games == {}
+
+
+def test_health_check_survives_a_library_that_raises(monkeypatch):
+    from src.bot.health import HealthCheck
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+    def boom(*a, **k):
+        raise RuntimeError("library exploded")
+
+    monkeypatch.setattr(library, "load", boom)
+    hc = HealthCheck()
+    hc._check_ask_provider()
+    check = hc.checks["ask_provider"]
+    assert check["ok"] is True and check["critical"] is False
+    assert "0 campaigns" in check["message"]
+
+
 def test_name_falls_back_to_the_id_for_a_removed_item(lib):
     assert lib.name("campaign", "return-to-night-city") == "Return to Night City"
     assert lib.name("campaign", "gone") == "gone"
