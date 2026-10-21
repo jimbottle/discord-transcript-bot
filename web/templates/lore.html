@@ -42,6 +42,9 @@
             <span id="ask-status" class="search-meta" aria-live="polite"></span>
         </div>
     </form>
+    {% if notes and not table_count %}
+    <p class="search-meta" id="gm-only-hint">This campaign only has GM-only notes, so tick "Include GM-only notes" to ask about it.</p>
+    {% endif %}
     <div id="ask-answers" aria-live="polite"></div>
 </article>
 <script src="{{ url_for('static', filename='ask.js') }}"></script>

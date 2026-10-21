@@ -1269,3 +1269,18 @@ def test_lore_page_reloads_history_with_the_gm_filter(client, lore_library):
     assert 'data-history-query="source=dashboard-lore&campaign=rtnc"' in body
     js = client.get("/static/ask.js").get_data(as_text=True)
     assert '"&include_gm=false"' in js
+
+
+def test_lore_shows_the_gm_only_hint_before_asking(client, lore_library):
+    # roborev #6470: table_count was computed but unused
+    assert b'id="gm-only-hint"' not in client.get("/lore").data
+    (lore_library / "campaigns" / "rtnc" / "notes" / "npcs.md").unlink()
+    assert b'id="gm-only-hint"' in client.get("/lore").data
+
+
+def test_untagged_session_invalidates_in_flight_history():
+    import pathlib
+
+    js = (pathlib.Path(web_app.__file__).parent / "static" / "ask.js").read_text()
+    i = js.index("if (!key) {")
+    assert "historyToken++" in js[i : i + 200]

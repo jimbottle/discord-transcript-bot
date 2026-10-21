@@ -180,6 +180,7 @@
             if (key === historyKey) return;
             historyKey = key;
             if (!key) {  // untagged recording: drop the previous session's Q&A
+                historyToken++;  // and any load still in flight for it (roborev #6470)
                 answers.querySelectorAll(".qa-earlier").forEach(function (n) { n.remove(); });
                 return;
             }
