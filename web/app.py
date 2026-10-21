@@ -2,6 +2,7 @@ import os
 
 from flask import Flask, abort, jsonify, render_template, request
 
+import answer_markdown
 from bot_manager import BotManager
 from roster_service import get_roster, get_unmapped_speakers, roster_path
 from transcript_service import (
@@ -51,6 +52,8 @@ app = Flask(__name__)
 bot = BotManager()
 # Format a raw seconds count in templates, e.g. a guild's stalled output age.
 app.jinja_env.filters["duration"] = format_duration
+# Model answers are Markdown; render the safe subset (escaped first).
+app.jinja_env.filters["answer_md"] = answer_markdown.render
 
 # The dashboard only ever listens on loopback. Requests must also *address*
 # it as loopback: a DNS-rebinding page (attacker.example resolving to
@@ -291,6 +294,111 @@ def bot_stop():
 @app.route("/bot/status")
 def bot_status():
     return jsonify(bot.status())
+
+
+@app.route("/lore")
+def lore():
+    """Campaign Q&A from library notes only. Dashboard-only on purpose: no
+    Discord command reaches claude.ask_lore."""
+    lib = sessions_library()
+    campaigns = sorted(lib.campaigns.values(), key=lambda c: c.name.lower())
+    chosen = request.args.get("campaign") or next(
+        (g.active_campaign for g in lib.groups.values() if g.active_campaign), None
+    )
+    if chosen not in lib.campaigns:
+        chosen = campaigns[0].id if campaigns else None
+    c = lib.campaigns.get(chosen) if chosen else None
+    from src.llm import campaign as notes_mod
+
+    dirs = lib.note_dirs(game=c.game, group=c.group, campaign=c.id) if c else []
+    table_notes = notes_mod.load_notes(dirs, include_gm=False)
+    all_notes = notes_mod.load_notes(dirs, include_gm=True)
+    return render_template(
+        "lore.html",
+        campaigns=campaigns,
+        chosen=c,
+        game_name=lib.name("game", c.game) if c else None,
+        group_name=lib.name("group", c.group) if c else None,
+        notes=all_notes,
+        table_ids={n.id for n in table_notes},
+        ask_configured=claude.configured(),
+    )
+
+
+@app.route("/lore/ask", methods=["POST"])
+def lore_ask():
+    """JSON ``{"question", "campaign", "include_gm"?}`` -> answer from that
+    campaign's notes. Same status codes as /ask; recorded in the question
+    history as source ``dashboard-lore``."""
+    _require_csrf_header()
+    data = request.get_json(silent=True) or {}
+    question = str(data.get("question") or "").strip()
+    if not question:
+        return jsonify({"error": "question is required"}), 400
+    if len(question) > MAX_QUESTION_CHARS:
+        return (
+            jsonify(
+                {"error": f"question is too long (max {MAX_QUESTION_CHARS} characters)"}
+            ),
+            400,
+        )
+    campaign_id = data.get("campaign")
+    lib = sessions_library()
+    if not isinstance(campaign_id, str) or campaign_id not in lib.campaigns:
+        return jsonify({"error": "unknown campaign"}), 404
+    include_gm = data.get("include_gm") is True
+    c = lib.campaigns[campaign_id]
+
+    def _log(status, started=None, **kw):
+        question_log.record(
+            source="dashboard-lore",
+            question=question,
+            status=status,
+            asker="dashboard",
+            campaign=campaign_id,
+            include_gm=include_gm,
+            latency_s=(time.perf_counter() - started) if started else None,
+            **kw,
+        )
+
+    if not claude.configured():
+        _log(question_log.REJECTED, error=claude.NO_KEY_MSG)
+        return jsonify({"error": claude.NO_KEY_MSG}), 503
+    started = time.perf_counter()
+    try:
+        result = claude.ask_lore(
+            question,
+            header=sessions.campaign_header(lib, campaign_id),
+            note_dirs=lib.note_dirs(game=c.game, group=c.group, campaign=c.id),
+            include_gm=include_gm,
+        )
+    except claude.AskFailed as e:
+        status = (
+            question_log.REJECTED
+            if e.user_message == claude.NO_NOTES_MSG
+            else question_log.FAILED
+        )
+        _log(status, started, error=e.user_message)
+        return jsonify({"error": e.user_message}), (
+            409 if status == question_log.REJECTED else 502
+        )
+    answer = result.answer.strip()
+    if not answer:
+        _log(question_log.FAILED, started, error=claude.EMPTY_MSG, result=result)
+        return jsonify({"error": claude.EMPTY_MSG}), 502
+    _log(question_log.ANSWERED, started, answer=answer, result=result)
+    return jsonify(
+        {
+            "campaign": campaign_id,
+            "question": question,
+            "answer": answer,
+            "model": result.model,
+            "input_tokens": result.input_tokens,
+            "cached_tokens": result.cached_tokens,
+            "output_tokens": result.output_tokens,
+            "notes_used": list(result.notes_used),
+        }
+    )
 
 
 @app.route("/questions")

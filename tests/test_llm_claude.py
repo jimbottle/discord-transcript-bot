@@ -405,3 +405,60 @@ def test_ask_passes_header_through(monkeypatch):
     client = _use(monkeypatch, _FakeClient(_response()))
     claude.ask("t", "q", header="SESSION: X")
     assert client.calls[0]["system"][1]["text"].startswith("SESSION: X")
+
+
+# ── ask_lore: notes only, dashboard only ─────────────────────────────────
+
+
+def test_lore_request_has_no_transcript_and_always_offers_the_tool():
+    req = claude.build_lore_request("who?", "INDEX", header="CAMPAIGN: X")
+    assert req["system"][0]["text"] == claude.LORE_SYSTEM_PROMPT
+    assert req["system"][1]["text"] == "CAMPAIGN: X\n\nINDEX"
+    assert req["system"][1]["cache_control"] == {"type": "ephemeral"}
+    assert "TRANSCRIPT" not in str(req["system"])
+    assert req["tools"] == [claude.campaign.TOOL]
+    assert req["tool_choice"] == {"type": "auto"}
+
+
+def test_ask_lore_reads_notes_through_the_tool(monkeypatch, notes_dir):
+    client = _use(
+        monkeypatch,
+        _FakeClient([_tool_call(["npcs"]), _response("Kane runs Little Europe.")]),
+    )
+    r = claude.ask_lore("who is kane?", note_dirs=[notes_dir])
+    assert r.answer == "Kane runs Little Europe." and r.notes_used == ["npcs"]
+    assert (
+        "Lilith Kane is the fixer"
+        in client.calls[1]["messages"][2]["content"][0]["content"]
+    )
+
+
+def test_ask_lore_without_notes_fails_before_any_call(monkeypatch, tmp_path):
+    client = _use(monkeypatch, _FakeClient(_response()))
+    with pytest.raises(claude.AskFailed) as e:
+        claude.ask_lore("q", note_dirs=[tmp_path])
+    assert e.value.user_message == claude.NO_NOTES_MSG
+    assert client.calls == []
+
+
+def test_ask_lore_gm_notes_only_when_asked(monkeypatch, notes_dir):
+    (notes_dir / "secrets.md").write_text(
+        NOTE.replace("id: npcs", "id: secrets").replace(
+            "---\nLilith", "audience: gm\n---\nLilith"
+        ),
+        encoding="utf-8",
+    )
+    client = _use(monkeypatch, _FakeClient(_response("x")))
+    claude.ask_lore("q", note_dirs=[notes_dir])
+    assert "secrets" not in client.calls[0]["system"][1]["text"]
+    claude.ask_lore("q", note_dirs=[notes_dir], include_gm=True)
+    assert "secrets" in client.calls[1]["system"][1]["text"]
+
+
+def test_lore_is_not_exposed_to_discord():
+    """The Lore Q&A is dashboard-only: no bot code may reach ask_lore."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    for path in [root / "main.py", *(root / "src" / "bot").glob("*.py")]:
+        assert "ask_lore" not in path.read_text(encoding="utf-8"), path

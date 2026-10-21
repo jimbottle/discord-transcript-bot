@@ -194,8 +194,17 @@
 }
 
 .qa-a {
-    white-space: pre-wrap;
     word-break: break-word;
+}
+
+.qa-a p,
+.qa-a ul,
+.qa-a ol {
+    margin: 0 0 0.45rem;
+}
+
+.qa-a li {
+    margin-bottom: 0.15rem;
 }
 
 .qa-err {
@@ -212,8 +221,26 @@
     opacity: 0.8;
 }
 
+.inline-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--pico-muted-color);
+}
+
+.inline-check input {
+    margin: 0;
+}
+
+.lore-notes ul {
+    margin-top: 0.5rem;
+}
+
 /* Questions history page */
 .history-filters {
+    margin-bottom: 1rem;
     display: flex;
     flex-wrap: wrap;
     gap: 0.5rem;

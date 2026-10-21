@@ -1025,3 +1025,150 @@ def test_questions_data_filters_by_session(client):
 
 def test_questions_link_in_nav(client):
     assert b'href="/questions"' in client.get("/live").data
+
+
+# ── Lore page (dashboard-only campaign Q&A) ──────────────────────────────
+
+
+@pytest.fixture
+def lore_library(tmp_path, monkeypatch):
+    libdir = tmp_path / "lib"
+    notes = libdir / "campaigns" / "rtnc" / "notes"
+    notes.mkdir(parents=True)
+    (libdir / "library.yml").write_text(
+        "games: {cyberpunk-red: {name: Cyberpunk RED}}\n"
+        "groups: {noah-gm: {name: Noah's group, gm: Noah, discord_guilds: [111],"
+        " active_campaign: rtnc}}\n"
+        "campaigns: {rtnc: {name: Return to Night City, group: noah-gm,"
+        " game: cyberpunk-red}, empty: {name: Empty, group: noah-gm}}\n",
+        encoding="utf-8",
+    )
+    (notes / "npcs.md").write_text(
+        "---\nid: npcs\ntitle: Named NPCs\nsummary: Who is who.\n---\nKane runs Little Europe.\n"
+    )
+    (notes / "gm-secrets.md").write_text(
+        "---\nid: gm-secrets\ntitle: Secrets\nsummary: Spoilers.\naudience: gm\n---\nTaka.\n"
+    )
+    monkeypatch.setenv("LIBRARY_DIR", str(libdir))
+    return libdir
+
+
+def test_lore_page_defaults_to_the_active_campaign_and_lists_notes(
+    client, lore_library
+):
+    body = client.get("/lore").get_data(as_text=True)
+    assert "Ask about Return to Night City" in body
+    assert 'data-campaign="rtnc"' in body
+    assert "Named NPCs" in body and "GM only" in body
+
+
+def test_lore_ask_answers_from_notes_and_records_history(
+    client, lore_library, ask_configured, monkeypatch
+):
+    from src import question_log
+
+    seen = {}
+
+    def ask_lore(question, header="", note_dirs=(), include_gm=False):
+        seen.update(header=header, dirs=list(note_dirs), include_gm=include_gm)
+        return web_app.claude.AskResult(
+            answer="A fixer, choom.", model="m", notes_used=["npcs"]
+        )
+
+    monkeypatch.setattr(web_app.claude, "ask_lore", ask_lore)
+    r = client.post(
+        "/lore/ask", json={"question": "who is kane?", "campaign": "rtnc"}, headers=_XHR
+    )
+    assert r.status_code == 200 and r.get_json()["answer"] == "A fixer, choom."
+    assert seen["header"].startswith(
+        "CAMPAIGN: Game: Cyberpunk RED · Campaign: Return to Night City"
+    )
+    assert "\nSTYLE: " in seen["header"]
+    assert seen["include_gm"] is False
+    (e,) = question_log.read()
+    assert (e["source"], e["campaign"], e["game"], e["include_gm"]) == (
+        "dashboard-lore",
+        "rtnc",
+        "cyberpunk-red",
+        False,
+    )
+    assert e["notes_used"] == ["npcs"]
+
+
+def test_lore_ask_passes_the_gm_toggle(
+    client, lore_library, ask_configured, monkeypatch
+):
+    seen = {}
+
+    def ask_lore(question, **kw):
+        seen.update(kw)
+        return web_app.claude.AskResult(answer="x", model="m")
+
+    monkeypatch.setattr(web_app.claude, "ask_lore", ask_lore)
+    client.post(
+        "/lore/ask",
+        json={"question": "q", "campaign": "rtnc", "include_gm": True},
+        headers=_XHR,
+    )
+    assert seen["include_gm"] is True
+    client.post(
+        "/lore/ask",
+        json={"question": "q", "campaign": "rtnc", "include_gm": "yes"},
+        headers=_XHR,
+    )
+    assert seen["include_gm"] is False  # only a real true opts in
+
+
+def test_lore_ask_rejects_bad_input(client, lore_library, ask_configured):
+    assert (
+        client.post("/lore/ask", json={"question": "q", "campaign": "rtnc"}).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            "/lore/ask", json={"question": " ", "campaign": "rtnc"}, headers=_XHR
+        ).status_code
+        == 400
+    )
+    assert (
+        client.post(
+            "/lore/ask", json={"question": "q", "campaign": "nope"}, headers=_XHR
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            "/lore/ask", json={"question": "q", "campaign": ["rtnc"]}, headers=_XHR
+        ).status_code
+        == 404
+    )
+
+
+def test_lore_ask_without_notes_is_409_and_rejected(
+    client, lore_library, ask_configured
+):
+    from src import question_log
+
+    r = client.post(
+        "/lore/ask", json={"question": "q", "campaign": "empty"}, headers=_XHR
+    )
+    assert r.status_code == 409
+    assert question_log.read()[0]["status"] == "rejected"
+
+
+def test_lore_in_nav(client):
+    assert b'href="/lore"' in client.get("/live").data
+
+
+def test_questions_page_renders_answer_markdown(client):
+    from src import question_log
+
+    question_log.record(
+        source="discord",
+        question="q",
+        status="answered",
+        answer="**Kane** runs it.\n- a\n- <b>b</b>",
+    )
+    body = client.get("/questions").get_data(as_text=True)
+    assert "<strong>Kane</strong> runs it." in body
+    assert "<li>a</li>" in body and "&lt;b&gt;b&lt;/b&gt;" in body

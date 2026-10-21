@@ -31,7 +31,7 @@ ANSWERED = "answered"  # the model answered
 FAILED = "failed"  # the API call failed or the model gave no usable answer
 REJECTED = "rejected"  # never sent: no transcript yet, no API key, ...
 
-SOURCES = ("discord", "discord-public", "dashboard")
+SOURCES = ("discord", "discord-public", "dashboard", "dashboard-lore")
 
 
 def history_file() -> Path:
@@ -57,6 +57,18 @@ def _session_fields(transcript_path) -> dict:
     }
 
 
+def _campaign_fields(campaign_id: str) -> dict:
+    """Tags for a question about a campaign rather than a recording."""
+    from src import library
+
+    c = library.load().campaigns.get(campaign_id)
+    return {
+        "campaign": campaign_id,
+        "group": c.group if c else None,
+        "game": c.game if c else None,
+    }
+
+
 def record(
     *,
     source: str,
@@ -70,6 +82,8 @@ def record(
     guild_id=None,
     transcript_path=None,
     latency_s: Optional[float] = None,
+    campaign: Optional[str] = None,
+    include_gm: Optional[bool] = None,
 ) -> Optional[dict]:
     """Append one question to the history. Returns the entry, or None if it
     could not be written (logged, never raised)."""
@@ -95,8 +109,12 @@ def record(
         }
         try:
             entry.update(_session_fields(transcript_path))
+            if campaign and not entry.get("campaign"):
+                entry.update(_campaign_fields(campaign))
         except Exception as e:  # noqa: BLE001 - tags are best-effort
             logger.warning("question log: could not read session tags: %s", e)
+        if include_gm is not None:
+            entry["include_gm"] = bool(include_gm)
         path = history_file()
         path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(entry, ensure_ascii=False) + "\n"

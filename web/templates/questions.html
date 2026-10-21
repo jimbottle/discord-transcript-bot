@@ -3,7 +3,7 @@
 {% block content %}
 <hgroup>
     <h1>Questions</h1>
-    <p>Every question asked through Discord <code>/ask</code>, <code>/ask-public</code> and this dashboard,
+    <p>Every question asked through Discord <code>/ask</code>, <code>/ask-public</code>, this dashboard and the Lore page,
        newest first. {{ entries|length }} shown of {{ total }}.</p>
 </hgroup>
 
@@ -41,12 +41,12 @@
     <article class="qa-entry status-{{ e.status }}">
         <header class="qa-meta">
             {{ e.ts.replace('T', ' ') }} · {{ e.source }}{% if e.asker %} · {{ e.asker }}{% endif %}
-            {% if e.campaign %} · {{ campaign_name(e.campaign) }} · session {{ e.session_day }}{% elif e.files %} · untagged {{ e.files[-1] }}{% endif %}
+            {% if e.campaign and e.session_day %} · {{ campaign_name(e.campaign) }} · session {{ e.session_day }}{% elif e.campaign %} · {{ campaign_name(e.campaign) }}{% if e.include_gm %} · with GM notes{% endif %}{% elif e.files %} · untagged {{ e.files[-1] }}{% endif %}
             · <span class="qa-status">{{ e.status }}</span>
         </header>
         <div class="qa-q">{{ e.question }}</div>
         {% if e.answer %}
-        <div class="qa-a">{{ e.answer }}</div>
+        <div class="qa-a">{{ e.answer|answer_md }}</div>
         {% endif %}
         {% if e.error %}
         <div class="qa-err">{{ e.error }}</div>

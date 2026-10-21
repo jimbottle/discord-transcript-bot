@@ -234,6 +234,62 @@ def ask(transcript: str, question: str, *, header: str = "", note_dirs=()) -> As
     request = build_request(
         transcript, question, campaign.index_text(notes), header=header
     )
+    return _run(request, notes)
+
+
+LORE_SYSTEM_PROMPT = (
+    "You answer questions about a tabletop RPG campaign for its players and "
+    "GM, using the campaign's reference notes. The CAMPAIGN line names the "
+    "game, campaign and group; follow its STYLE line if there is one. Read "
+    "the notes you need with the read_campaign_notes tool (request every "
+    "relevant note in one call) and answer only from them. If the notes "
+    "don't cover the question, say so plainly rather than inventing "
+    "campaign facts; you may add general knowledge of the game's published "
+    "rules or setting if you label it as such. Be concise and direct."
+)
+NO_NOTES_MSG = (
+    "This campaign has no reference notes yet, so there is nothing to answer from."
+)
+
+
+def build_lore_request(question: str, index: str, header: str = "") -> dict:
+    """The ``messages.create`` arguments for a notes-only (Lore page)
+    question. No transcript: the header and the note index are the whole
+    cached context, and the tool is the only way to the note bodies."""
+    return {
+        "model": model(),
+        "max_tokens": MAX_ANSWER_TOKENS,
+        "system": [
+            {"type": "text", "text": LORE_SYSTEM_PROMPT},
+            {
+                "type": "text",
+                "text": (header + "\n\n" if header else "") + index,
+                "cache_control": {"type": "ephemeral"},
+            },
+        ],
+        "messages": [{"role": "user", "content": question}],
+        "output_config": {"effort": effort()},
+        "tools": [campaign.TOOL],
+        "tool_choice": {"type": "auto"},
+    }
+
+
+def ask_lore(
+    question: str, *, header: str = "", note_dirs=(), include_gm: bool = False
+) -> AskResult:
+    """Answer a campaign question from reference notes alone (dashboard
+    Lore page; deliberately not wired to any Discord command). Blocking.
+    ``include_gm`` admits ``audience: gm`` notes for this one question."""
+    if not configured():
+        raise AskFailed(NO_KEY_MSG)
+    notes = campaign.load_notes(note_dirs, include_gm=include_gm)
+    if not notes:
+        raise AskFailed(NO_NOTES_MSG)
+    return _run(build_lore_request(question, campaign.index_text(notes), header), notes)
+
+
+def _run(request: dict, notes: list) -> AskResult:
+    """The call/tool loop shared by :func:`ask` and :func:`ask_lore`."""
     totals = {"input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 0}
     used: list = []
     rounds = 0

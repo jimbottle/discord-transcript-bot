@@ -238,3 +238,22 @@ def ask_context(transcript_path, lib=None):
     header = header_text(lib, meta, len(files))
     dirs = lib.note_dirs(game=meta.game, group=meta.group, campaign=meta.campaign)
     return text, header, dirs, files
+
+
+def campaign_header(lib, campaign_id: str) -> str:
+    """CAMPAIGN line (+ STYLE) for a notes-only question; '' if unknown."""
+    c = lib.campaigns.get(campaign_id)
+    if c is None:
+        return ""
+    group = lib.groups.get(c.group) if c.group else None
+    bits = []
+    if c.game:
+        bits.append(f"Game: {lib.name('game', c.game)}")
+    bits.append(f"Campaign: {c.name}")
+    if group:
+        bits.append(f"Group: {group.name}" + (f" (GM: {group.gm})" if group.gm else ""))
+    line = "CAMPAIGN: " + " · ".join(bits)
+    game = lib.games.get(c.game) if c.game else None
+    if game and game.voice:
+        line += "\nSTYLE: " + game.voice
+    return line

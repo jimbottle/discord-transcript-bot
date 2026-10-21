@@ -61,6 +61,8 @@ Required in `.env` (a derived copy; 1Password is the source of truth for the sec
 
 **Question history (discord-transcript-bot-jmj).** Every `/ask`, `/ask-public` and dashboard question is appended by `src/question_log.py` to `history/questions.jsonl` (gitignored; answers can quote GM notes): source, asker, question, status (`answered`/`failed`/`rejected`), full answer or error, model, tokens, rounds, notes used, latency and the session tag. Writes take an `flock` (bot and dashboard share the file) and never raise. The dashboard's Questions page filters it by campaign, session, source and outcome, and the ask box shows the session's earlier Q&A. Tests set `QUESTION_LOG_FILE` to a temp file (autouse fixture in `tests/conftest.py`); the Discord recording path has no automated test (no slash-command harness).
 
+**Lore page (dashboard only, discord-transcript-bot-sjc).** `/lore` asks about a campaign from its library notes with no transcript: `claude.ask_lore` (its own system prompt; header from `sessions.campaign_header`; the same `read_campaign_notes` loop via `_run`). A per-question checkbox admits `audience: gm` notes. Questions are recorded with source `dashboard-lore`. **Not exposed to Discord on purpose:** `tests/test_llm_claude.py::test_lore_is_not_exposed_to_discord` fails if `main.py` or `src/bot/` references `ask_lore`. Answers on the dashboard are rendered as a safe Markdown subset (`web/answer_markdown.py` for server pages, `renderMarkdown` in `static/ask.js`; both escape first).
+
 **Answer voice.** Each game in `library.yml` can set `voice:`; Cyberpunk RED and D&D 5e have defaults in `library.DEFAULT_VOICES` (a word or two of flavour, facts kept plain). It reaches the model as a `STYLE:` line under the `SESSION:` header; `voice: ""` turns it off.
 
 There is no local fallback: without wifi there is no Discord voice either, so a local tier only ever covered "Anthropic down while Discord up". This replaced a three-tier OpenRouter → Cerebras → Ollama chain (discord-transcript-bot-gh7); do not reintroduce provider failover here.
@@ -110,7 +112,7 @@ Capture is best-effort by construction: `SessionCapture` swallows its own errors
 | Env var | Used by / purpose | Where it lives today | 1Password item |
 |---|---|---|---|
 | `DISCORD_BOT_TOKEN` | bot login (`src/bot/`, checked by `health.py`) | gitignored `.env`, literal value (migrate) | `dtb-discord` (to create) |
-| `ANTHROPIC_API_KEY` | `/ask` (`src/llm/claude.py`, presence checked by `health.py`) | `op.env` → 1Password (the pattern); a literal `.env` value is a stopgap | `Anthropic - evan.j.ray@gmail.com - Discord Transcript Bot` (vault `Credentials`, id `edgnovygji3let3vmtilywnsae`, field `key`) |
+| `ANTHROPIC_API_KEY` | `/ask` (`src/llm/claude.py`, presence checked by `health.py`) | `op.env` → 1Password (the pattern); a literal `.env` value is a stopgap | `Anthropic - evan.j.ray@gmail.com - Discord Transcript Bot` (vault `Credentials`, id `edgnovygji3let3vmtilywnsae`, field `credential`) |
 | `OPENAI_API_KEY` | transcription only when `TRANSCRIPTION_METHOD=openai` | not set today; when set, same `.env` (migrate) | `dtb-openai` (to create) |
 
 Not secrets, so not in the table: `CAMPAIGN_GM_NOTES`, `LIBRARY_DIR`, `SESSION_DAY_CUTOFF_HOUR`, `DISCORD_CHANNEL_ID`, `PLAYER_MAP_FILE_PATH`, `TRANSCRIPTION_METHOD`, `ASK_MODEL`, `ASK_EFFORT`, `ASR_BACKEND`, `WHISPER_*`, `MLX_WHISPER_MODEL`, `CAPTURE_*`, `BIAS_PROMPT_WITH_ROSTER`, `HF_HOME`, `HF_HUB_CACHE`, `FLASK_DEBUG`.

@@ -73,3 +73,9 @@ Keep notes short and concrete, one topic each, names spelled the way the transcr
 them. Put spoilers in `audience: gm` notes: players use `/ask` too. Published rulebooks stay
 out (copyrighted, large, and the model knows the rules). `make test` parses every local note.
 Edits to notes and `library.yml` apply on the next question; no restart.
+
+## Lore page
+
+The dashboard's **Lore** page answers questions about a campaign from these notes alone, with no
+transcript, for prep between sessions. It is dashboard-only; there is no Discord command. GM-only
+notes are used only when you tick "Include GM-only notes" for that question.

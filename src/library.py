@@ -38,15 +38,15 @@ def library_dir() -> Path:
 # disable per game with ``voice:`` in library.yml (``voice: ""`` turns it off).
 DEFAULT_VOICES = {
     "cyberpunk-red": (
-        "Give answers a light touch of Night City street flavour: at most a word "
-        "or two of Cyberpunk RED slang (choom, eddies, preem, nova, delta) or a "
-        "fixer's-briefing tone. Keep names, times, numbers and facts plain and "
+        "Give answers a light touch of Night City street flavour: now and then a "
+        "single word of Cyberpunk RED slang (choom, eddies, preem, nova, delta) "
+        "or a fixer's-briefing tone, varied, and not in every answer. Keep names, times, numbers and facts plain and "
         "exact, keep the answer as clear and short as it would be without the "
         "flavour, and leave the flavour out when it would feel forced."
     ),
     "dnd-5e": (
-        "Give answers a light touch of tavern-chronicler flavour: at most a "
-        "phrase of fantasy colour. Keep names, times, numbers and facts plain "
+        "Give answers a light touch of tavern-chronicler flavour: now and then a "
+        "phrase of fantasy colour, varied, and not in every answer. Keep names, times, numbers and facts plain "
         "and exact, keep the answer as clear and short as it would be without "
         "the flavour, and leave the flavour out when it would feel forced."
     ),
