@@ -11,6 +11,7 @@ import yaml
 from discord.sinks.errors import RecordingException
 
 from src import library, player_map_store, sessions
+from src.bot import command_errors
 from src.bot.health import HealthCheck
 from src.sinks.whisper_sink import WhisperSink
 
@@ -204,6 +205,11 @@ class VoloBot(discord.Bot):
 
     async def on_application_command(self, ctx):
         self._last_interaction_time = time.time()
+
+    async def on_application_command_error(self, ctx, error):
+        """Any exception a slash command doesn't handle itself: log it and
+        tell the user, instead of leaving Discord's "did not respond"."""
+        await command_errors.report(ctx, error)
 
     async def on_voice_state_update(self, member, before, after):
         """Two jobs. (1) If the BOT itself left a channel (kicked, moved

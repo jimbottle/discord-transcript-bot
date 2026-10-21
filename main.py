@@ -8,6 +8,7 @@ import discord
 import yaml
 from dotenv import load_dotenv
 
+from src.bot import command_errors
 from src.bot.helper import BotHelper
 from src.config.cliargs import CLIArgs
 from src import library, question_log, sessions
@@ -176,9 +177,14 @@ if __name__ == "__main__":
             await ctx.followup.send(
                 "Jacked in. Connected to the voice channel and standing by."
             )
-            await ctx.guild.change_voice_state(
-                channel=author_vc.channel, self_mute=True
-            )
+            # Cosmetic. A failure here must not tear down the connection we
+            # just reported as working (the except below would).
+            try:
+                await ctx.guild.change_voice_state(
+                    channel=author_vc.channel, self_mute=True
+                )
+            except Exception as e:
+                logger.warning(f"/connect: self-mute failed: {e}")
         except Exception as e:
             # Force-leave at the gateway level. The bot appears in the
             # channel as soon as OP 4 is sent (before voice WS connects),
@@ -195,7 +201,10 @@ if __name__ == "__main__":
             except Exception:
                 pass
             bot.guild_to_helper.pop(guild_id, None)
-            await ctx.followup.send(f"Failed to connect to voice: {e}")
+            logger.error(f"/connect failed: {e!r}")
+            await ctx.followup.send(
+                f"Couldn't join voice. {command_errors.user_message(e)}"
+            )
         finally:
             bot._connecting_guilds.discard(guild_id)
 
@@ -426,8 +435,10 @@ if __name__ == "__main__":
             await bot.update_player_map(ctx)
             await ctx.respond("Roster synced. All player handles are up to date.")
         except Exception as e:
-            await ctx.respond(f"Roster sync failed:\n{e}", ephemeral=True)
-            raise e
+            logger.error(f"/update_player_map failed: {e!r}")
+            await ctx.respond(
+                f"Roster sync failed. {command_errors.user_message(e)}", ephemeral=True
+            )
 
     @bot.slash_command(
         name="add_player",
