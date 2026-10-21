@@ -1,0 +1,43 @@
+# docker compose up --build   (see README "Docker")
+#
+# Secrets: start it under 1Password so ANTHROPIC_API_KEY (and, once
+# migrated, DISCORD_BOT_TOKEN) are resolved on the host and passed through:
+#   op run --env-file=op.env -- docker compose up
+services:
+  volo:
+    build: .
+    image: discord-transcript-bot
+    # Files written to the mounted folders belong to you, not root, so the
+    # host install can keep using them. Set DOCKER_UID/DOCKER_GID if your
+    # ids are not 1000 (`id -u`, `id -g`).
+    user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"
+    # Loopback only: the dashboard has no login.
+    ports:
+      - "127.0.0.1:5001:5001"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Listen on the container's network so the port mapping above can
+      # reach it. Safe only together with that 127.0.0.1 mapping: the
+      # dashboard has no login. Never publish it as "5001:5001".
+      DASHBOARD_HOST: 0.0.0.0
+      PLAYER_MAP_FILE_PATH: /app/player_map.yml
+      # Secrets: passed through from the host only when set there (op run),
+      # so an unset one never overrides .env.
+      ANTHROPIC_API_KEY:
+      DISCORD_BOT_TOKEN:
+      OPENAI_API_KEY:
+    volumes:
+      - ./transcripts:/app/transcripts
+      - ./captures:/app/captures
+      - ./history:/app/history
+      - ./library:/app/library
+      - ./.logs:/app/.logs
+      - ./player_map.yml:/app/player_map.yml
+      - models:/models
+    restart: unless-stopped
+
+volumes:
+  # Whisper weights (~3 GB), downloaded on first start.
+  models:

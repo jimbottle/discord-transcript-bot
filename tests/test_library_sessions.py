@@ -373,3 +373,21 @@ def test_retag_rejects_unknown_ids(lib, tmp_path):
         with pytest.raises(sessions.TagError):
             sessions.retag(a, lib, **kw)
     assert sessions.read_meta(a).campaign == "return-to-night-city"  # untouched
+
+
+def test_latest_for_guild_picks_the_newest_tagged_recording(lib, tmp_path):
+    """/generate_pdf finds the last session after /stop or a restart (fwv)."""
+    _rec(
+        tmp_path, "2026-10-13_19-00-00", "[19:01:00] A (B) [1]: x\n", lib, guild_id=111
+    )
+    newest = _rec(
+        tmp_path, "2026-10-20_20-53-37", "[20:54:00] A (B) [1]: y\n", lib, guild_id=111
+    )
+    _rec(
+        tmp_path, "2026-10-21_19-00-00", "[19:01:00] C (D) [2]: z\n", lib, guild_id=222
+    )
+    (tmp_path / "2026-10-22_19-00-00.txt").write_text("untagged\n")
+    assert sessions.latest_for_guild(111, tmp_path) == newest
+    assert sessions.latest_for_guild(333, tmp_path) is None
+    assert sessions.latest_for_guild(None, tmp_path) is None
+    assert sessions.latest_for_guild(111, tmp_path / "missing") is None

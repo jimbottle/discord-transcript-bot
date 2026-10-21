@@ -69,7 +69,9 @@ app.jinja_env.filters["when"] = lambda v: timefmt.when(v)
 # name, and that is what the Host check and the Origin check below reject.
 # Both compare against these fixed values, never against the request's own
 # Host header, which is attacker-controlled in exactly that scenario.
-DASHBOARD_HOST = "127.0.0.1"
+# compose.yaml sets 0.0.0.0, next to its 127.0.0.1-only port mapping; the
+# image itself binds loopback. The Host/Origin check below still applies.
+DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "127.0.0.1")
 DASHBOARD_PORT = 5001
 _LOOPBACK_NAMES = ("127.0.0.1", "localhost", "[::1]")
 
@@ -620,4 +622,13 @@ def roster_delete():
 
 if __name__ == "__main__":
     debug = os.getenv("FLASK_DEBUG", "").lower() in ("1", "true", "yes")
+    if DASHBOARD_HOST not in ("127.0.0.1", "localhost", "::1"):
+        # The Host/Origin check stops browser DNS rebinding, not a client
+        # that sets its own Host header: whatever can reach this address
+        # can drive the dashboard.
+        app.logger.warning(
+            "Dashboard listening on %s with no login. Only expose it behind "
+            "a loopback-only port mapping (compose.yaml).",
+            DASHBOARD_HOST,
+        )
     app.run(host=DASHBOARD_HOST, port=DASHBOARD_PORT, debug=debug)

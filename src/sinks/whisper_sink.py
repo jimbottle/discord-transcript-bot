@@ -31,6 +31,27 @@ WHISPER_LANGUAGE = "en"
 WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "5"))
 WHISPER_BEST_OF = int(os.getenv("WHISPER_BEST_OF", "5"))
 
+
+def transcribe_workers(raw=None) -> int:
+    """How many transcriptions run at once (discord-transcript-bot-4uk).
+
+    Measured 2026-10-21 on 96 clips of the 2026-10-20 session
+    (scripts/bench_concurrency.py, MLX large-v3, M-series GPU), two runs:
+    1.45-1.65 clips/s at every count from 1 to 8, within the 9% spread
+    between two 1-worker runs; texts identical and no backend errors. So
+    concurrent MLX decoding is safe but the GPU serialises it, and more
+    workers only add threads and memory. 2 keeps a slow clip from holding
+    up the next. On faster-whisper (CPU) each call already uses every core.
+    Invalid values fall back to 2.
+    """
+    raw = os.getenv("TRANSCRIBE_WORKERS", "2") if raw is None else raw
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return 2
+    return n if n >= 1 else 2
+
+
 # WHISPER_BATCH_SIZE (BatchedInferencePipeline throughput, discord-transcript-bot-ob3)
 # is a faster-whisper-only knob and is read in src/asr/selection.py where that
 # backend is constructed.
@@ -157,7 +178,6 @@ class WhisperSink(Sink):
         max_speakers=-1,
     ):
         self.queue = transcript_queue
-        self.transcription_output_queue = asyncio.Queue()
         self.loop = loop
 
         if filters is None:
@@ -178,7 +198,7 @@ class WhisperSink(Sink):
         self.running = True
         self.speakers: List[Speaker] = []
         self.voice_queue = Queue()
-        self.executor = ThreadPoolExecutor(max_workers=8)  # TODO: Adjust this
+        self.executor = ThreadPoolExecutor(max_workers=transcribe_workers())
         self.player_map = player_map
         # Biased Whisper prompt built once from the roster's proper nouns;
         # player_map is fixed for this sink's lifetime. discord-transcript-bot-cul.
@@ -277,24 +297,36 @@ class WhisperSink(Sink):
         }
 
     def start_voice_thread(self, on_exception=None):
-        def thread_exception_hook(args):
-            logger.debug(
-                f"""Exception in voice thread: {args} Likely disconnected while listening."""
-            )
+        """Start the voice thread. ``on_exception(exc)`` is called, on that
+        thread, if insert_voice dies with an exception.
 
+        This used to assign the process-wide ``threading.excepthook``, so
+        every sink replaced every other's handler (and every unrelated
+        thread's) and nothing ever restored it (discord-transcript-bot-7g8).
+        The handler is now scoped to this sink's own thread.
+        """
         logger.debug(
             f"Starting whisper sink thread for guild {self.vc.channel.guild.id}."
         )
+        self._on_thread_exception = on_exception
         self.voice_thread = threading.Thread(
-            target=self.insert_voice, args=(), daemon=True
+            target=self._voice_thread_main, args=(), daemon=True
         )
-
-        if on_exception:
-            threading.excepthook = on_exception
-        else:
-            threading.excepthook = thread_exception_hook
-
         self.voice_thread.start()
+
+    def _voice_thread_main(self):
+        try:
+            self.insert_voice()
+        except Exception as e:  # noqa: BLE001 - reported, never re-raised
+            logger.exception(f"Voice thread died: {e}")
+            handler = getattr(self, "_on_thread_exception", None)
+            if handler is not None:
+                try:
+                    handler(e)
+                except Exception as handler_err:  # noqa: BLE001
+                    logger.error(
+                        f"Voice thread exception handler failed: {handler_err}"
+                    )
 
     # Upper bound for joining the voice thread. It should exit within a
     # couple of seconds of self.running going False (one insert_voice
@@ -595,36 +627,6 @@ class WhisperSink(Sink):
 
         return transcription
 
-    def get_transcriptions(self):
-        """Retrieve all transcriptions from the queue, format them to only include data, begin, and user_id."""
-        transcriptions = []
-        while not self.transcription_queue.empty():
-            log_message = self.transcription_queue.get_nowait()
-
-            # Assuming log_message is a dictionary (or string in JSON format)
-            if isinstance(log_message, str):
-                log_message = json.loads(
-                    log_message
-                )  # Convert from string to dictionary if needed
-
-            # Extract only the desired fields from the log message
-            begin = log_message.get("begin", "Unknown begin")
-            user_id = log_message.get("user_id", "Unknown user")
-            data = log_message.get("data", "")
-
-            # Format the transcription entry with only the relevant fields
-            formatted_entry = (
-                f"Begin: {begin}\n"
-                f"User ID: {user_id}\n"
-                f"Data: {data}\n"
-                "-------------------------\n"
-            )
-
-            # Add the formatted entry to the transcription list
-            transcriptions.append(formatted_entry)
-
-        return transcriptions
-
     # A speaker's buffer is submitted for transcription once they've gone
     # quiet for this long...
     SILENCE_GAP_S = 1.5
@@ -825,8 +827,6 @@ class WhisperSink(Sink):
         transcription_logger = logging.getLogger("transcription")
         # Log the message
         transcription_logger.info(log_message)
-        # Place into queue for processing
-        self.transcription_output_queue.put_nowait(log_message)
 
         # Pair this segment's captured clip with the text the engine produced,
         # as the draft a human corrects into reference data. Deliberately

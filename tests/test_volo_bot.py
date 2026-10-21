@@ -694,3 +694,93 @@ def test_voice_churn_elsewhere_does_not_touch_vstate():
     )
     fake._write_runtime_state.assert_not_called()
     fake._close_and_clean_sink_for_guild.assert_not_called()
+
+
+# ── voice thread recovery (discord-transcript-bot-7g8) ────────────────
+
+
+def _recovery_self(sink, connected=True):
+    fake = SimpleNamespace(
+        VOICE_RESTART_DELAY_S=0,
+        guild_whisper_sinks={1: sink},
+        guild_to_helper={1: object()} if connected else {},
+        guild_is_recording={1: True},
+        start_recording=MagicMock(return_value=True),
+        _voice_recovery={},
+    )
+
+    async def end(ctx):
+        fake.guild_whisper_sinks.pop(1, None)
+        fake.guild_is_recording[1] = False
+
+    fake.end_recording_session = MagicMock(side_effect=end)
+    return fake
+
+
+def _recovery_ctx():
+    sent = []
+
+    async def send(msg):
+        sent.append(msg)
+
+    return SimpleNamespace(guild_id=1, channel=SimpleNamespace(send=send)), sent
+
+
+def test_recover_restarts_and_tells_the_channel():
+    sink = object()
+    fake = _recovery_self(sink)
+    ctx, sent = _recovery_ctx()
+    ok = asyncio.run(VoloBot._recover_voice_thread(fake, ctx, sink, RuntimeError()))
+    assert ok is True
+    fake.end_recording_session.assert_called_once_with(ctx)
+    fake.start_recording.assert_called_once_with(ctx)
+    assert sent and "restarted" in sent[0]
+
+
+def test_recover_reports_a_failed_restart():
+    sink = object()
+    fake = _recovery_self(sink)
+    fake.start_recording.return_value = False
+    ctx, sent = _recovery_ctx()
+    assert asyncio.run(VoloBot._recover_voice_thread(fake, ctx, sink, None)) is False
+    assert "could not restart" in sent[0]
+
+
+def test_recover_ignores_a_sink_that_was_already_replaced():
+    fake = _recovery_self(object())
+    ctx, sent = _recovery_ctx()
+    assert (
+        asyncio.run(VoloBot._recover_voice_thread(fake, ctx, object(), None)) is False
+    )
+    fake.end_recording_session.assert_not_called()
+    assert sent == []
+
+
+def test_recover_does_not_restart_after_a_disconnect():
+    sink = object()
+    fake = _recovery_self(sink, connected=False)
+    ctx, sent = _recovery_ctx()
+    assert asyncio.run(VoloBot._recover_voice_thread(fake, ctx, sink, None)) is False
+    fake.start_recording.assert_not_called()
+
+
+def test_stop_during_the_restart_window_wins():
+    """roborev #6513: a /stop between the recovery's teardown and its
+    restart was answered 'Not recording' and then overridden."""
+    sink = object()
+    fake = _recovery_self(sink)
+    fake.VOICE_RESTART_DELAY_S = 0.05
+    ctx, sent = _recovery_ctx()
+
+    async def scenario():
+        task = asyncio.ensure_future(
+            VoloBot._recover_voice_thread(fake, ctx, sink, None)
+        )
+        await asyncio.sleep(0.01)  # teardown done, now sleeping
+        assert VoloBot.cancel_voice_recovery(fake, 1) is True
+        return await task
+
+    assert asyncio.run(scenario()) is False
+    fake.start_recording.assert_not_called()
+    assert sent == []
+    assert VoloBot.cancel_voice_recovery(fake, 1) is False

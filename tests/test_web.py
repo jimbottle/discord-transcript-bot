@@ -1558,3 +1558,52 @@ def test_stale_bot_state_does_not_block_delete(client, deletable, tmp_path):
 
 def test_live_page_has_no_server_rendered_placeholder(client):
     assert b'id="empty-state"' not in client.get("/live").data
+
+
+def test_dashboard_binds_loopback_unless_told_otherwise(monkeypatch):
+    """The dashboard has no login. Only compose.yaml sets
+    DASHBOARD_HOST=0.0.0.0, together with a host-loopback port mapping; the
+    image itself must not (security review 2026-10-21)."""
+    import importlib
+
+    monkeypatch.delenv("DASHBOARD_HOST", raising=False)
+    assert importlib.reload(web_app).DASHBOARD_HOST == "127.0.0.1"
+    monkeypatch.setenv("DASHBOARD_HOST", "0.0.0.0")
+    assert importlib.reload(web_app).DASHBOARD_HOST == "0.0.0.0"
+    monkeypatch.delenv("DASHBOARD_HOST")
+    importlib.reload(web_app)
+
+
+def test_only_compose_opens_the_dashboard_and_only_on_host_loopback():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "Dockerfile")) as f:
+        dockerfile = f.read()
+    assert "DASHBOARD_HOST=" not in dockerfile
+    with open(os.path.join(root, "compose.yaml")) as f:
+        compose = yaml.safe_load(f)
+    volo = compose["services"]["volo"]
+    assert volo["environment"]["DASHBOARD_HOST"] == "0.0.0.0"
+    assert all(str(p).startswith("127.0.0.1:") for p in volo["ports"])
+
+
+def test_docker_context_excludes_private_material():
+    """The repo is public and the image may be pushed: secrets, GM notes,
+    recordings, audio and history must never be copied into it."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, ".dockerignore")) as f:
+        rules = {ln.strip() for ln in f if ln.strip() and not ln.startswith("#")}
+    for must in (
+        ".env",
+        "op.env",
+        "transcripts",
+        "captures",
+        "history",
+        "library/*",
+        "*.meta.json",
+        "player_map.yml",
+        ".beads",
+        ".beads-credential-key",
+        "*.db",
+        ".git",
+    ):
+        assert must in rules, must

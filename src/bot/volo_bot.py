@@ -4,12 +4,14 @@ import logging
 import os
 import time
 from collections import defaultdict
+from typing import Optional
 
 import discord
 import yaml
 from discord.sinks.errors import RecordingException
 
 from src import library, player_map_store, sessions
+from src.bot import command_errors
 from src.bot.health import HealthCheck
 from src.sinks.whisper_sink import WhisperSink
 
@@ -80,6 +82,12 @@ class VoloBot(discord.Bot):
         self.guild_to_helper = {}
         self.guild_is_recording = {}
         self.guild_whisper_sinks = {}
+        # guild_id -> the .txt of the guild's latest recording; outlives the
+        # sink so /generate_pdf works after /stop and /disconnect.
+        self.guild_last_session_file = {}
+        # guild_id -> token of a pending voice-thread restart; /stop and
+        # /disconnect cancel it (cancel_voice_recovery).
+        self._voice_recovery = {}
         self.guild_whisper_message_tasks = {}
         self.player_map = {}
         self._is_ready = False
@@ -200,6 +208,11 @@ class VoloBot(discord.Bot):
 
     async def on_application_command(self, ctx):
         self._last_interaction_time = time.time()
+
+    async def on_application_command_error(self, ctx, error):
+        """Any exception a slash command doesn't handle itself: log it and
+        tell the user, instead of leaving Discord's "did not respond"."""
+        await command_errors.report(ctx, error)
 
     async def on_voice_state_update(self, member, before, after):
         """Two jobs. (1) If the BOT itself left a channel (kicked, moved
@@ -465,6 +478,7 @@ class VoloBot(discord.Bot):
         )
 
         self._tag_session(ctx, whisper_sink)
+        self.guild_last_session_file[ctx.guild_id] = whisper_sink.session_file
 
         # Registered before vc.start_recording so a failure there (e.g.
         # RecordingException) leaves a sink start_recording can find and
@@ -475,15 +489,62 @@ class VoloBot(discord.Bot):
         )
 
         def on_thread_exception(e):
-            logger.warning(
-                f"Whisper sink thread exception for guild {ctx.guild_id}. Retry in 5 seconds...\n{e}"
+            # Runs on the dying voice thread. Everything else (the teardown,
+            # which joins this very thread, and the restart) belongs on the
+            # loop, and only run_coroutine_threadsafe may hand it there.
+            asyncio.run_coroutine_threadsafe(
+                self._recover_voice_thread(ctx, whisper_sink, e), self.loop
             )
-            self._close_and_clean_sink_for_guild(ctx.guild_id)
-
-            # retry in 5 seconds
-            self.loop.call_later(5, self.start_recording, ctx)
 
         whisper_sink.start_voice_thread(on_exception=on_thread_exception)
+
+    VOICE_RESTART_DELAY_S = 5
+
+    def cancel_voice_recovery(self, guild_id) -> bool:
+        """Cancel a pending voice-thread restart; True if there was one.
+        Between its teardown and its restart the guild looks not-recording,
+        so without this a /stop there was answered "Not recording" and then
+        overridden 5s later (roborev #6513)."""
+        return self._voice_recovery.pop(guild_id, None) is not None
+
+    async def _recover_voice_thread(self, ctx, sink, error) -> bool:
+        """The voice thread died: end that recording, wait, start a new one,
+        and say so in the channel either way. Returns whether recording
+        restarted. Does nothing if the recording was already stopped or
+        replaced, since then nobody is waiting on this sink."""
+        guild_id = ctx.guild_id
+        if self.guild_whisper_sinks.get(guild_id) is not sink:
+            return False
+        logger.warning(
+            f"Voice thread for guild {guild_id} died ({error}); restarting "
+            f"the recording in {self.VOICE_RESTART_DELAY_S}s."
+        )
+        token = object()
+        self._voice_recovery[guild_id] = token
+        try:
+            await self.end_recording_session(ctx)
+        except Exception as e:  # noqa: BLE001 - still try to restart
+            logger.error(f"Teardown after a voice thread failure failed: {e}")
+        await asyncio.sleep(self.VOICE_RESTART_DELAY_S)
+        # /stop, /disconnect or a new /scribe in the meantime: leave it alone.
+        if self._voice_recovery.get(guild_id) is not token:
+            return False
+        self._voice_recovery.pop(guild_id, None)
+        if guild_id not in self.guild_to_helper or self.guild_is_recording.get(
+            guild_id
+        ):
+            return False
+        ok = self.start_recording(ctx)
+        notice = (
+            "Transcription hit an error and restarted. A few seconds may be missing."
+            if ok
+            else "Transcription hit an error and could not restart. Run `/scribe` again."
+        )
+        try:
+            await ctx.channel.send(notice)
+        except Exception as e:  # noqa: BLE001 - the restart matters more
+            logger.warning(f"Could not post the restart notice: {e}")
+        return ok
 
     def _tag_session(self, ctx, whisper_sink) -> None:
         """Write the recording's group/game/campaign/session sidecar
@@ -587,19 +648,27 @@ class VoloBot(discord.Bot):
             logger.error(f"end_recording_session: cleanup_sink failed: {e}")
         self._write_runtime_state()  # recording stopped (still connected)
 
-    async def get_transcription(self, ctx: discord.context.ApplicationContext):
-        # Get the transcription queue
-        if not (self.guild_whisper_sinks.get(ctx.guild_id)):
-            return
-        whisper_sink = self.guild_whisper_sinks[ctx.guild_id]
-        transcriptions = []
-        if whisper_sink is None:
-            return
-
-        transcriptions_queue = whisper_sink.transcription_output_queue
-        while not transcriptions_queue.empty():
-            transcriptions.append(await transcriptions_queue.get())
-        return transcriptions
+    def session_file_for_export(self, guild_id) -> Optional[str]:
+        """The recording /generate_pdf exports for ``guild_id``: the one
+        this process last started there, else (after a restart) the newest
+        tagged with the guild on disk. None when there is none."""
+        path = self.guild_last_session_file.get(guild_id)
+        if path:
+            if os.path.exists(path):
+                return path
+            # The sink creates the .txt on the first line, so a recording
+            # nobody has spoken in yet has only its .meta.json. Keep it: its
+            # session's earlier recordings (a restart mid-game) are joined by
+            # sessions.session_transcript, and a session with no text yet
+            # reads as empty to every caller, rather than as the previous
+            # session (roborev #6511, #6521). With neither file the
+            # recording was deleted: fall back to disk.
+            if sessions.meta_path(path).exists():
+                return path
+        found = sessions.latest_for_guild(
+            guild_id, os.path.join(os.getcwd(), "transcripts")
+        )
+        return str(found) if found else None
 
     async def update_player_map(self, ctx: discord.context.ApplicationContext):
         # Load existing file to preserve entries from other guilds and manual edits

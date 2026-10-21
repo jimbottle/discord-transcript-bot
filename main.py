@@ -1,4 +1,5 @@
 import asyncio
+import io
 import logging
 import os
 import time
@@ -8,6 +9,7 @@ import discord
 import yaml
 from dotenv import load_dotenv
 
+from src.bot import command_errors
 from src.bot.helper import BotHelper
 from src.config.cliargs import CLIArgs
 from src import library, question_log, sessions
@@ -17,6 +19,8 @@ from src.utils.answer import answer_budget, clean_answer, discord_messages
 from src.utils.discord_send import send_followups
 from src.utils.commandline import CommandLine
 from src.utils.pdf_generator import pdf_generator
+from src.transcript_lines import parse_transcript_text
+from src.utils import bot_log, timefmt
 from src.utils.voice import disconnect_targets
 
 load_dotenv()
@@ -26,6 +30,13 @@ PLAYER_MAP_FILE_PATH = os.getenv("PLAYER_MAP_FILE_PATH")
 # resolved there so main.py and src/bot/health.py cannot disagree.
 # Discord hard-rejects messages longer than this many characters.
 DISCORD_MESSAGE_LIMIT = 2000
+# Discord's upload limit for a server without boosts (10 MB).
+TRANSCRIPT_ATTACHMENT_LIMIT = 10 * 1024 * 1024
+# /recap is /ask with this question (discord-transcript-bot-csk).
+RECAP_QUESTION = (
+    "Recap this session for the players: the main events in order, the "
+    "decisions the party made, the NPCs they met, and the threads left open."
+)
 
 logger = logging.getLogger()  # root logger
 
@@ -57,6 +68,14 @@ def configure_logging():
     else:
         logger.setLevel(logging.INFO)
         logging.basicConfig(level=logging.INFO, format=log_format, datefmt=date_format)
+
+    # The bot's own log, kept on disk so a problem in a session can be
+    # diagnosed after the terminal is gone (discord-transcript-bot-309).
+    bot_log.install(
+        level=logging.DEBUG if CLIArgs.verbose else logging.INFO,
+        fmt=log_format,
+        datefmt=date_format,
+    )
 
     # Set up the transcription logger
     transcription_logger = logging.getLogger("transcription")
@@ -175,9 +194,14 @@ if __name__ == "__main__":
             await ctx.followup.send(
                 "Jacked in. Connected to the voice channel and standing by."
             )
-            await ctx.guild.change_voice_state(
-                channel=author_vc.channel, self_mute=True
-            )
+            # Cosmetic. A failure here must not tear down the connection we
+            # just reported as working (the except below would).
+            try:
+                await ctx.guild.change_voice_state(
+                    channel=author_vc.channel, self_mute=True
+                )
+            except Exception as e:
+                logger.warning(f"/connect: self-mute failed: {e}")
         except Exception as e:
             # Force-leave at the gateway level. The bot appears in the
             # channel as soon as OP 4 is sent (before voice WS connects),
@@ -194,7 +218,10 @@ if __name__ == "__main__":
             except Exception:
                 pass
             bot.guild_to_helper.pop(guild_id, None)
-            await ctx.followup.send(f"Failed to connect to voice: {e}")
+            logger.exception("/connect failed")
+            await ctx.followup.send(
+                f"Couldn't join voice. {command_errors.user_message(e)}"
+            )
         finally:
             bot._connecting_guilds.discard(guild_id)
 
@@ -255,6 +282,12 @@ if __name__ == "__main__":
             return
 
         if not bot.guild_is_recording.get(guild_id, False):
+            if bot.cancel_voice_recovery(guild_id):
+                await ctx.respond(
+                    "Recording stopped. (It was restarting after an error; "
+                    "that restart is cancelled.)"
+                )
+                return
             await ctx.respond(
                 "Not recording right now. Nothing to kill.", ephemeral=True
             )
@@ -271,15 +304,6 @@ if __name__ == "__main__":
         _sink = bot.guild_whisper_sinks.get(guild_id)
         capture = getattr(_sink, "capture", None)
         teardown_ok = True
-        # Independent try blocks: a get_transcription failure must NOT
-        # skip the actual teardown (that would leave guild_is_recording
-        # stuck True and leak the sink — the exact class this path
-        # exists to prevent).
-        try:
-            await bot.get_transcription(ctx)
-        except Exception as e:
-            logger.error(f"/stop get_transcription error: {e}")
-            teardown_ok = False
         try:
             # end_recording_session keeps vc.stop_recording() on the
             # loop thread (thread-safe after-callback scheduling; carries
@@ -299,7 +323,9 @@ if __name__ == "__main__":
         capture_line = f"\nCaptured audio: {capture.summary()}" if capture else ""
         if teardown_ok:
             await ctx.followup.send(
-                "Recording stopped. Data saved. Standing by for the next run."
+                "Recording stopped. Data saved. Standing by for the next run.\n"
+                "`/recap` summarises the session, `/transcript` sends the full "
+                "text and `/generate_pdf` a PDF."
                 f"{capture_line}"
             )
         else:
@@ -335,15 +361,10 @@ if __name__ == "__main__":
 
         # Archive/teardown any active recording BEFORE disconnecting so
         # the transcript is flushed and guild_is_recording is cleared.
-        # Independent try blocks so a get_transcription failure can't
-        # skip the actual teardown, and neither can skip the disconnect.
+        bot.cancel_voice_recovery(guild_id)
+        # Guarded so a teardown failure can't skip the disconnect.
         teardown_ok = True
         if bot.guild_is_recording.get(guild_id, False):
-            try:
-                await bot.get_transcription(ctx)
-            except Exception as e:
-                logger.error(f"/disconnect get_transcription error: {e}")
-                teardown_ok = False
             try:
                 # Keeps vc.stop_recording() on the loop thread (safe
                 # after-callback scheduling; bounded ~ms/≤5s router
@@ -390,32 +411,40 @@ if __name__ == "__main__":
         name="generate_pdf", description="Export the transcript as a PDF."
     )
     async def generate_pdf(ctx: discord.context.ApplicationContext):
-        guild_id = ctx.guild_id
-        helper = bot.guild_to_helper.get(guild_id, None)
-        if not helper:
-            await ctx.respond("Not connected. Nothing to export.", ephemeral=True)
-            return
-        transcription = await bot.get_transcription(ctx)
-        if not transcription:
+        # Built from the session's transcript files, not from the sink, so it
+        # works mid-session, after /stop or /disconnect, and after a restart,
+        # and covers every recording of the session (fwv).
+        path = bot.session_file_for_export(ctx.guild_id)
+        if not path:
             await ctx.respond(
                 "No transcript data yet. Start a recording first.", ephemeral=True
             )
             return
-        pdf_file_path = await pdf_generator(transcription)
-        # Send the PDF as an attachment
-        if os.path.exists(pdf_file_path):
-            try:
-                with open(pdf_file_path, "rb") as f:
-                    discord_file = discord.File(
-                        f, filename=f"session_transcription.pdf"
-                    )
-                    await ctx.respond(
-                        "Dossier compiled. Here's your transcript.", file=discord_file
-                    )
-            finally:
-                os.remove(pdf_file_path)
-        else:
-            await ctx.respond("PDF generation failed. Check the logs.", ephemeral=True)
+        text, _meta, _files = sessions.session_transcript(path)
+        entries = parse_transcript_text(text)
+        if not any(e.get("time") for e in entries):
+            await ctx.respond(
+                "No transcript data yet. Start a recording first.", ephemeral=True
+            )
+            return
+        # A long session takes reportlab more than Discord's 3s to lay out.
+        await ctx.defer()
+        try:
+            pdf_file_path = await pdf_generator(entries)
+        except Exception as e:
+            logger.error(f"/generate_pdf failed: {e}")
+            await ctx.followup.send("PDF generation failed. Check the logs.")
+            return
+        try:
+            with open(pdf_file_path, "rb") as f:
+                discord_file = discord.File(
+                    f, filename=f"{os.path.splitext(os.path.basename(path))[0]}.pdf"
+                )
+                await ctx.followup.send(
+                    "Dossier compiled. Here's your transcript.", file=discord_file
+                )
+        finally:
+            os.remove(pdf_file_path)
 
     @bot.slash_command(
         name="update_player_map",
@@ -432,8 +461,10 @@ if __name__ == "__main__":
             await bot.update_player_map(ctx)
             await ctx.respond("Roster synced. All player handles are up to date.")
         except Exception as e:
-            await ctx.respond(f"Roster sync failed:\n{e}", ephemeral=True)
-            raise e
+            logger.exception("/update_player_map failed")
+            await ctx.respond(
+                f"Roster sync failed. {command_errors.user_message(e)}", ephemeral=True
+            )
 
     @bot.slash_command(
         name="add_player",
@@ -512,10 +543,14 @@ if __name__ == "__main__":
         else:
             # DM context: find guilds with active transcripts where the user is a member
             active_guilds = []
-            for gid, sink in bot.guild_whisper_sinks.items():
-                if not (
-                    hasattr(sink, "session_file") and os.path.exists(sink.session_file)
-                ):
+            # Every guild the bot is in, not just ones recorded in this
+            # process: after a restart the session is found on disk
+            # (roborev #6515).
+            for gid in {g.id for g in bot.guilds}:
+                # A just-started session nobody has spoken in has a file
+                # but no text: not a candidate (roborev #6523).
+                path = bot.session_file_for_export(gid)
+                if not path or not sessions.session_transcript(path)[0].strip():
                     continue
                 guild = bot.get_guild(gid)
                 if not guild:
@@ -571,22 +606,19 @@ if __name__ == "__main__":
                 )
                 return
 
-        whisper_sink = bot.guild_whisper_sinks.get(guild_id, None)
-
         # The whole session, not just this recording: after a bot restart the
         # earlier recordings of the same campaign night are joined in front
         # (src/sessions.py). Plus the session's header and note folders.
+        # session_file_for_export, not the live sink, so /ask and /recap
+        # still work after /stop, /disconnect or a restart (csk, as fwv did
+        # for /generate_pdf).
+        session_file = bot.session_file_for_export(guild_id)
         transcript_text, header, note_dirs = None, "", []
-        if (
-            whisper_sink
-            and hasattr(whisper_sink, "session_file")
-            and os.path.exists(whisper_sink.session_file)
-        ):
+        if session_file:
             transcript_text, header, note_dirs, _files = sessions.ask_context(
-                whisper_sink.session_file
+                session_file
             )
 
-        session_file = getattr(whisper_sink, "session_file", None)
         source = "discord-public" if public else "discord"
 
         def _log(status, started=None, **kw):
@@ -734,6 +766,59 @@ if __name__ == "__main__":
         await _run_ask(ctx, question, server, public=True)
 
     @bot.slash_command(
+        name="recap",
+        description="Summarise the current or most recent session.",
+        contexts={
+            discord.InteractionContextType.guild,
+            discord.InteractionContextType.bot_dm,
+        },
+    )
+    async def recap(
+        ctx: discord.context.ApplicationContext,
+        public: discord.Option(
+            bool,
+            description="Post the recap to the whole channel (default: only you)",
+            required=False,
+            default=False,
+        ),
+        server: discord.Option(
+            str,
+            description="Server name (only needed in DMs if you share multiple servers)",
+            required=False,
+            default=None,
+        ),
+    ):
+        # Same path as /ask (GM check, history, splitting), fixed question.
+        await _run_ask(ctx, RECAP_QUESTION, server, public=public)
+
+    @bot.slash_command(
+        name="transcript",
+        description="Download the current or most recent session as a text file.",
+    )
+    async def transcript_file(ctx: discord.context.ApplicationContext):
+        path = bot.session_file_for_export(ctx.guild_id)
+        text = sessions.session_transcript(path)[0] if path else ""
+        if not text.strip():
+            await ctx.respond(
+                "No transcript data yet. Start a recording first.", ephemeral=True
+            )
+            return
+        data = timefmt.for_model(text).encode("utf-8")
+        if len(data) > TRANSCRIPT_ATTACHMENT_LIMIT:
+            await ctx.respond(
+                "This session's transcript is too large for a Discord attachment. "
+                "Download it from the dashboard's Transcripts page.",
+                ephemeral=True,
+            )
+            return
+        name = os.path.splitext(os.path.basename(path))[0]
+        await ctx.respond(
+            "Here's the full session transcript.",
+            file=discord.File(io.BytesIO(data), filename=f"{name}.txt"),
+            ephemeral=True,
+        )
+
+    @bot.slash_command(
         name="session",
         description="Show which group, game, campaign and session this recording is tagged with.",
     )
@@ -793,6 +878,12 @@ if __name__ == "__main__":
                 name="/session",
                 value="Show the group, game, campaign and session being recorded.",
                 inline=True,
+            ),
+            discord.EmbedField(
+                name="/recap", value="Summarise the session.", inline=True
+            ),
+            discord.EmbedField(
+                name="/transcript", value="Download the session as text.", inline=True
             ),
             discord.EmbedField(
                 name="/generate_pdf", value="Export transcript as PDF.", inline=True
