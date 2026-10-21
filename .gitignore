@@ -34,3 +34,6 @@ captures/
 # Per-recording session tags (transcripts/ is already ignored; explicit
 # so moving transcripts never leaks them).
 *.meta.json
+
+# Question history (question_log.py): answers can quote GM notes.
+/history/

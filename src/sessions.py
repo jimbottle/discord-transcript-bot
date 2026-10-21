@@ -218,7 +218,11 @@ def header_text(lib, meta: Optional[SessionMeta], recordings: int = 1) -> str:
         bits.append(
             f"{recordings} recordings joined (the bot was restarted mid-session)"
         )
-    return "SESSION: " + " · ".join(bits)
+    line = "SESSION: " + " · ".join(bits)
+    game = lib.games.get(meta.game) if meta.game else None
+    if game and game.voice:
+        line += "\nSTYLE: " + game.voice
+    return line
 
 
 def ask_context(transcript_path, lib=None):

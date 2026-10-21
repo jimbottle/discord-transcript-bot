@@ -43,3 +43,10 @@ def _fast_whisper_model(monkeypatch, request):
     stub.healthcheck.return_value = None
     monkeypatch.setattr(selection, "_backend", stub)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_question_log(monkeypatch, tmp_path):
+    """No test may append to the real history/questions.jsonl: /ask tests
+    in test_web.py go through the route that records every question."""
+    monkeypatch.setenv("QUESTION_LOG_FILE", str(tmp_path / "questions.jsonl"))

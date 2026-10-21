@@ -33,10 +33,31 @@ def library_dir() -> Path:
     return Path(override) if override else DEFAULT_LIBRARY_DIR
 
 
+# A light, game-flavoured voice for /ask answers. Kept to a word or two of
+# colour so answers stay easy to read; facts are never stylised. Override or
+# disable per game with ``voice:`` in library.yml (``voice: ""`` turns it off).
+DEFAULT_VOICES = {
+    "cyberpunk-red": (
+        "Give answers a light touch of Night City street flavour: at most a word "
+        "or two of Cyberpunk RED slang (choom, eddies, preem, nova, delta) or a "
+        "fixer's-briefing tone. Keep names, times, numbers and facts plain and "
+        "exact, keep the answer as clear and short as it would be without the "
+        "flavour, and leave the flavour out when it would feel forced."
+    ),
+    "dnd-5e": (
+        "Give answers a light touch of tavern-chronicler flavour: at most a "
+        "phrase of fantasy colour. Keep names, times, numbers and facts plain "
+        "and exact, keep the answer as clear and short as it would be without "
+        "the flavour, and leave the flavour out when it would feel forced."
+    ),
+}
+
+
 @dataclass
 class Game:
     id: str
     name: str
+    voice: str = ""
 
 
 @dataclass
@@ -165,7 +186,15 @@ def load(root: Optional[Path] = None) -> Library:
         logger.warning("library: %s is not a mapping", path)
         return lib
     lib.games = _load_section(
-        raw, "games", lambda i, b: Game(id=i, name=str(b.get("name") or i))
+        raw,
+        "games",
+        lambda i, b: Game(
+            id=i,
+            name=str(b.get("name") or i),
+            voice=(
+                str(b["voice"]).strip() if "voice" in b else DEFAULT_VOICES.get(i, "")
+            ),
+        ),
     )
     lib.groups = _load_section(
         raw,

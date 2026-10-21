@@ -32,6 +32,10 @@
         }
 
         function addQA(question, result, errorText) {
+            answers.prepend(buildQA(question, result, errorText, true));
+        }
+
+        function buildQA(question, result, errorText, withTime) {
             // textContent only: the question is user input and the answer
             // is model output; neither may be parsed as HTML.
             const block = document.createElement("div");
@@ -57,10 +61,10 @@
                     + (result.recordings > 1 ? " · " + result.recordings + " recordings" : "")
                     + (result.notes_used && result.notes_used.length
                         ? " · notes: " + result.notes_used.join(", ") : "")
-                    + " · " + new Date().toLocaleTimeString();
+                    + (withTime ? " · " + new Date().toLocaleTimeString() : "");
                 block.appendChild(m);
             }
-            answers.prepend(block);
+            return block;
         }
 
         async function submitAsk(ev) {
@@ -118,7 +122,42 @@
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submitAsk(e);
         });
 
-        window.AskBox = { setAvailability: setAvailability, NO_KEY_REASON: NO_KEY_REASON };
+        // Earlier questions about this session (from Discord or here), shown
+        // under the box oldest-at-bottom like answers asked now. Loaded once
+        // per session key; answers added since stay on top.
+        let historyKey = null;
+        async function setSession(key) {
+            if (!key || key === historyKey) return;
+            historyKey = key;
+            answers.querySelectorAll(".qa-earlier").forEach(function (n) { n.remove(); });
+            try {
+                const res = await fetch(form.dataset.historyUrl
+                    + "?limit=20&session=" + encodeURIComponent(key));
+                if (!res.ok) return;
+                const entries = await res.json();
+                for (const e of entries) {  // newest first
+                    if (e.status === "rejected") continue;
+                    const block = buildQA(e.question, e.answer ? e : null, e.answer ? null : e.error);
+                    block.classList.add("qa-earlier");
+                    const m = document.createElement("div");
+                    m.className = "qa-meta";
+                    m.textContent = "earlier · " + e.source
+                        + (e.asker && e.asker !== "dashboard" ? " · " + e.asker : "")
+                        + " · " + (e.ts || "").replace("T", " ");
+                    block.appendChild(m);
+                    answers.appendChild(block);
+                }
+            } catch (err) {
+                console.error("question history:", err);
+            }
+        }
+
+        window.AskBox = {
+            setAvailability: setAvailability,
+            setSession: setSession,
+            NO_KEY_REASON: NO_KEY_REASON,
+        };
+        if (form.dataset.session) setSession(form.dataset.session);
 
         if (form.dataset.static === "true") {
             if (form.dataset.askConfigured !== "true") setAvailability(NO_KEY_REASON);

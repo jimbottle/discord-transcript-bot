@@ -107,6 +107,21 @@ def test_health_check_survives_a_library_that_raises(monkeypatch):
     assert "0 campaigns" in check["message"]
 
 
+def test_game_voice_defaults_override_and_off(tmp_path):
+    (tmp_path / "library.yml").write_text(
+        "games:\n"
+        "  cyberpunk-red: {name: Cyberpunk RED}\n"
+        "  dnd-5e: {name: D&D 5e, voice: ''}\n"
+        "  custom: {name: Custom, voice: Speak like a ship's log.}\n"
+        "  unknown: {name: Unknown}\n"
+    )
+    games = library.load(tmp_path).games
+    assert games["cyberpunk-red"].voice == library.DEFAULT_VOICES["cyberpunk-red"]
+    assert games["dnd-5e"].voice == ""
+    assert games["custom"].voice == "Speak like a ship's log."
+    assert games["unknown"].voice == ""
+
+
 def test_name_falls_back_to_the_id_for_a_removed_item(lib):
     assert lib.name("campaign", "return-to-night-city") == "Return to Night City"
     assert lib.name("campaign", "gone") == "gone"
@@ -234,6 +249,8 @@ def test_header_text_names_game_campaign_group_and_restart(lib):
         lib, guild_id=111, started_at=datetime(2026, 10, 20, 19, 38)
     )
     h = sessions.header_text(lib, m, recordings=2)
+    h, style = h.split("\n")
+    assert style.startswith("STYLE: ") and "Night City" in style
     assert h == (
         "SESSION: Game: Cyberpunk RED · Campaign: Return to Night City · "
         "Group: Noah's group (GM: Noah) · Session: 2026-10-20 · "

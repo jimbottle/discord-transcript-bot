@@ -208,6 +208,41 @@
     margin-top: 0.3rem;
 }
 
+.qa-earlier {
+    opacity: 0.8;
+}
+
+/* Questions history page */
+.history-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+}
+
+.history-filters select,
+.history-filters button {
+    width: auto;
+    margin-bottom: 0;
+}
+
+.qa-entry {
+    padding: 0.8rem 1rem;
+}
+
+.qa-entry header {
+    margin-bottom: 0.4rem;
+    padding: 0;
+    background: none;
+    border: none;
+}
+
+.qa-entry.status-failed .qa-status,
+.qa-entry.status-rejected .qa-status {
+    color: var(--status-fail);
+    font-weight: 600;
+}
+
 /* Search results */
 .search-result {
     border-left: 3px solid var(--pico-primary);

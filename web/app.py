@@ -29,7 +29,8 @@ from src import player_map_store  # noqa: E402
 # so the prompt, the transcript cache and the error messages are identical
 # whether the question comes from Discord or from the dashboard.
 from src.llm import claude  # noqa: E402
-from src import sessions  # noqa: E402
+from src import question_log, sessions  # noqa: E402
+import time  # noqa: E402
 
 # Upper bound on a posted question; the transcript is the real payload.
 MAX_QUESTION_CHARS = 2000
@@ -183,9 +184,6 @@ def ask_session():
             ),
             400,
         )
-    if not claude.configured():
-        return jsonify({"error": claude.NO_KEY_MSG}), 503
-
     filename = data.get("filename")
     if filename is not None and not isinstance(filename, str):
         # _safe_path does substring tests on it; anything but a string is
@@ -195,25 +193,44 @@ def ask_session():
     path = transcript_path(filename) if filename else None
     if filename and path is None:
         return jsonify({"error": "transcript not found"}), 404
+
+    def _log(status, started=None, **kw):
+        question_log.record(
+            source="dashboard",
+            question=question,
+            status=status,
+            asker="dashboard",
+            transcript_path=path,
+            latency_s=(time.perf_counter() - started) if started else None,
+            **kw,
+        )
+
+    if not claude.configured():
+        _log(question_log.REJECTED, error=claude.NO_KEY_MSG)
+        return jsonify({"error": claude.NO_KEY_MSG}), 503
+
     # The whole session the file belongs to (every recording of that
     # campaign night), its header line and its note folders.
     transcript, header, note_dirs, files = (
         sessions.ask_context(path) if path else ("", "", [], [])
     )
     if not transcript or not transcript.strip():
-        return (
-            jsonify({"error": "No transcript data in the current session yet."}),
-            409,
-        )
+        no_data = "No transcript data in the current session yet."
+        _log(question_log.REJECTED, error=no_data)
+        return jsonify({"error": no_data}), 409
 
+    started = time.perf_counter()
     try:
         result = claude.ask(transcript, question, header=header, note_dirs=note_dirs)
     except claude.AskFailed as e:
         app.logger.error("ask failed: %s (%r)", e.user_message, e.__cause__)
+        _log(question_log.FAILED, started, error=e.user_message)
         return jsonify({"error": e.user_message}), 502
     answer = result.answer.strip()
     if not answer:
+        _log(question_log.FAILED, started, error=claude.EMPTY_MSG, result=result)
         return jsonify({"error": claude.EMPTY_MSG}), 502
+    _log(question_log.ANSWERED, started, answer=answer, result=result)
     app.logger.info(
         "ask answered by %s (input=%s, cached=%s, output=%s, notes=%s)",
         result.model,
@@ -235,6 +252,19 @@ def ask_session():
             "recordings": len(files),
         }
     )
+
+
+def _history_filters():
+    def arg(name):
+        v = request.args.get(name, "").strip()
+        return v or None
+
+    return {
+        "session_key": arg("session"),
+        "campaign": arg("campaign"),
+        "source": arg("source"),
+        "status": arg("status"),
+    }
 
 
 @app.route("/search")
@@ -261,6 +291,41 @@ def bot_stop():
 @app.route("/bot/status")
 def bot_status():
     return jsonify(bot.status())
+
+
+@app.route("/questions")
+def questions():
+    filters = _history_filters()
+    entries = question_log.read(**filters, limit=500)
+    everything = question_log.read()
+    lib = sessions_library()
+    return render_template(
+        "questions.html",
+        entries=entries,
+        filters=filters,
+        campaigns=sorted({e["campaign"] for e in everything if e.get("campaign")}),
+        session_keys=sorted(
+            {e["session_key"] for e in everything if e.get("session_key")}, reverse=True
+        ),
+        campaign_name=lambda cid: lib.name("campaign", cid),
+        sources=question_log.SOURCES,
+        total=len(everything),
+    )
+
+
+@app.route("/questions/data")
+def questions_data():
+    try:
+        limit = max(1, min(500, int(request.args.get("limit", "100"))))
+    except ValueError:
+        limit = 100
+    return jsonify(question_log.read(**_history_filters(), limit=limit))
+
+
+def sessions_library():
+    from src import library
+
+    return library.load()
 
 
 @app.route("/roster")

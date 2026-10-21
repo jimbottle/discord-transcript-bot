@@ -915,6 +915,7 @@ def test_ask_covers_every_recording_of_the_session(
     assert seen["header"].startswith(
         "SESSION: Game: Cyberpunk RED · Campaign: Return to Night City"
     )
+    assert "\nSTYLE: " in seen["header"]
 
 
 def test_transcripts_page_shows_session_columns(client, tagged_session):
@@ -938,3 +939,89 @@ def test_transcript_page_shows_the_session_tag(client, tagged_session):
     body = r.get_data(as_text=True)
     assert "Return to Night City" in body
     assert "2 recordings" in body
+
+
+# ── question history ─────────────────────────────────────────────────────
+
+
+def test_ask_records_answered_questions(
+    client, live_transcript, ask_configured, monkeypatch
+):
+    from src import question_log
+
+    monkeypatch.setattr(web_app.claude, "ask", _fake_ask([]))
+    client.post("/ask", json={"question": "Where next?"}, headers=_XHR)
+    (e,) = question_log.read()
+    assert e["source"] == "dashboard" and e["status"] == "answered"
+    assert e["question"] == "Where next?"
+    assert e["answer"] == "They decided to head for the keep."
+    assert e["model"] == "claude-opus-5-5" and e["input_tokens"] == 120
+    assert e["files"] == [live_transcript.name]
+    assert e["latency_s"] is not None
+
+
+def test_ask_records_failures_and_rejections(client, live_transcript, monkeypatch):
+    from src import question_log
+
+    monkeypatch.setattr(web_app.claude, "configured", lambda: False)
+    client.post("/ask", json={"question": "no key"}, headers=_XHR)
+    monkeypatch.setattr(web_app.claude, "configured", lambda: True)
+
+    def boom(transcript, question, **kw):
+        raise web_app.claude.AskFailed(web_app.claude.RATE_LIMIT_MSG)
+
+    monkeypatch.setattr(web_app.claude, "ask", boom)
+    client.post("/ask", json={"question": "limited"}, headers=_XHR)
+    failed, rejected = question_log.read()
+    assert (failed["status"], failed["error"]) == (
+        "failed",
+        web_app.claude.RATE_LIMIT_MSG,
+    )
+    assert (rejected["status"], rejected["error"]) == (
+        "rejected",
+        web_app.claude.NO_KEY_MSG,
+    )
+
+
+def test_bad_requests_are_not_recorded(client, live_transcript, ask_configured):
+    from src import question_log
+
+    client.post("/ask", json={"question": "  "}, headers=_XHR)
+    client.post("/ask", json={"question": "q"})  # no CSRF header
+    assert question_log.read() == []
+
+
+def test_questions_page_lists_and_filters_history(client):
+    from src import question_log
+
+    question_log.record(
+        source="discord",
+        question="Who is Kane?",
+        status="answered",
+        answer="A fixer.",
+        asker="Jobby Jill",
+    )
+    question_log.record(
+        source="dashboard",
+        question="Where next?",
+        status="failed",
+        error="rate limited",
+    )
+    body = client.get("/questions").get_data(as_text=True)
+    assert "Who is Kane?" in body and "A fixer." in body and "Jobby Jill" in body
+    assert "Where next?" in body and "rate limited" in body
+    only = client.get("/questions?source=discord").get_data(as_text=True)
+    assert "Who is Kane?" in only and "Where next?" not in only
+
+
+def test_questions_data_filters_by_session(client):
+    from src import question_log
+
+    question_log.record(source="discord", question="a", status="answered")
+    data = client.get("/questions/data?session=rtnc/2026-10-20").get_json()
+    assert data == []
+    assert len(client.get("/questions/data").get_json()) == 1
+
+
+def test_questions_link_in_nav(client):
+    assert b'href="/questions"' in client.get("/live").data

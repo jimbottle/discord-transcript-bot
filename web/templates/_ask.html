@@ -6,6 +6,7 @@
     ask_filename    — transcript to question; empty/None = newest session
     ask_static      — True when the page has no live poll to update it
     ask_empty       — True when the transcript has nothing to ask about yet
+    ask_session_key — session key whose earlier questions to show (static pages)
 #}
 <article id="ask-panel">
     <header>
@@ -17,7 +18,9 @@
           data-filename="{{ ask_filename or '' }}"
           data-ask-configured="{{ 'true' if ask_configured else 'false' }}"
           data-static="{{ 'true' if ask_static else 'false' }}"
-          data-empty="{{ 'true' if ask_empty else 'false' }}">
+          data-empty="{{ 'true' if ask_empty else 'false' }}"
+          data-history-url="{{ url_for('questions_data') }}"
+          data-session="{{ ask_session_key or '' }}">
         <textarea id="ask-question" name="question" rows="2"
                   maxlength="2000" required
                   placeholder="e.g. What did the party agree to do next?"></textarea>

@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 from src.bot.helper import BotHelper
 from src.config.cliargs import CLIArgs
-from src import library, sessions
+from src import library, question_log, sessions
 from src.llm.claude import AskFailed, ask as llm_ask
 from src.session_capture import scribe_notice
 from src.utils.answer import clamp_message, clean_answer
@@ -585,11 +585,28 @@ if __name__ == "__main__":
                 whisper_sink.session_file
             )
 
-        if not transcript_text or not transcript_text.strip():
-            await ctx.respond(
-                "No transcript data in the current session yet. Start recording first.",
-                ephemeral=True,
+        session_file = getattr(whisper_sink, "session_file", None)
+        source = "discord-public" if public else "discord"
+
+        def _log(status, started=None, **kw):
+            question_log.record(
+                source=source,
+                question=question,
+                status=status,
+                asker=getattr(ctx.author, "display_name", None) or str(ctx.author),
+                asker_id=getattr(ctx.author, "id", None),
+                guild_id=guild_id,
+                transcript_path=session_file,
+                latency_s=(time.perf_counter() - started) if started else None,
+                **kw,
             )
+
+        if not transcript_text or not transcript_text.strip():
+            no_data = (
+                "No transcript data in the current session yet. Start recording first."
+            )
+            _log(question_log.REJECTED, error=no_data)
+            await ctx.respond(no_data, ephemeral=True)
             return
 
         # ephemeral=not public: /ask is private to the asker,
@@ -597,6 +614,7 @@ if __name__ == "__main__":
         # followups below inherit this ephemerality from the defer.
         await ctx.defer(ephemeral=not public)
 
+        started = time.perf_counter()
         try:
             # llm_ask is blocking and can take tens of seconds, so it must
             # not run on the event loop — that would stall voice receive and
@@ -616,10 +634,12 @@ if __name__ == "__main__":
             )
 
             if not answer:
-                await ctx.followup.send(
-                    "The model returned no answer. Try rephrasing the question."
-                )
+                empty = "The model returned no answer. Try rephrasing the question."
+                _log(question_log.FAILED, started, error=empty, result=result)
+                await ctx.followup.send(empty)
                 return
+            # Full answer to the history; Discord only shows a clamped copy.
+            _log(question_log.ANSWERED, started, answer=result.answer, result=result)
 
             # clean_answer only caps the answer; a long /ask
             # question can still push the composed message past Discord's
@@ -633,9 +653,11 @@ if __name__ == "__main__":
             # (bad key, rate limit, out of credit, unreachable, refusal), so
             # pass it straight through rather than guessing here.
             logger.error(f"/ask failed: {e.user_message} ({e.__cause__!r})")
+            _log(question_log.FAILED, started, error=e.user_message)
             await ctx.followup.send(e.user_message)
         except Exception as e:
             logger.exception("/ask failed unexpectedly")
+            _log(question_log.FAILED, started, error=f"unexpected: {e!r}")
             await ctx.followup.send(f"Failed to query the model.\n`{e}`")
 
     @bot.slash_command(

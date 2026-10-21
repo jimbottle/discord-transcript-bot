@@ -2,6 +2,7 @@
 games:
   cyberpunk-red:
     name: Cyberpunk RED
+    # voice: ""   # optional: override the built-in answer flavour, or "" for none
   dnd-5e:
     name: D&D 5e
 

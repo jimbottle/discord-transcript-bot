@@ -188,6 +188,7 @@ function updateAskAvailability(data) {
     else if (!data.filename) reason = "No session transcript yet.";
     else if (!data.entries || data.entries.length === 0) reason = "Nothing transcribed yet.";
     window.AskBox.setAvailability(reason);
+    window.AskBox.setSession(data.session && data.session.key);
 }
 </script>
 {% endblock %}

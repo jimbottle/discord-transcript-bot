@@ -40,7 +40,7 @@ TIMEOUT_S = 120
 
 SYSTEM_PROMPT = (
     "You are an assistant that answers questions about a voice chat "
-    "transcript of a tabletop RPG session (the SESSION line, when present, names the game and campaign). Be concise and direct. Answer from "
+    "transcript of a tabletop RPG session (the SESSION line, when present, names the game and campaign; follow its STYLE line if there is one). Be concise and direct. Answer from "
     "the transcript; if the answer isn't there, say so. When a CAMPAIGN NOTES "
     "INDEX is provided you may read campaign notes with the read_campaign_notes "
     "tool, but only when the question needs background the transcript lacks, "

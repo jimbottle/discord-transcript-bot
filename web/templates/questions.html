@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Questions - Transcript Bot{% endblock %}
+{% block content %}
+<hgroup>
+    <h1>Questions</h1>
+    <p>Every question asked through Discord <code>/ask</code>, <code>/ask-public</code> and this dashboard,
+       newest first. {{ entries|length }} shown of {{ total }}.</p>
+</hgroup>
+
+<form method="get" class="history-filters">
+    <select name="campaign" aria-label="Campaign">
+        <option value="">All campaigns</option>
+        {% for c in campaigns %}
+        <option value="{{ c }}" {% if filters.campaign == c %}selected{% endif %}>{{ campaign_name(c) }}</option>
+        {% endfor %}
+    </select>
+    <select name="session" aria-label="Session">
+        <option value="">All sessions</option>
+        {% for k in session_keys %}
+        <option value="{{ k }}" {% if filters.session_key == k %}selected{% endif %}>{{ campaign_name(k.split('/')[0]) }} · {{ k.split('/')[1] }}</option>
+        {% endfor %}
+    </select>
+    <select name="source" aria-label="Source">
+        <option value="">All sources</option>
+        {% for src in sources %}
+        <option value="{{ src }}" {% if filters.source == src %}selected{% endif %}>{{ src }}</option>
+        {% endfor %}
+    </select>
+    <select name="status" aria-label="Status">
+        <option value="">Any outcome</option>
+        {% for st in ["answered", "failed", "rejected"] %}
+        <option value="{{ st }}" {% if filters.status == st %}selected{% endif %}>{{ st }}</option>
+        {% endfor %}
+    </select>
+    <button type="submit">Filter</button>
+</form>
+
+{% if entries %}
+<div id="history">
+{% for e in entries %}
+    <article class="qa-entry status-{{ e.status }}">
+        <header class="qa-meta">
+            {{ e.ts.replace('T', ' ') }} · {{ e.source }}{% if e.asker %} · {{ e.asker }}{% endif %}
+            {% if e.campaign %} · {{ campaign_name(e.campaign) }} · session {{ e.session_day }}{% elif e.files %} · untagged {{ e.files[-1] }}{% endif %}
+            · <span class="qa-status">{{ e.status }}</span>
+        </header>
+        <div class="qa-q">{{ e.question }}</div>
+        {% if e.answer %}
+        <div class="qa-a">{{ e.answer }}</div>
+        {% endif %}
+        {% if e.error %}
+        <div class="qa-err">{{ e.error }}</div>
+        {% endif %}
+        {% if e.model %}
+        <div class="qa-meta">
+            {{ e.model }} · in {{ e.input_tokens }}{% if e.cached_tokens %} ({{ e.cached_tokens }} cached){% endif %}
+            · out {{ e.output_tokens }}{% if e.notes_used %} · notes: {{ e.notes_used|join(', ') }}{% endif %}
+            {% if e.latency_s is not none %} · {{ e.latency_s }}s{% endif %}
+            {% if e.files and e.files|length > 1 %} · {{ e.files|length }} recordings{% endif %}
+        </div>
+        {% endif %}
+    </article>
+{% endfor %}
+</div>
+{% else %}
+<p>No questions {% if filters.values()|select|list %}match these filters{% else %}asked yet{% endif %}.</p>
+{% endif %}
+{% endblock %}
