@@ -1039,3 +1039,19 @@ def test_voice_thread_survives_a_failing_handler(tmp_path, monkeypatch):
     sink.voice_thread.join(timeout=5)
     assert not sink.voice_thread.is_alive()
     sink.close()
+
+
+@pytest.mark.parametrize(
+    "raw, expected", [("1", 1), ("4", 4), ("0", 2), ("-3", 2), ("lots", 2), ("", 2)]
+)
+def test_transcribe_workers_parses_and_falls_back(raw, expected):
+    from src.sinks.whisper_sink import transcribe_workers
+
+    assert transcribe_workers(raw) == expected
+
+
+def test_sink_uses_the_configured_worker_count(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRANSCRIBE_WORKERS", "3")
+    sink = _make_sink(tmp_path, monkeypatch)
+    assert sink.executor._max_workers == 3
+    sink.close()

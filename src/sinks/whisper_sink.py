@@ -31,6 +31,25 @@ WHISPER_LANGUAGE = "en"
 WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "5"))
 WHISPER_BEST_OF = int(os.getenv("WHISPER_BEST_OF", "5"))
 
+
+def transcribe_workers(raw=None) -> int:
+    """How many transcriptions run at once (discord-transcript-bot-4uk).
+
+    Measured 2026-10-21 on 96 clips of the 2026-10-20 session
+    (scripts/bench_concurrency.py, MLX large-v3, M-series GPU): 1 worker
+    1.49 clips/s, 2 workers 1.63, 4 and 8 no better; texts identical at every
+    count, so concurrent MLX decoding is safe but the GPU serialises it.
+    More workers only add threads and memory. On faster-whisper (CPU) each
+    call already uses every core. Invalid values fall back to 2.
+    """
+    raw = os.getenv("TRANSCRIBE_WORKERS", "2") if raw is None else raw
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return 2
+    return n if n >= 1 else 2
+
+
 # WHISPER_BATCH_SIZE (BatchedInferencePipeline throughput, discord-transcript-bot-ob3)
 # is a faster-whisper-only knob and is read in src/asr/selection.py where that
 # backend is constructed.
@@ -177,7 +196,7 @@ class WhisperSink(Sink):
         self.running = True
         self.speakers: List[Speaker] = []
         self.voice_queue = Queue()
-        self.executor = ThreadPoolExecutor(max_workers=8)  # TODO: Adjust this
+        self.executor = ThreadPoolExecutor(max_workers=transcribe_workers())
         self.player_map = player_map
         # Biased Whisper prompt built once from the roster's proper nouns;
         # player_map is fixed for this sink's lifetime. discord-transcript-bot-cul.
