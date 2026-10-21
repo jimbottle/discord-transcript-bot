@@ -25,7 +25,7 @@ def _http(cls, status):
         (_http(discord.Forbidden, 403), "permission"),
         (_http(discord.HTTPException, 500), "HTTP 500"),
         (discord.ClientException("Already connected"), "Already connected"),
-        (discord.ClientException(""), "Voice error"),
+        (discord.ClientException(""), "Discord client error"),
         (RuntimeError("boom"), "bot logs"),
     ],
 )

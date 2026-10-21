@@ -60,3 +60,18 @@ def test_teardown_no_longer_drains_anything():
     with open(os.path.join(os.path.dirname(__file__), "..", "main.py")) as f:
         src = f.read()
     assert "get_transcription" not in src
+
+
+def test_a_recording_nobody_has_spoken_in_does_not_export_an_older_one(
+    tmp_path, monkeypatch
+):
+    """roborev #6511/#6515: the .txt appears on the first line; until then
+    only the .meta.json exists and the previous session must not be used."""
+    monkeypatch.chdir(tmp_path)
+    fresh = tmp_path / "2026-10-27_19-00-00.txt"
+    (tmp_path / "2026-10-27_19-00-00.meta.json").write_text("{}")
+    monkeypatch.setattr(
+        "src.sessions.latest_for_guild", lambda gid, d: tmp_path / "older.txt"
+    )
+    fake = SimpleNamespace(guild_last_session_file={1: str(fresh)})
+    assert VoloBot.session_file_for_export(fake, 1) is None

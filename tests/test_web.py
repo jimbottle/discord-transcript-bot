@@ -1602,6 +1602,8 @@ def test_docker_context_excludes_private_material():
         "*.meta.json",
         "player_map.yml",
         ".beads",
+        ".beads-credential-key",
+        "*.db",
         ".git",
     ):
         assert must in rules, must

@@ -11,6 +11,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg libopus0 git procps lsof \
     && rm -rf /var/lib/apt/lists/*
 
+# The weights volume is written by the (non-root) compose user.
+RUN mkdir -p /models && chmod 1777 /models
+
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -22,6 +25,8 @@ COPY . .
 # reaches nothing. compose.yaml opts in to 0.0.0.0 and publishes the port on
 # the host's loopback only.
 ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    HOME=/tmp \
     HF_HOME=/models \
     ASR_BACKEND=faster-whisper
 

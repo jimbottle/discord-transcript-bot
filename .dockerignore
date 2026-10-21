@@ -3,7 +3,11 @@
 # (compose.yaml), never copied in.
 .git
 .beads
+.beads-credential-key
 .dolt
+*.db
+Sessions/
+.pytest_cache
 .roborev
 .claude
 venv

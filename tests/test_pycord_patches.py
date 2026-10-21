@@ -87,6 +87,8 @@ def test_patched_loop_backs_off_and_logs_visibly(
     pristine_keepalive, monkeypatch, caplog
 ):
     monkeypatch.setattr(pycord_patches, "KEEPALIVE_FAILURE_BACKOFF_S", 0.05)
+    # A starved run can reach the 60th failure and log again (roborev #6519).
+    monkeypatch.setattr(pycord_patches, "_LOG_EVERY", 10**6)
     assert pycord_patches.patch_udp_keepalive_backoff()
     client = _failing_client()
     ka = pristine_keepalive(client)

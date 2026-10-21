@@ -218,7 +218,7 @@ if __name__ == "__main__":
             except Exception:
                 pass
             bot.guild_to_helper.pop(guild_id, None)
-            logger.error(f"/connect failed: {e!r}")
+            logger.exception("/connect failed")
             await ctx.followup.send(
                 f"Couldn't join voice. {command_errors.user_message(e)}"
             )
@@ -282,6 +282,12 @@ if __name__ == "__main__":
             return
 
         if not bot.guild_is_recording.get(guild_id, False):
+            if bot.cancel_voice_recovery(guild_id):
+                await ctx.respond(
+                    "Recording stopped. (It was restarting after an error; "
+                    "that restart is cancelled.)"
+                )
+                return
             await ctx.respond(
                 "Not recording right now. Nothing to kill.", ephemeral=True
             )
@@ -355,6 +361,7 @@ if __name__ == "__main__":
 
         # Archive/teardown any active recording BEFORE disconnecting so
         # the transcript is flushed and guild_is_recording is cleared.
+        bot.cancel_voice_recovery(guild_id)
         # Guarded so a teardown failure can't skip the disconnect.
         teardown_ok = True
         if bot.guild_is_recording.get(guild_id, False):
@@ -454,7 +461,7 @@ if __name__ == "__main__":
             await bot.update_player_map(ctx)
             await ctx.respond("Roster synced. All player handles are up to date.")
         except Exception as e:
-            logger.error(f"/update_player_map failed: {e!r}")
+            logger.exception("/update_player_map failed")
             await ctx.respond(
                 f"Roster sync failed. {command_errors.user_message(e)}", ephemeral=True
             )
@@ -536,7 +543,10 @@ if __name__ == "__main__":
         else:
             # DM context: find guilds with active transcripts where the user is a member
             active_guilds = []
-            for gid in set(bot.guild_whisper_sinks) | set(bot.guild_last_session_file):
+            # Every guild the bot is in, not just ones recorded in this
+            # process: after a restart the session is found on disk
+            # (roborev #6515).
+            for gid in {g.id for g in bot.guilds}:
                 if not bot.session_file_for_export(gid):
                     continue
                 guild = bot.get_guild(gid)

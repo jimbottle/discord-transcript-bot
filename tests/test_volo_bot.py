@@ -706,6 +706,7 @@ def _recovery_self(sink, connected=True):
         guild_to_helper={1: object()} if connected else {},
         guild_is_recording={1: True},
         start_recording=MagicMock(return_value=True),
+        _voice_recovery={},
     )
 
     async def end(ctx):
@@ -761,3 +762,25 @@ def test_recover_does_not_restart_after_a_disconnect():
     ctx, sent = _recovery_ctx()
     assert asyncio.run(VoloBot._recover_voice_thread(fake, ctx, sink, None)) is False
     fake.start_recording.assert_not_called()
+
+
+def test_stop_during_the_restart_window_wins():
+    """roborev #6513: a /stop between the recovery's teardown and its
+    restart was answered 'Not recording' and then overridden."""
+    sink = object()
+    fake = _recovery_self(sink)
+    fake.VOICE_RESTART_DELAY_S = 0.05
+    ctx, sent = _recovery_ctx()
+
+    async def scenario():
+        task = asyncio.ensure_future(
+            VoloBot._recover_voice_thread(fake, ctx, sink, None)
+        )
+        await asyncio.sleep(0.01)  # teardown done, now sleeping
+        assert VoloBot.cancel_voice_recovery(fake, 1) is True
+        return await task
+
+    assert asyncio.run(scenario()) is False
+    fake.start_recording.assert_not_called()
+    assert sent == []
+    assert VoloBot.cancel_voice_recovery(fake, 1) is False

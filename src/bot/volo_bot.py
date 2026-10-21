@@ -85,6 +85,9 @@ class VoloBot(discord.Bot):
         # guild_id -> the .txt of the guild's latest recording; outlives the
         # sink so /generate_pdf works after /stop and /disconnect.
         self.guild_last_session_file = {}
+        # guild_id -> token of a pending voice-thread restart; /stop and
+        # /disconnect cancel it (cancel_voice_recovery).
+        self._voice_recovery = {}
         self.guild_whisper_message_tasks = {}
         self.player_map = {}
         self._is_ready = False
@@ -497,6 +500,13 @@ class VoloBot(discord.Bot):
 
     VOICE_RESTART_DELAY_S = 5
 
+    def cancel_voice_recovery(self, guild_id) -> bool:
+        """Cancel a pending voice-thread restart; True if there was one.
+        Between its teardown and its restart the guild looks not-recording,
+        so without this a /stop there was answered "Not recording" and then
+        overridden 5s later (roborev #6513)."""
+        return self._voice_recovery.pop(guild_id, None) is not None
+
     async def _recover_voice_thread(self, ctx, sink, error) -> bool:
         """The voice thread died: end that recording, wait, start a new one,
         and say so in the channel either way. Returns whether recording
@@ -509,12 +519,17 @@ class VoloBot(discord.Bot):
             f"Voice thread for guild {guild_id} died ({error}); restarting "
             f"the recording in {self.VOICE_RESTART_DELAY_S}s."
         )
+        token = object()
+        self._voice_recovery[guild_id] = token
         try:
             await self.end_recording_session(ctx)
         except Exception as e:  # noqa: BLE001 - still try to restart
             logger.error(f"Teardown after a voice thread failure failed: {e}")
         await asyncio.sleep(self.VOICE_RESTART_DELAY_S)
-        # /disconnect or a new /scribe in the meantime: leave it alone.
+        # /stop, /disconnect or a new /scribe in the meantime: leave it alone.
+        if self._voice_recovery.get(guild_id) is not token:
+            return False
+        self._voice_recovery.pop(guild_id, None)
         if guild_id not in self.guild_to_helper or self.guild_is_recording.get(
             guild_id
         ):
@@ -638,8 +653,15 @@ class VoloBot(discord.Bot):
         this process last started there, else (after a restart) the newest
         tagged with the guild on disk. None when there is none."""
         path = self.guild_last_session_file.get(guild_id)
-        if path and os.path.exists(path):
-            return path
+        if path:
+            if os.path.exists(path):
+                return path
+            # The sink creates the .txt on the first line, so a recording
+            # nobody has spoken in yet has only its .meta.json. Exporting the
+            # previous session instead would be wrong (roborev #6511). With
+            # neither file the recording was deleted: fall back to disk.
+            if sessions.meta_path(path).exists():
+                return None
         found = sessions.latest_for_guild(
             guild_id, os.path.join(os.getcwd(), "transcripts")
         )

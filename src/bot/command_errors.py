@@ -35,8 +35,9 @@ def user_message(error) -> str:
     if isinstance(err, discord.HTTPException):
         return f"Discord rejected the request (HTTP {err.status}). Try again."
     if isinstance(err, discord.ClientException):
-        detail = str(err).strip()
-        return f"Voice error: {detail}." if detail else "Voice error. Try again."
+        # Voice errors and others alike (InteractionResponded, ...).
+        detail = str(err).strip().rstrip(".")
+        return f"Discord client error: {detail}." if detail else "Discord client error."
     return "Something went wrong running that command. The details are in the bot logs."
 
 
