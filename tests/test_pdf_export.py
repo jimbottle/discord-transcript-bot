@@ -62,16 +62,36 @@ def test_teardown_no_longer_drains_anything():
     assert "get_transcription" not in src
 
 
-def test_a_recording_nobody_has_spoken_in_does_not_export_an_older_one(
-    tmp_path, monkeypatch
-):
-    """roborev #6511/#6515: the .txt appears on the first line; until then
-    only the .meta.json exists and the previous session must not be used."""
+def test_a_recording_nobody_has_spoken_in_keeps_its_session(tmp_path, monkeypatch):
+    """roborev #6511/#6521: the .txt appears on the first line. Until then
+    the fresh recording is still the one to export: an earlier recording of
+    the same session (a restart mid-game) supplies the text, and a brand-new
+    session reads as empty, never as the previous session."""
+    from src import sessions
+
     monkeypatch.chdir(tmp_path)
-    fresh = tmp_path / "2026-10-27_19-00-00.txt"
-    (tmp_path / "2026-10-27_19-00-00.meta.json").write_text("{}")
     monkeypatch.setattr(
         "src.sessions.latest_for_guild", lambda gid, d: tmp_path / "older.txt"
     )
+    meta = sessions.SessionMeta(session_day="2026-10-27", campaign="c", guild_id=1)
+
+    earlier = tmp_path / "2026-10-27_19-00-00.txt"
+    earlier.write_text("[19:01:00] A (B) [1]: before the restart\n")
+    sessions.write_meta(earlier, meta)
+    fresh = tmp_path / "2026-10-27_20-00-00.txt"
+    sessions.write_meta(fresh, meta)
+
     fake = SimpleNamespace(guild_last_session_file={1: str(fresh)})
-    assert VoloBot.session_file_for_export(fake, 1) is None
+    path = VoloBot.session_file_for_export(fake, 1)
+    assert path == str(fresh)
+    assert "before the restart" in sessions.session_transcript(path)[0]
+
+    # A new session nobody has spoken in: empty, not the older session.
+    lonely = tmp_path / "2026-11-03_19-00-00.txt"
+    sessions.write_meta(
+        lonely, sessions.SessionMeta(session_day="2026-11-03", campaign="c")
+    )
+    fake = SimpleNamespace(guild_last_session_file={1: str(lonely)})
+    path = VoloBot.session_file_for_export(fake, 1)
+    assert path == str(lonely)
+    assert sessions.session_transcript(path)[0] == ""

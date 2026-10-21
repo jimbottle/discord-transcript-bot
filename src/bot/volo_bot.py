@@ -657,11 +657,14 @@ class VoloBot(discord.Bot):
             if os.path.exists(path):
                 return path
             # The sink creates the .txt on the first line, so a recording
-            # nobody has spoken in yet has only its .meta.json. Exporting the
-            # previous session instead would be wrong (roborev #6511). With
-            # neither file the recording was deleted: fall back to disk.
+            # nobody has spoken in yet has only its .meta.json. Keep it: its
+            # session's earlier recordings (a restart mid-game) are joined by
+            # sessions.session_transcript, and a session with no text yet
+            # reads as empty to every caller, rather than as the previous
+            # session (roborev #6511, #6521). With neither file the
+            # recording was deleted: fall back to disk.
             if sessions.meta_path(path).exists():
-                return None
+                return path
         found = sessions.latest_for_guild(
             guild_id, os.path.join(os.getcwd(), "transcripts")
         )
