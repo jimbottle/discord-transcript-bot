@@ -739,8 +739,12 @@ def test_ask_answers_from_the_live_session(
         "notes_used": [],
         "recordings": 1,
     }
-    # The model saw the session file verbatim, not a re-rendered version.
-    assert calls == [(live_transcript.read_text(encoding="utf-8"), "Where next?")]
+    # The model saw the session file with 12-hour line stamps.
+    from src.utils.timefmt import for_model
+
+    assert calls == [
+        (for_model(live_transcript.read_text(encoding="utf-8")), "Where next?")
+    ]
 
 
 def test_ask_picks_the_newest_session_by_default(
@@ -911,7 +915,7 @@ def test_ask_covers_every_recording_of_the_session(
     assert r.status_code == 200
     assert r.get_json()["recordings"] == 2
     assert "before the restart" in seen["transcript"]
-    assert "--- recording restarted at 20:15:26 ---" in seen["transcript"]
+    assert "--- recording restarted at 8:15 PM ---" in seen["transcript"]
     assert seen["header"].startswith(
         "SESSION: Game: Cyberpunk RED · Campaign: Return to Night City"
     )
@@ -1292,3 +1296,17 @@ def test_ask_js_history_races_behaviourally():
     script = pathlib.Path(__file__).parent / "js" / "ask_history.test.mjs"
     r = subprocess.run([node, str(script)], capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, r.stderr or r.stdout
+
+
+def test_dashboard_shows_12_hour_times(client, live_transcript):
+    from src import question_log
+
+    body = client.get("/transcripts/" + live_transcript.name).get_data(as_text=True)
+    styled = body[body.index('id="parsed-view"') : body.index('id="raw-view"')]
+    assert "7:40 PM" in styled and "19:40" not in styled  # Raw view stays the file
+    question_log.record(source="discord", question="q", status="answered", answer="a")
+    e = question_log.read()[0]
+    assert web_app.timefmt.when(e["ts"]) in client.get("/questions").get_data(
+        as_text=True
+    )
+    assert "clock12(e.time)" in client.get("/live").get_data(as_text=True)

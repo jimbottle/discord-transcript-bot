@@ -602,3 +602,8 @@ def test_no_budget_without_max_chars(monkeypatch):
     client = _use(monkeypatch, _FakeClient(_response()))
     claude.ask("t", "q")
     assert all("OUTPUT LIMIT" not in b["text"] for b in client.calls[0]["system"])
+
+
+def test_both_prompts_ask_for_12_hour_times():
+    assert claude.TIME_STYLE in claude.SYSTEM_PROMPT
+    assert claude.TIME_STYLE in claude.LORE_SYSTEM_PROMPT

@@ -38,6 +38,10 @@ DEFAULT_EFFORT = "medium"
 MAX_ANSWER_TOKENS = 8192
 TIMEOUT_S = 120
 
+TIME_STYLE = (
+    " Write clock times the way the transcript shows them, 12-hour with "
+    "AM/PM (for example 8:26 PM), never 24-hour."
+)
 TABLE_RULES = (
     " Table rules from the GM: do not give tactical or strategic advice on "
     "beating a scenario, do not help optimise (min-max) characters, and do "
@@ -53,6 +57,7 @@ SYSTEM_PROMPT = (
     "INDEX is provided you may read campaign notes with the read_campaign_notes "
     "tool, but only when the question needs background the transcript lacks, "
     "and say when an answer comes from the notes rather than the transcript."
+    + TIME_STYLE
     + TABLE_RULES
 )
 # Tool rounds per question. One is the norm (the model asks for the notes it
@@ -333,7 +338,9 @@ LORE_SYSTEM_PROMPT = (
     "relevant note in one call) and answer only from them. If the notes "
     "don't cover the question, say so plainly rather than inventing "
     "campaign facts; you may add general knowledge of the game's published "
-    "rules or setting if you label it as such. Be concise and direct." + TABLE_RULES
+    "rules or setting if you label it as such. Be concise and direct."
+    + TIME_STYLE
+    + TABLE_RULES
 )
 ONLY_GM_NOTES_MSG = (
     "This campaign only has GM-only notes. Tick 'Include GM-only notes' to "

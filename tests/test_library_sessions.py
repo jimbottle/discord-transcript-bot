@@ -295,3 +295,18 @@ def test_tag_session_script_tags_files(lib, tmp_path, monkeypatch, capsys):
     assert m.source == "manual" and m.game == "cyberpunk-red"
     with pytest.raises(SystemExit):
         mod.main([str(txt), "--campaign", "nope"])
+
+
+def test_ask_context_gives_the_model_12_hour_times(lib, tmp_path):
+    t = tmp_path / "t12"
+    t.mkdir()
+    a = _rec(
+        t, "2026-10-20_19-38-38", "[19:40:00] A (B) [1]: first\n", lib, guild_id=111
+    )
+    _rec(t, "2026-10-20_20-15-26", "[20:16:00] A (B) [1]: second\n", lib, guild_id=111)
+    text, *_ = sessions.ask_context(a, lib)
+    assert "[7:40 PM] A (B) [1]: first" in text
+    assert "--- recording restarted at 8:15 PM ---" in text
+    assert "19:40" not in text and "20:15" not in text
+    # the files themselves keep 24-hour stamps
+    assert a.read_text().startswith("[19:40:00]")

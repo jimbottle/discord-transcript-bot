@@ -53,6 +53,14 @@ function tickUpdatedLabel() {
 let renderedCount = 0;
 let renderedFile = null;
 
+// "20:26:09" -> "8:26 PM" (same rule as src/utils/timefmt.clock).
+function clock12(hms) {
+    const m = /^(\d{1,2}):(\d{2})/.exec(hms || "");
+    if (!m) return hms;
+    const h = +m[1];
+    return (h % 12 || 12) + ":" + m[2] + (h < 12 ? " AM" : " PM");
+}
+
 function buildEntry(e) {
     // createElement + textContent: transcript text is raw user speech
     // and must never be parsed as HTML.
@@ -70,7 +78,7 @@ function buildEntry(e) {
         const whoSpan = document.createElement("strong");
         whoSpan.textContent = who || "Unknown";
         head.appendChild(whoSpan);
-        if (e.time) head.appendChild(document.createTextNode(" · " + e.time));
+        if (e.time) head.appendChild(document.createTextNode(" · " + clock12(e.time)));
         entry.appendChild(head);
     }
 

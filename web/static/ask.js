@@ -48,6 +48,15 @@
     }
     window.renderAnswerMarkdown = renderMarkdown;
 
+    // "Oct 20, 9:23 PM" (same shape as src/utils/timefmt.when).
+    function whenLabel(d) {
+        if (isNaN(d)) return "";
+        const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+        const h = d.getHours();
+        return months[d.getMonth()] + " " + d.getDate() + ", " + (h % 12 || 12) + ":"
+            + String(d.getMinutes()).padStart(2, "0") + (h < 12 ? " AM" : " PM");
+    }
+
     const NO_KEY_REASON =
         "ANTHROPIC_API_KEY is not set for the dashboard — start it with `make web` (reads op.env).";
 
@@ -103,7 +112,7 @@
                     + (result.recordings > 1 ? " · " + result.recordings + " recordings" : "")
                     + (result.notes_used && result.notes_used.length
                         ? " · notes: " + result.notes_used.join(", ") : "")
-                    + (withTime ? " · " + new Date().toLocaleTimeString() : "");
+                    + (withTime ? " · " + whenLabel(new Date()) : "");
                 block.appendChild(m);
             }
             return block;
@@ -210,7 +219,7 @@
                     m.className = "qa-meta";
                     m.textContent = "earlier · " + e.source
                         + (e.asker && e.asker !== "dashboard" ? " · " + e.asker : "")
-                        + " · " + (e.ts || "").replace("T", " ");
+                        + " · " + (e.ts ? whenLabel(new Date(e.ts)) : "");
                     block.appendChild(m);
                     answers.appendChild(block);
                 }

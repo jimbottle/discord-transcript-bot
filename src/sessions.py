@@ -232,7 +232,11 @@ def ask_context(transcript_path, lib=None):
         from src import library
 
         lib = library.load()
+    from src.utils.timefmt import for_model
+
     text, meta, files = session_transcript(transcript_path)
+    # The model sees (and quotes) 12-hour times; the files stay 24-hour.
+    text = for_model(text)
     if meta is None:
         return text, "", [], files
     header = header_text(lib, meta, len(files))

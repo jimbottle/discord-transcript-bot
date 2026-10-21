@@ -40,7 +40,7 @@
 {% for e in entries %}
     <article class="qa-entry status-{{ e.status }}">
         <header class="qa-meta">
-            {{ e.ts.replace('T', ' ') }} · {{ e.source }}{% if e.asker %} · {{ e.asker }}{% endif %}
+            {{ e.ts|when }} · {{ e.source }}{% if e.asker %} · {{ e.asker }}{% endif %}
             {% if e.campaign and e.session_day %} · {{ campaign_name(e.campaign) }} · session {{ e.session_day }}{% elif e.campaign %} · {{ campaign_name(e.campaign) }}{% if e.include_gm %} · with GM notes{% endif %}{% elif e.files %} · untagged {{ e.files[-1] }}{% endif %}
             · <span class="qa-status">{{ e.status }}</span>
         </header>

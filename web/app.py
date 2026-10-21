@@ -31,6 +31,7 @@ from src import player_map_store  # noqa: E402
 # whether the question comes from Discord or from the dashboard.
 from src.llm import claude  # noqa: E402
 from src import question_log, sessions  # noqa: E402
+from src.utils import timefmt  # noqa: E402
 import time  # noqa: E402
 
 # Upper bound on a posted question; the transcript is the real payload.
@@ -54,6 +55,9 @@ bot = BotManager()
 app.jinja_env.filters["duration"] = format_duration
 # Model answers are Markdown; render the safe subset (escaped first).
 app.jinja_env.filters["answer_md"] = answer_markdown.render
+# 12-hour times for people; the files keep 24-hour stamps.
+app.jinja_env.filters["clock"] = lambda v: timefmt.clock(v)
+app.jinja_env.filters["when"] = lambda v: timefmt.when(v)
 
 # The dashboard only ever listens on loopback. Requests must also *address*
 # it as loopback: a DNS-rebinding page (attacker.example resolving to

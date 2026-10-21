@@ -18,7 +18,7 @@
     <div class="entry" data-search="{{ ((e.player or '') ~ ' ' ~ (e.character or '') ~ ' ' ~ e.text)|lower }}">
         <div class="entry-meta">
             <strong>{{ e.player or 'Unknown' }}{% if e.character and e.character != e.player %} ({{ e.character }}){% endif %}</strong>
-            {% if e.begin %} &middot; {{ e.date }} {{ e.begin }}{% if e.end %}&ndash;{{ e.end }}{% endif %}{% endif %}
+            {% if e.begin %} &middot; {{ e.date }} {{ e.begin|clock }}{% if e.end and (e.end|clock) != (e.begin|clock) %}&ndash;{{ e.end|clock }}{% endif %}{% endif %}
             {% if e.source %} &middot; {{ e.source }}{% endif %}
         </div>
         <div class="entry-text">{{ e.text }}</div>

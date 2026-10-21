@@ -32,7 +32,7 @@
         {% if e.player or e.time %}
         <div class="entry-meta">
             <strong>{{ e.player or 'Unknown' }}{% if e.character and e.character != e.player %} ({{ e.character }}){% endif %}</strong>
-            {% if e.time %} &middot; {{ e.time }}{% endif %}
+            {% if e.time %} &middot; {{ e.time|clock }}{% endif %}
         </div>
         {% endif %}
         <div class="entry-text">{{ e.text }}</div>
