@@ -46,6 +46,18 @@ def _iterations(client):
     return client._connection.socket.sendto.call_count
 
 
+def _wait_for(predicate, timeout=5.0):
+    """Poll instead of asserting after a fixed sleep: under load (a busy CI
+    box, preflight next to a build) a thread can go unscheduled for longer
+    than the sleep, which made these tests flaky (discord-transcript-bot-pzo)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.005)
+    return predicate()
+
+
 def test_patch_applies_and_is_idempotent(pristine_keepalive):
     cls = pristine_keepalive
     assert pycord_patches.patch_udp_keepalive_backoff() is True
@@ -60,11 +72,15 @@ def test_unpatched_loop_spins_on_persistent_send_failure(pristine_keepalive):
     bump that fixes it makes this test (and the patch) removable."""
     client = _failing_client()
     ka = pristine_keepalive(client)
+    t0 = time.monotonic()
     ka.start()
-    time.sleep(0.2)
+    spun = _wait_for(lambda: _iterations(client) > 200)
+    elapsed = time.monotonic() - t0
     ka.stop()
     ka.join(2)
-    assert _iterations(client) > 200, "upstream retries with no delay"
+    # 200 sends with delay=5000 between successes; only a no-delay retry
+    # loop gets there, however slowly the machine schedules it.
+    assert spun and elapsed < 5, "upstream retries with no delay"
 
 
 def test_patched_loop_backs_off_and_logs_visibly(
@@ -75,12 +91,17 @@ def test_patched_loop_backs_off_and_logs_visibly(
     client = _failing_client()
     ka = pristine_keepalive(client)
     with caplog.at_level(logging.WARNING, logger="src.bot.pycord_patches"):
+        t0 = time.monotonic()
         ka.start()
-        time.sleep(0.3)
+        assert _wait_for(lambda: _iterations(client) >= 2), "it retries"
+        time.sleep(0.2)
         ka.stop()
         ka.join(2)
+        elapsed = time.monotonic() - t0
     assert not ka.is_alive(), "stop() must interrupt the backoff"
-    assert 2 <= _iterations(client) <= 12, "≈ one retry per backoff window"
+    # At most one send per 0.05s backoff window (plus the first), however
+    # long the run took; unpatched it would be thousands.
+    assert _iterations(client) <= elapsed / 0.05 + 2, "≈ one retry per window"
     warnings = [r for r in caplog.records if "keep-alive send failed" in r.message]
     assert len(warnings) == 1, "first failure logged at WARNING, then throttled"
     assert "OSError" in warnings[0].message
@@ -95,7 +116,8 @@ def test_patched_loop_keeps_upstream_success_path_but_stop_is_prompt(
     client.is_connected.return_value = True
     ka = pristine_keepalive(client)
     ka.start()
-    time.sleep(0.1)
+    assert _wait_for(lambda: ka.counter == 1), "one send"
+    time.sleep(0.05)
     assert _iterations(client) == 1, "one send, then sleep for `delay`"
     assert ka.counter == 1
     t0 = time.monotonic()
