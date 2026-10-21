@@ -138,24 +138,31 @@ def _pieces(text: str, limit: int) -> list:
     return [text[i : i + limit] for i in range(0, len(text), limit)]
 
 
+_FENCE_LINE = re.compile(r"^```[^\n`]*", re.M)
+
+
 def split_message(text: str, limit: int = DISCORD_HARD_LIMIT) -> list:
     """Split ``text`` into Discord-sized messages without losing anything.
     A code block split across messages is closed at the end of one and
-    reopened at the start of the next, so formatting survives."""
+    reopened at the start of the next with its original opening line
+    (```python keeps its highlighting; roborev #6486)."""
     text = text.strip()
     if not text:
         return []
-    reserve = len("\n" + _FENCE) + len(_FENCE + "\n")
+    longest_opener = max((len(m) for m in _FENCE_LINE.findall(text)), default=3)
+    reserve = len("\n" + _FENCE) + longest_opener + 1
     chunks = [c.strip("\n") for c in _pieces(text, limit - reserve) if c.strip()]
-    out, open_fence = [], False
+    out, opener = [], None
     for chunk in chunks:
-        if open_fence:
-            chunk = _FENCE + "\n" + chunk
-        if chunk.count(_FENCE) % 2 == 1:
+        if opener:
+            chunk = opener + "\n" + chunk
+        fences = _FENCE_LINE.findall(chunk)
+        if len(fences) % 2 == 1:
+            # the last fence line opens a block that continues past here
+            opener = fences[-1]
             chunk += "\n" + _FENCE
-            open_fence = True
         else:
-            open_fence = False
+            opener = None
         out.append(chunk)
     return out
 

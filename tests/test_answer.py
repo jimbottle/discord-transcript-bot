@@ -1,3 +1,5 @@
+import re
+
 """Unit tests for src.utils.answer."""
 
 from src.utils.answer import (
@@ -210,3 +212,17 @@ def test_budget_shrinks_with_long_questions_but_stays_useful():
     # 2000 - len("**Q:** ") - 900 - len("\n\n") - 200 headroom
     assert answer_budget("q" * 900) == 891
     assert answer_budget("q" * 1900) == 600  # floor
+
+
+def test_split_code_block_reopens_with_its_language():
+    code = (
+        "```python\n"
+        + "\n".join(f"x{i} = " + "'" + "y" * 40 + "'" for i in range(90))
+        + "\n```"
+    )
+    msgs = split_message(code)
+    assert len(msgs) >= 2
+    for m in msgs:
+        assert m.startswith("```python\n")
+        assert len(m) <= DISCORD_HARD_LIMIT
+        assert len(re.findall(r"^```", m, re.M)) % 2 == 0

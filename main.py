@@ -14,6 +14,7 @@ from src import library, question_log, sessions
 from src.llm.claude import AskBlocked, AskFailed, ask as llm_ask
 from src.session_capture import scribe_notice
 from src.utils.answer import answer_budget, clean_answer, discord_messages
+from src.utils.discord_send import send_followups
 from src.utils.commandline import CommandLine
 from src.utils.pdf_generator import pdf_generator
 from src.utils.voice import disconnect_targets
@@ -610,9 +611,11 @@ if __name__ == "__main__":
             return
 
         # ephemeral=not public: /ask is private to the asker,
-        # /ask-public posts the answer to the whole channel. The
-        # followups below inherit this ephemerality from the defer.
-        await ctx.defer(ephemeral=not public)
+        # /ask-public posts the answer to the whole channel. Only the first
+        # follow-up inherits the defer's visibility, so every send below
+        # passes it explicitly (send_followups; roborev #6486).
+        private = not public
+        await ctx.defer(ephemeral=private)
 
         started = time.perf_counter()
         try:
@@ -638,7 +641,7 @@ if __name__ == "__main__":
             if not answer:
                 empty = "The model returned no answer. Try rephrasing the question."
                 _log(question_log.FAILED, started, error=empty, result=result)
-                await ctx.followup.send(empty)
+                await send_followups(ctx, [empty], ephemeral=private)
                 return
             # The model was given a budget (answer_budget) so this is
             # normally one message; if it ran long, post the rest as
@@ -654,8 +657,7 @@ if __name__ == "__main__":
             # send is noted, not logged a second time as a FAILED question
             # by the handler below.
             try:
-                for part in messages:
-                    await ctx.followup.send(part)
+                await send_followups(ctx, messages, ephemeral=private)
             except Exception as send_err:
                 _log(
                     question_log.ANSWERED,
@@ -672,21 +674,24 @@ if __name__ == "__main__":
             # refusal; it went through the same deferred response, so
             # /ask-public refusals are visible like answers would be.
             _log(question_log.BLOCKED, started, error=e.user_message, verdict=e.verdict)
-            for part in discord_messages(
-                question, e.user_message, DISCORD_MESSAGE_LIMIT
-            ):
-                await ctx.followup.send(part)
+            await send_followups(
+                ctx,
+                discord_messages(question, e.user_message, DISCORD_MESSAGE_LIMIT),
+                ephemeral=private,
+            )
         except AskFailed as e:
             # claude.ask has already chosen the message that fits the reason
             # (bad key, rate limit, out of credit, unreachable, refusal), so
             # pass it straight through rather than guessing here.
             logger.error(f"/ask failed: {e.user_message} ({e.__cause__!r})")
             _log(question_log.FAILED, started, error=e.user_message)
-            await ctx.followup.send(e.user_message)
+            await send_followups(ctx, [e.user_message], ephemeral=private)
         except Exception as e:
             logger.exception("/ask failed unexpectedly")
             _log(question_log.FAILED, started, error=f"unexpected: {e!r}")
-            await ctx.followup.send(f"Failed to query the model.\n`{e}`")
+            await send_followups(
+                ctx, [f"Failed to query the model.\n`{e}`"], ephemeral=private
+            )
 
     @bot.slash_command(
         name="ask",
