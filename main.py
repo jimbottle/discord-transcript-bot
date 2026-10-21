@@ -20,7 +20,7 @@ from src.utils.discord_send import send_followups
 from src.utils.commandline import CommandLine
 from src.utils.pdf_generator import pdf_generator
 from src.transcript_lines import parse_transcript_text
-from src.utils import timefmt
+from src.utils import bot_log, timefmt
 from src.utils.voice import disconnect_targets
 
 load_dotenv()
@@ -68,6 +68,14 @@ def configure_logging():
     else:
         logger.setLevel(logging.INFO)
         logging.basicConfig(level=logging.INFO, format=log_format, datefmt=date_format)
+
+    # The bot's own log, kept on disk so a problem in a session can be
+    # diagnosed after the terminal is gone (discord-transcript-bot-309).
+    bot_log.install(
+        level=logging.DEBUG if CLIArgs.verbose else logging.INFO,
+        fmt=log_format,
+        datefmt=date_format,
+    )
 
     # Set up the transcription logger
     transcription_logger = logging.getLogger("transcription")
