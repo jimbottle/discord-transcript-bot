@@ -2,6 +2,10 @@
 # by `op run` at launch); otherwise the bot falls back to the literal .env.
 RUN = $(shell [ -f op.env ] && echo "op run --env-file=op.env --")
 
+# Every target is a command, not a file; without this `make web` says
+# "`web' is up to date" because the web/ directory exists.
+.PHONY: help start web test test-integration preflight prewarm capture-session verify-session rabbitmq
+
 help:
 	python main.py --help
 
@@ -9,7 +13,7 @@ start:
 	$(RUN) ./venv/bin/python main.py
 
 web:
-	cd web && python app.py
+	cd web && ../venv/bin/python app.py
 
 test:
 	./venv/bin/python -m pytest tests/ -v -m "not integration"
