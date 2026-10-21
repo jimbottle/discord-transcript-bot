@@ -48,17 +48,43 @@ bot = BotManager()
 # Format a raw seconds count in templates, e.g. a guild's stalled output age.
 app.jinja_env.filters["duration"] = format_duration
 
+# The dashboard only ever listens on loopback. Requests must also *address*
+# it as loopback: a DNS-rebinding page (attacker.example resolving to
+# 127.0.0.1 after first load) arrives with Host/Origin set to the attacker's
+# name, and that is what the Host check and the Origin check below reject.
+# Both compare against these fixed values, never against the request's own
+# Host header, which is attacker-controlled in exactly that scenario.
+DASHBOARD_HOST = "127.0.0.1"
+DASHBOARD_PORT = 5001
+_LOOPBACK_NAMES = ("127.0.0.1", "localhost", "[::1]")
+
+
+def _allowed_hosts():
+    port = app.config.get("DASHBOARD_PORT", DASHBOARD_PORT)
+    bare = set(_LOOPBACK_NAMES)
+    return bare | {f"{name}:{port}" for name in bare}
+
+
+def _allowed_origins():
+    return {f"http://{host}" for host in _allowed_hosts()}
+
+
+@app.before_request
+def _reject_foreign_host():
+    if request.host not in _allowed_hosts():
+        abort(403)
+
 
 def _require_csrf_header():
     # CSRF defense for state-changing endpoints. Cross-origin <form> submissions
     # cannot set custom headers, so requiring X-Requested-With blocks the classic
     # form-CSRF attack. Additionally reject any request whose Origin is set and
-    # doesn't match this host — defense in depth against a browser extension or
-    # other same-machine actor that can set arbitrary headers.
+    # isn't one of the loopback origins — defense in depth against a browser
+    # extension or other same-machine actor that can set arbitrary headers.
     if request.headers.get("X-Requested-With") != "XMLHttpRequest":
         abort(403)
     origin = request.headers.get("Origin")
-    if origin and origin != request.host_url.rstrip("/"):
+    if origin and origin not in _allowed_origins():
         abort(403)
 
 
@@ -275,4 +301,4 @@ def roster_delete():
 
 if __name__ == "__main__":
     debug = os.getenv("FLASK_DEBUG", "").lower() in ("1", "true", "yes")
-    app.run(host="127.0.0.1", port=5001, debug=debug)
+    app.run(host=DASHBOARD_HOST, port=DASHBOARD_PORT, debug=debug)

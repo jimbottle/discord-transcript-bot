@@ -796,3 +796,36 @@ def test_live_page_has_the_ask_box(client):
     r = client.get("/live")
     assert b'id="ask-form"' in r.data
     assert b'id="ask-question"' in r.data
+
+
+# ── Host / Origin allowlist (DNS rebinding) ──────────────────────────────
+# A rebinding page reaches the loopback server with the attacker's hostname
+# in Host and Origin. Both checks compare against fixed loopback values.
+
+
+def test_foreign_host_is_rejected_everywhere(client):
+    assert client.get("/", headers={"Host": "attacker.example"}).status_code == 403
+    assert (
+        client.get("/live/data", headers={"Host": "attacker.example:5001"}).status_code
+        == 403
+    )
+
+
+def test_loopback_hosts_are_accepted(client):
+    for host in ("localhost", "127.0.0.1", "localhost:5001", "127.0.0.1:5001"):
+        assert client.get("/bot/status", headers={"Host": host}).status_code == 200
+
+
+def test_origin_must_be_loopback_even_when_host_matches(client, fake_bot):
+    # Host spoofed to loopback but Origin says attacker: still refused.
+    r = client.post(
+        "/bot/start",
+        headers={**_XHR, "Host": "127.0.0.1:5001", "Origin": "http://attacker.example"},
+    )
+    assert r.status_code == 403
+    assert fake_bot.start_calls == 0
+    ok = client.post(
+        "/bot/start",
+        headers={**_XHR, "Host": "127.0.0.1:5001", "Origin": "http://127.0.0.1:5001"},
+    )
+    assert ok.status_code == 200
