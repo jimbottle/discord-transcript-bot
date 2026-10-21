@@ -87,6 +87,7 @@ def test_summary_renders_one_line_per_check():
 
 
 def test_ask_provider_passes_with_a_key(monkeypatch):
+    monkeypatch.delenv("ASK_PROVIDER", raising=False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setenv("ASK_MODEL", "claude-sonnet-5-5")
     hc = HealthCheck()
@@ -98,6 +99,7 @@ def test_ask_provider_passes_with_a_key(monkeypatch):
 
 
 def test_ask_provider_warns_without_a_key(monkeypatch):
+    monkeypatch.setenv("ASK_PROVIDER", "anthropic")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "  ")
     hc = HealthCheck()
     hc._check_ask_provider()
@@ -244,3 +246,50 @@ def test_whisper_check_survives_a_broken_probe(monkeypatch):
     hc = HealthCheck()
     hc._check_whisper_model()
     assert hc.checks["whisper_model"]["ok"] is True
+
+
+# ── ask_provider: local model ─────────────────────────────────────────
+
+
+def _local(monkeypatch, **status):
+    from src.llm import local
+
+    base = {"url": "http://localhost:11434/v1", "model": "gemma4:26b"}
+    base.update(status)
+    monkeypatch.setenv("ASK_PROVIDER", "local")
+    monkeypatch.setattr(local, "status", lambda: base)
+
+
+def test_local_provider_ready(monkeypatch):
+    _local(monkeypatch, reachable=True, has_model=True)
+    hc = HealthCheck()
+    hc._check_ask_provider()
+    check = hc.checks["ask_provider"]
+    assert check["ok"] is True and "gemma4:26b" in check["message"]
+    assert check["critical"] is False
+
+
+def test_local_provider_server_down_names_the_fix(monkeypatch):
+    _local(monkeypatch, reachable=False, has_model=False)
+    hc = HealthCheck()
+    hc._check_ask_provider()
+    check = hc.checks["ask_provider"]
+    assert check["ok"] is False and check["critical"] is False
+    assert "Ollama" in check["message"] and "ASK_PROVIDER=anthropic" in check["message"]
+
+
+def test_local_provider_missing_model_says_pull(monkeypatch):
+    _local(monkeypatch, reachable=True, has_model=False)
+    hc = HealthCheck()
+    hc._check_ask_provider()
+    assert "ollama pull gemma4:26b" in hc.checks["ask_provider"]["message"]
+
+
+def test_unconfigured_checkout_probes_the_local_server_not_anthropic(monkeypatch):
+    """A fresh checkout (no key, no ASK_PROVIDER) is local-first; the probe
+    hits the conftest's closed port and reports it, quickly."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    hc = HealthCheck()
+    hc._check_ask_provider()
+    check = hc.checks["ask_provider"]
+    assert check["ok"] is False and "127.0.0.1:9" in check["message"]

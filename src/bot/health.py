@@ -328,34 +328,63 @@ class HealthCheck:
     # ── ask_provider ─────────────────────────────────────────────────
 
     def _check_ask_provider(self):
-        """Whether `/ask` has an Anthropic key.
+        """Which model answers `/ask`, and whether it can.
 
-        Key presence only — deliberately no test call, which would spend
-        money on every bot start; a key that is present but rejected is
-        reported at question time by src/llm/claude. Never critical: `/ask`
-        is the only consumer and transcription must start without it.
+        Local: one cheap GET to the model server (is it up, does it have the
+        model). Anthropic: key presence only — deliberately no test call,
+        which would spend money on every bot start; a rejected key is
+        reported at question time. Never critical: transcription must start
+        without `/ask`.
         """
         from src import library
-        from src.llm import claude
+        from src.llm import local, provider
 
-        if claude.configured():
-            try:
-                n = len(library.load().campaigns)
-            except Exception as e:  # noqa: BLE001 - never block startup on the library
-                logger.warning("library could not be loaded: %s", e)
-                n = 0
+        try:
+            n = len(library.load().campaigns)
+        except Exception as e:  # noqa: BLE001 - never block startup on the library
+            logger.warning("library could not be loaded: %s", e)
+            n = 0
+        campaigns = f"{n} campaign{'s' if n != 1 else ''} in the library"
+
+        if provider.name() == provider.LOCAL:
+            st = local.status()
+            if not st["reachable"]:
+                self._record(
+                    "ask_provider",
+                    False,
+                    f"/ask: no local model server at {st['url']} — start Ollama "
+                    "(or set LOCAL_LLM_URL), or use the Anthropic API "
+                    "(ASK_PROVIDER=anthropic)",
+                    critical=False,
+                )
+            elif not st["has_model"]:
+                self._record(
+                    "ask_provider",
+                    False,
+                    f"/ask: {st['url']} has no model {st['model']} — run "
+                    f"`ollama pull {st['model']}` or set LOCAL_LLM_MODEL",
+                    critical=False,
+                )
+            else:
+                self._record(
+                    "ask_provider",
+                    True,
+                    f"/ask: {provider.describe()}, {campaigns}",
+                    critical=False,
+                )
+        elif provider.configured():
             self._record(
                 "ask_provider",
                 True,
-                f"/ask: Anthropic ({claude.model()}, effort {claude.effort()}), "
-                f"{n} campaign{'s' if n != 1 else ''} in the library",
+                f"/ask: {provider.describe()}, {campaigns}",
                 critical=False,
             )
         else:
             self._record(
                 "ask_provider",
                 False,
-                "ANTHROPIC_API_KEY not set — /ask is disabled (see op.env.example)",
+                "ASK_PROVIDER=anthropic but ANTHROPIC_API_KEY is not set — /ask "
+                "is disabled (see op.env.example), or use ASK_PROVIDER=local",
                 critical=False,
             )
 

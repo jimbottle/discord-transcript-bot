@@ -240,6 +240,20 @@ def header_text(lib, meta: Optional[SessionMeta], recordings: int = 1) -> str:
     return line
 
 
+# "[8:26 PM] Player (Character) [254468368969629697]: text": the Discord id
+# is noise to a model and, measured on the 2026-10-20 session, 44% of a
+# line's tokens (12,000 characters: 5,805 tokens with ids, 3,225 without).
+_SPEAKER_ID = re.compile(r"^(\[[^\]\n]+\] [^\n]*?\([^)\n]*\)) \[\d+\]:", re.M)
+
+
+def model_text(transcript: str) -> str:
+    """The transcript as a model reads it: 12-hour times and no Discord ids.
+    The files keep both; only what is sent changes."""
+    from src.utils.timefmt import for_model
+
+    return _SPEAKER_ID.sub(r"\1:", for_model(transcript))
+
+
 def ask_context(transcript_path, lib=None):
     """Everything /ask needs for the session ``transcript_path`` belongs to:
     ``(text, header, note_dirs, files)``."""
@@ -247,11 +261,10 @@ def ask_context(transcript_path, lib=None):
         from src import library
 
         lib = library.load()
-    from src.utils.timefmt import for_model
-
     text, meta, files = session_transcript(transcript_path)
-    # The model sees (and quotes) 12-hour times; the files stay 24-hour.
-    text = for_model(text)
+    # The model sees (and quotes) 12-hour times and no Discord ids; the files
+    # keep 24-hour stamps and ids.
+    text = model_text(text)
     if meta is None:
         return text, "", [], files
     header = header_text(lib, meta, len(files))
