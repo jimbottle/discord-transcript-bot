@@ -67,9 +67,9 @@ def test_end_recording_session_tears_down_when_recording():
 
     fake.stop_recording.assert_called_once_with(ctx)
     fake.cleanup_sink.assert_called_once_with(ctx)
-    assert (
-        fake.guild_is_recording[42] is False
-    ), "recording flag must be cleared so a later /scribe doesn't see 'Already recording'"
+    assert fake.guild_is_recording[42] is False, (
+        "recording flag must be cleared so a later /scribe doesn't see 'Already recording'"
+    )
 
 
 def test_end_recording_session_is_noop_when_not_recording():

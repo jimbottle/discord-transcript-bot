@@ -136,8 +136,6 @@ class HealthCheck:
                 discord.opus._load_default()
             # If _load_default didn't find it, try known paths (e.g. Homebrew)
             if not discord.opus.is_loaded():
-                import glob as _glob
-
                 candidates = [
                     "/opt/homebrew/lib/libopus.0.dylib",
                     "/opt/homebrew/lib/libopus.dylib",
@@ -414,7 +412,7 @@ class HealthCheck:
                 )
                 return
             self._record(
-                "discord_gateway", True, f"Connected (latency: {latency*1000:.0f}ms)"
+                "discord_gateway", True, f"Connected (latency: {latency * 1000:.0f}ms)"
             )
         except Exception as e:
             self._record("discord_gateway", False, f"Gateway check failed: {e}")

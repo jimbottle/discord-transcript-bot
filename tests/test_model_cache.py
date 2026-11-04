@@ -3,8 +3,6 @@
 The probe must answer "would get_backend() download?" without loading a
 model, mirror selection's backend choice, and never raise."""
 
-import os
-
 import pytest
 
 from src.asr import model_cache, selection

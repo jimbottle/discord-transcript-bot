@@ -71,9 +71,9 @@ def _make_sink(tmp_path, monkeypatch, player_map=None):
 
 def test_constructed_sink_does_not_create_file(tmp_path, monkeypatch):
     sink = _make_sink(tmp_path, monkeypatch)
-    assert not os.path.exists(
-        sink.session_file
-    ), "session file should not exist until first write"
+    assert not os.path.exists(sink.session_file), (
+        "session file should not exist until first write"
+    )
     sink.close()
 
 
@@ -91,9 +91,9 @@ def test_get_session_fh_returns_none_after_close(tmp_path, monkeypatch):
     sink = _make_sink(tmp_path, monkeypatch)
     sink._get_session_fh()  # open it
     sink.close()
-    assert (
-        sink._get_session_fh() is None
-    ), "after close, lazy-open must refuse to re-open the file"
+    assert sink._get_session_fh() is None, (
+        "after close, lazy-open must refuse to re-open the file"
+    )
 
 
 def test_session_fh_writable_during_stop_drain(tmp_path, monkeypatch):
@@ -111,9 +111,9 @@ def test_session_fh_writable_during_stop_drain(tmp_path, monkeypatch):
     fh.flush()
     assert os.path.exists(sink.session_file)
     sink.close()
-    assert (
-        sink._get_session_fh() is None
-    ), "once close() finalizes the file, further writes are refused"
+    assert sink._get_session_fh() is None, (
+        "once close() finalizes the file, further writes are refused"
+    )
 
 
 def test_close_is_idempotent(tmp_path, monkeypatch):
@@ -237,9 +237,9 @@ def test_stop_voice_thread_uses_bounded_join(tmp_path, monkeypatch):
     ft = _FakeThread()
     sink.voice_thread = ft
     sink.stop_voice_thread()  # must not raise / hang
-    assert (
-        ft.join_timeout == sink.JOIN_TIMEOUT_S
-    ), "join() must be called with a finite timeout, not unbounded"
+    assert ft.join_timeout == sink.JOIN_TIMEOUT_S, (
+        "join() must be called with a finite timeout, not unbounded"
+    )
     sink.close()
 
 
@@ -264,9 +264,9 @@ def test_stop_voice_thread_warns_and_returns_when_thread_wont_die(
     sink.voice_thread = _StuckThread()
     with caplog.at_level(logging.WARNING):
         sink.stop_voice_thread()  # must return, not hang
-    assert any(
-        "did not exit" in r.message for r in caplog.records
-    ), "a non-exiting voice thread must log a warning"
+    assert any("did not exit" in r.message for r in caplog.records), (
+        "a non-exiting voice thread must log a warning"
+    )
     sink.close()
 
 
@@ -652,9 +652,9 @@ def test_buffer_force_flushed_past_duration_cap(tmp_path, monkeypatch):
     sink.voice_queue.put_nowait([5, b"bb", t])  # chunk_count > 1
 
     _run_insert_voice(sink, until=lambda: bool(submitted))
-    assert submitted == [
-        5
-    ], "buffer must be force-flushed by the duration cap, not only on silence"
+    assert submitted == [5], (
+        "buffer must be force-flushed by the duration cap, not only on silence"
+    )
     sink.close()
 
 
@@ -690,9 +690,9 @@ def test_drain_continues_while_a_transcription_is_in_flight(tmp_path, monkeypatc
         deadline = time.time() + 2
         while not sink.voice_queue.empty() and time.time() < deadline:
             time.sleep(0.02)
-        assert (
-            sink.voice_queue.empty()
-        ), "voice_queue must keep draining while a transcription is in flight"
+        assert sink.voice_queue.empty(), (
+            "voice_queue must keep draining while a transcription is in flight"
+        )
     finally:
         release.set()
         sink.running = False
@@ -825,9 +825,9 @@ def test_capture_logs_that_it_is_armed_at_construction(tmp_path, monkeypatch, ca
     monkeypatch.setattr(ws, "CAPTURE_SESSION_AUDIO", True)
     with caplog.at_level(logging.INFO, logger=ws.__name__):
         sink = _make_sink(tmp_path, monkeypatch)
-    assert any(
-        "capture ENABLED" in r.message for r in caplog.records
-    ), "enabling capture must announce itself at startup"
+    assert any("capture ENABLED" in r.message for r in caplog.records), (
+        "enabling capture must announce itself at startup"
+    )
     sink.close()
 
 

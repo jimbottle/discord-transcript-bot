@@ -8,7 +8,6 @@ faster-whisper large-v3 — conftest's `_fast_whisper_model` fixture stubs
 """
 
 import os
-from unittest.mock import MagicMock
 
 import pytest
 
