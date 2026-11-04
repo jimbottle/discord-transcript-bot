@@ -16,7 +16,6 @@ import json
 import os
 import signal
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -43,7 +42,9 @@ def test_bot_subprocess_reaches_ready_phase():
     # Evaluate prerequisites at test run time, not module import — so a
     # post-collection change to env or venv state is observed correctly.
     if not _has_real_token():
-        pytest.skip("DISCORD_BOT_TOKEN missing or placeholder — startup test needs a real token")
+        pytest.skip(
+            "DISCORD_BOT_TOKEN missing or placeholder — startup test needs a real token"
+        )
     if not VENV_PYTHON.exists():
         pytest.skip(f"venv/bin/python not found at {VENV_PYTHON}")
 
@@ -117,8 +118,10 @@ def test_bot_subprocess_reaches_ready_phase():
 
     assert "checks" in final_status
     critical_failures = [
-        name for name, info in final_status["checks"].items()
+        name
+        for name, info in final_status["checks"].items()
         if info.get("critical") and not info.get("ok")
     ]
-    assert not critical_failures, \
+    assert not critical_failures, (
         f"Ready but critical checks failing: {critical_failures}"
+    )

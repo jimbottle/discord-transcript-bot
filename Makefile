@@ -36,4 +36,3 @@ capture-session:
 
 verify-session:
 	./scripts/post_session_verify.sh
-

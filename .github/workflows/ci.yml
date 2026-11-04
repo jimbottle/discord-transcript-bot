@@ -1,0 +1,78 @@
+# discord-transcript-bot CI, on the Raylytics VC Standard template (templates/ci/python.yml,
+# STANDARD.md §8, §12). The build job builds the Docker image, which is what ships.
+# Jobs are named exactly pre-commit, test and build; rulesets/main.json
+# requires the first two by name. The pr-title job applies to Tier 1 only;
+# scripts/bootstrap-repo.sh removes the block between the tier1-only markers
+# for Tier 2. Actions are pinned to full commit SHAs (version in the trailing
+# comment), resolved with `gh api` on 2026-10-27.
+# A job that runs a matrix reports one check per leg ("test (ubuntu-latest)"),
+# which the ruleset does not match: rename it (test-os) and add a plain `test`
+# job with `needs: test-os`, `if: always()`, that fails unless
+# needs.test-os.result == success (would-you-kindly's ci.yml is the example).
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+      - name: pre-commit
+        run: uvx pre-commit run --all-files --show-diff-on-failure
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - name: Unit tests (integration tests auto-skip without credentials)
+        run: uv run pytest -q -m "not integration"
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+      - name: Build the bot image
+        run: docker build -t discord-transcript-bot:ci .
+
+  # tier1-only: begin
+  pr-title:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: PR title is a Conventional Commit subject
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(feat|fix|perf|refactor|style|docs|test|build|ci|chore|revert)(\([a-z0-9-]+\))?!?: .{1,60}$'
+          if printf '%s\n' "$TITLE" | grep -Eq "$pattern"; then
+            echo "ok: $TITLE"
+          else
+            echo "::error::PR title must match $pattern (it becomes the squash commit subject)"
+            exit 1
+          fi
+  # tier1-only: end

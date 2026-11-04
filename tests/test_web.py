@@ -11,7 +11,6 @@ artifacts in .logs/ or transcripts/ and tests stay independent.
 import json
 import os
 import time as _time
-from unittest.mock import MagicMock
 
 import pytest
 import yaml

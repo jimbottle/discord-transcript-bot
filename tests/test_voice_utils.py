@@ -5,6 +5,7 @@ selection/dedup is pure logic and must be covered without live Discord.
 The stale-helper.vc case is the live bug ("said disconnected but stayed
 in the call").
 """
+
 from types import SimpleNamespace
 
 from src.utils.voice import disconnect_targets

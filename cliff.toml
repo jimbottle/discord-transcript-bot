@@ -1,0 +1,75 @@
+# Raylytics VC Standard, templates/cliff.toml (STANDARD.md §7, §12).
+# git-cliff configuration: Keep a Changelog layout generated from Conventional
+# Commits. feat -> Added, fix -> Fixed, perf and refactor -> Changed,
+# revert -> Reverted, `!` or BREAKING CHANGE -> Breaking; docs, style, test,
+# build, ci and chore (including chore(release)) are skipped.
+# scripts/bootstrap-repo.sh fills <repo> in repo_url below; the commit and
+# compare links are built from it.
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to this project are documented in this file.
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+Entries are generated from Conventional Commits by [git-cliff](https://git-cliff.org).
+
+"""
+body = """
+{%- set repo_url = "https://github.com/jimbottle/discord-transcript-bot" -%}
+{% if version -%}
+## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else -%}
+## [Unreleased]
+{% endif -%}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+{% for commit in commits %}
+- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}\
+{% if commit.breaking %}[**breaking**] {% endif %}\
+{{ commit.message | upper_first }} \
+([{{ commit.id | truncate(length=7, end="") }}]({{ repo_url }}/commit/{{ commit.id }}))\
+{% endfor %}
+{% endfor %}
+{% if version and previous.version -%}
+[{{ version | trim_start_matches(pat="v") }}]: {{ repo_url }}/compare/{{ previous.version }}...{{ version }}
+{% elif version -%}
+[{{ version | trim_start_matches(pat="v") }}]: {{ repo_url }}/releases/tag/{{ version }}
+{% elif previous.version -%}
+[unreleased]: {{ repo_url }}/compare/{{ previous.version }}...HEAD
+{% endif %}
+"""
+footer = ""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+split_commits = false
+protect_breaking_commits = true
+filter_commits = false
+tag_pattern = "v[0-9].*"
+skip_tags = ""
+ignore_tags = "rc|alpha|beta"
+topo_order = false
+sort_commits = "oldest"
+commit_parsers = [
+  { message = "^chore\\(release\\)", skip = true },
+  { message = "^feat", group = "<!-- 0 -->Added" },
+  { message = "^fix", group = "<!-- 1 -->Fixed" },
+  { message = "^perf", group = "<!-- 2 -->Changed" },
+  { message = "^refactor", group = "<!-- 2 -->Changed" },
+  { message = "^revert", group = "<!-- 3 -->Reverted" },
+  { message = "^docs", skip = true },
+  { message = "^style", skip = true },
+  { message = "^test", skip = true },
+  { message = "^build", skip = true },
+  { message = "^ci", skip = true },
+  { message = "^chore", skip = true },
+  { body = ".*BREAKING CHANGE", group = "<!-- 4 -->Breaking" },
+  { breaking = true, group = "<!-- 4 -->Breaking" },
+  # Anything else (a subject whose "type" is not one of the eleven, such as a
+  # bd issue id or a capitalised word before the colon) is not a changelog entry.
+  { message = ".*", skip = true },
+]

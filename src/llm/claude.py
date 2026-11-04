@@ -20,7 +20,6 @@ a note's body only when the question needs it (discord-transcript-bot-kda).
 """
 
 import logging
-import os
 
 import anthropic
 

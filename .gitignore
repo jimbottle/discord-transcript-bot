@@ -44,3 +44,17 @@ captures/
 
 # Question history (question_log.py): answers can quote GM notes.
 /history/
+
+# Raylytics VC Standard
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+*.log
+.claude/settings.local.json
+QUEUE.md
+HANDOFF*
+dist/
+.ruff_cache/
+.pytest_cache/

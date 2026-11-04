@@ -48,11 +48,15 @@ from discord.voice.receive.reader import UDPKeepAlive
 client = MagicMock()
 client.wait_until_connected.return_value = True
 client.is_connected.return_value = True
-client._connection.socket.sendto.side_effect = OSError(49, "Can't assign requested address")
+client._connection.socket.sendto.side_effect = OSError(
+    49, "Can't assign requested address"
+)
 
-ka = UDPKeepAlive(client); ka.start()
-time.sleep(2); ka.stop()
-print(client._connection.socket.sendto.call_count)   # ~13,000 on an M-series Mac
+ka = UDPKeepAlive(client)
+ka.start()
+time.sleep(2)
+ka.stop()
+print(client._connection.socket.sendto.call_count)  # ~13,000 on an M-series Mac
 ```
 
 ### Suggested fix

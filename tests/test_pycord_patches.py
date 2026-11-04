@@ -125,9 +125,9 @@ def test_patched_loop_keeps_upstream_success_path_but_stop_is_prompt(
     t0 = time.monotonic()
     ka.stop()
     ka.join(2)
-    assert (
-        not ka.is_alive() and time.monotonic() - t0 < 1.0
-    ), "upstream time.sleep(delay) would park the thread for delay seconds"
+    assert not ka.is_alive() and time.monotonic() - t0 < 1.0, (
+        "upstream time.sleep(delay) would park the thread for delay seconds"
+    )
 
 
 def test_patched_loop_exits_when_connection_is_gone(pristine_keepalive, monkeypatch):
