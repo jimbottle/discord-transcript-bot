@@ -1,0 +1,36 @@
+# Raylytics VC Standard, templates/release.yml (STANDARD.md §7, §12).
+# Runs when scripts/release.sh pushes a vX.Y.Z tag: builds what proves
+# something (scripts/dist.sh, when the repo has one, writes dist/), takes the
+# release notes from the tag's CHANGELOG section with git-cliff, and creates
+# the GitHub Release. Not installed in would-you-kindly, which keeps goreleaser.
+name: release
+
+on:
+  push:
+    tags: ['v[0-9]*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - name: Build distributables
+        run: |
+          if [ -x scripts/dist.sh ]; then scripts/dist.sh; else echo "no scripts/dist.sh; nothing to attach"; fi
+      - name: Release notes from the changelog
+        run: uvx --from 'git-cliff==2.14.2' git-cliff --latest --strip header > notes.md
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -d dist ] && [ -n "$(ls -A dist)" ]; then
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md dist/*
+          else
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md
+          fi

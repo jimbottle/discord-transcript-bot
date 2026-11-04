@@ -1,5 +1,8 @@
 # Discord Transcript Bot
 
+[![ci](https://github.com/jimbottle/discord-transcript-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/jimbottle/discord-transcript-bot/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/jimbottle/discord-transcript-bot)](https://github.com/jimbottle/discord-transcript-bot/releases/latest)
+
 A Discord bot that sits in a voice channel and writes down what everyone says, as they say it. Built for tabletop sessions over Discord: the transcript is kept per session, speakers are labelled with player and character names, and you can ask questions about the game afterwards.
 
 Transcription runs on your own machine with Whisper (MLX-Whisper on Apple Silicon, faster-whisper elsewhere), or through OpenAI's Whisper API if you prefer.
@@ -146,7 +149,11 @@ If `ASK_PROVIDER` is not set, the bot uses Anthropic when `ANTHROPIC_API_KEY` is
 
 ## Contributing
 
-Pull requests are welcome. Run `make preflight` (the health checks and the test suite) before opening one, and add a test for anything you change; `black` and `pylint` are the formatter and linter.
+Pull requests are welcome. Install the hooks once (`pre-commit install --hook-type pre-commit --hook-type commit-msg`), run `make preflight` (the health checks and the test suite) before opening one, and add a test for anything you change. `ruff` formats (black's style) and lints; commits follow Conventional Commits and land through squash-merged PRs with CI green. The `Version control` section of [CLAUDE.md](CLAUDE.md) is the short form.
+
+### Releasing
+
+`scripts/release.sh X.Y.Z` on a clean, green `main` bumps `project.version` in `pyproject.toml`, prepends the release to [CHANGELOG.md](CHANGELOG.md) from the commits with git-cliff, commits `chore(release): vX.Y.Z` and pushes a signed tag; the `release` workflow creates the GitHub Release.
 
 ## Attribution
 

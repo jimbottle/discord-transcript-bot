@@ -1,0 +1,25 @@
+# Raylytics VC Standard, templates/gitleaks.toml (STANDARD.md §9, §12).
+# Extends the default ruleset and allowlists the known non-secrets the audit
+# confirmed: the Chrome extension manifest "key" (a public key), the GA4
+# Measurement Protocol API_SECRET the extensions bundle on purpose (keep the
+# comment that says so in shared/telemetry.js), the public Android debug
+# keystore, and test fixtures.
+title = "Raylytics gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known non-secrets (audit REPORT.md §5, 2026-10-27)"
+# The regexes below describe whole lines (the assignment, not the value), so
+# they must be matched against the line; the default target is the secret.
+regexTarget = "line"
+paths = [
+  '''(^|/)test/fixtures/''',
+  '''(^|/)tests/fixtures/''',
+  '''(^|/)debug\.keystore$''',
+]
+regexes = [
+  '''"key"\s*:\s*"MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA[A-Za-z0-9+/=]+"''',
+  '''API_SECRET\s*[:=]\s*['"][A-Za-z0-9_-]{20,24}['"]''',
+]
