@@ -9,12 +9,15 @@ it didn't spawn itself (`make start`, a detached run), so it was blind
 to the bot it's supposed to monitor.
 """
 
+import os
+
+import bot_manager as bm_mod
 from bot_manager import BotManager
 
 
 def _bm(monkeypatch, *, pid, health):
     bm = BotManager()
-    monkeypatch.setattr(bm, "_find_bot_pid", lambda: pid)
+    monkeypatch.setattr(bm, "_find_bot_pid", lambda health=None: pid)
     monkeypatch.setattr(bm, "_read_health", lambda: health)
     return bm
 
@@ -82,7 +85,10 @@ def test_status_from_health_missing_file_is_starting():
     assert out == {"status": "starting", "pid": 1, "checks": {}, "external": True}
 
 
-# ── _find_bot_pid: pgrep parsing + cwd identity check (roborev #797) ───
+# ── _find_bot_pid: which process is the bot (roborev #797, -93b) ───────
+
+PY = "/usr/bin/python3"
+DECOY = "/Users/x/mcp-servers/google_workspace_mcp/main.py --tool-tier extended"
 
 
 class _FakeRun:
@@ -90,31 +96,94 @@ class _FakeRun:
         self.stdout = stdout
 
 
-def test_find_bot_pid_returns_first_pid_whose_cwd_is_project(monkeypatch):
-    import bot_manager as bm_mod
+def _procs(monkeypatch, bm, procs, pgrep=""):
+    """procs: pid -> (command, cwd). pgrep: what the scan returns."""
+    monkeypatch.setattr(bm_mod.subprocess, "run", lambda *a, **k: _FakeRun(pgrep))
+    monkeypatch.setattr(bm, "_proc_command", lambda pid: procs.get(pid, (None,))[0])
+    monkeypatch.setattr(bm, "_proc_cwd", lambda pid: procs.get(pid, (None, None))[1])
 
+
+def test_runs_project_main_accepts_the_ways_the_bot_is_started():
+    root = bm_mod.PROJECT_ROOT
+    ok = bm_mod.BotManager._runs_project_main
+    assert ok(f"{PY} main.py", root)
+    assert ok(f"{PY} main.py -v", root)
+    assert ok(f"{PY} ./main.py", root)
+    assert ok(f"{PY} {os.path.join(root, 'main.py')}", "/somewhere/else")
+
+
+def test_runs_project_main_rejects_other_main_py():
+    root = bm_mod.PROJECT_ROOT
+    ok = bm_mod.BotManager._runs_project_main
+    # The 2026-11-10 case: an MCP server started from this directory.
+    assert not ok(f"{PY} {DECOY}", root)
+    assert not ok(f"{PY} /a b/Claude Extensions/workspace-mcp/main.py", root)
+    assert not ok(f"{PY} main.py", "/somewhere/else")
+    assert not ok(f"{PY} {os.path.join(root, 'main.py')}.bak", root)
+    assert not ok(None, root)
+    assert not ok(f"{PY} main.py", None)
+
+
+def test_scan_skips_a_decoy_main_py_in_the_project_directory(monkeypatch):
+    root = bm_mod.PROJECT_ROOT
     bm = BotManager()
-    monkeypatch.setattr(
-        bm_mod.subprocess, "run", lambda *a, **k: _FakeRun("999\n12345\nnope\n")
+    procs = {
+        999: (f"{PY} main.py", "/somewhere/else"),
+        44875: (f"{PY} {DECOY}", root),
+        49074: (f"{PY} main.py", root),
+    }
+    _procs(monkeypatch, bm, procs, pgrep="999\n44875\nnope\n49074\n")
+    assert bm._find_bot_pid() == 49074
+    assert bm._find_bot_pid({"phase": "ready"}) == 49074
+
+
+def test_scan_finds_nothing_when_only_the_decoy_runs(monkeypatch):
+    bm = BotManager()
+    _procs(
+        monkeypatch,
+        bm,
+        {44875: (f"{PY} {DECOY}", bm_mod.PROJECT_ROOT)},
+        pgrep="44875\n",
     )
-    # 999 is some other main.py elsewhere; 12345 is ours.
-    cwds = {999: "/somewhere/else", 12345: bm_mod.PROJECT_ROOT}
-    monkeypatch.setattr(bm, "_proc_cwd", lambda pid: cwds.get(pid))
-    assert bm._find_bot_pid() == 12345
-
-
-def test_find_bot_pid_none_when_no_cwd_matches_project(monkeypatch):
-    import bot_manager as bm_mod
-
-    bm = BotManager()
-    monkeypatch.setattr(bm_mod.subprocess, "run", lambda *a, **k: _FakeRun("111\n"))
-    monkeypatch.setattr(bm, "_proc_cwd", lambda pid: "/not/the/project")
     assert bm._find_bot_pid() is None
 
 
-def test_find_bot_pid_swallows_subprocess_error(monkeypatch):
-    import bot_manager as bm_mod
+def test_recorded_pid_wins_over_the_scan(monkeypatch):
+    root = bm_mod.PROJECT_ROOT
+    bm = BotManager()
+    procs = {44875: (f"{PY} main.py", root), 49074: (f"{PY} main.py", root)}
+    _procs(monkeypatch, bm, procs, pgrep="44875\n49074\n")
+    assert bm._find_bot_pid({"phase": "ready", "pid": 49074}) == 49074
 
+
+def test_recorded_pid_that_died_is_not_replaced_by_a_scan(monkeypatch):
+    # The bot crashed and left its health file; nothing else may stand
+    # in for it, least of all the decoy.
+    root = bm_mod.PROJECT_ROOT
+    bm = BotManager()
+    _procs(monkeypatch, bm, {44875: (f"{PY} {DECOY}", root)}, pgrep="44875\n")
+    assert bm._find_bot_pid({"phase": "ready", "pid": 49074}) is None
+
+
+def test_recorded_pid_reused_by_another_program_is_not_the_bot(monkeypatch):
+    bm = BotManager()
+    _procs(monkeypatch, bm, {49074: ("/usr/bin/vim notes.txt", "/tmp")})
+    assert bm._find_bot_pid({"phase": "ready", "pid": 49074}) is None
+
+
+def test_crashed_bot_with_stale_health_and_decoy_reads_stopped(monkeypatch):
+    bm = BotManager()
+    _procs(
+        monkeypatch,
+        bm,
+        {44875: (f"{PY} {DECOY}", bm_mod.PROJECT_ROOT)},
+        pgrep="44875\n",
+    )
+    monkeypatch.setattr(bm, "_read_health", lambda: {"phase": "ready", "pid": 49074})
+    assert bm.status() == {"status": "stopped", "pid": None, "external": False}
+
+
+def test_find_bot_pid_swallows_subprocess_error(monkeypatch):
     bm = BotManager()
 
     def boom(*a, **k):
@@ -122,3 +191,29 @@ def test_find_bot_pid_swallows_subprocess_error(monkeypatch):
 
     monkeypatch.setattr(bm_mod.subprocess, "run", boom)
     assert bm._find_bot_pid() is None
+
+
+def test_real_decoy_process_is_not_the_bot(tmp_path):
+    """End to end with real ps/lsof: a live `python <elsewhere>/main.py`
+    whose cwd is this project is not the bot."""
+    import subprocess
+    import sys
+    import time
+
+    decoy = tmp_path / "main.py"
+    decoy.write_text("import time\ntime.sleep(30)\n")
+    proc = subprocess.Popen([sys.executable, str(decoy)], cwd=bm_mod.PROJECT_ROOT)
+    try:
+        bm = BotManager()
+        deadline = time.time() + 5
+        while bm._proc_cwd(proc.pid) is None and time.time() < deadline:
+            time.sleep(0.05)
+        assert os.path.realpath(bm._proc_cwd(proc.pid)) == os.path.realpath(
+            bm_mod.PROJECT_ROOT
+        )
+        assert "main.py" in bm._proc_command(proc.pid)
+        assert bm._is_bot(proc.pid) is False
+        assert bm._find_bot_pid({"phase": "ready", "pid": proc.pid}) is None
+    finally:
+        proc.kill()
+        proc.wait()
