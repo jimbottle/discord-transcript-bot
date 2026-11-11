@@ -53,6 +53,12 @@ def main(argv=None) -> int:
 
     if args.game and args.game not in lib.games:
         ap.error(f"unknown game '{args.game}' (have: {', '.join(lib.games)})")
+    owned = lib.game_for(args.campaign) if args.campaign else None
+    if args.game and owned and owned != args.game:
+        ap.error(
+            f"campaign '{args.campaign}' is played in '{owned}', not '{args.game}'; "
+            "leave --game out, or change the campaign in library.yml"
+        )
 
     for name in args.files:
         txt = Path(name)

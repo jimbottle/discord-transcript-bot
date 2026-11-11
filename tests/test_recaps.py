@@ -261,3 +261,47 @@ def test_tag_script_sets_a_game_without_a_campaign(lib, tmp_path, monkeypatch):
     assert (m.game, m.group, m.campaign) == ("cyberpunk-red", "noah-gm", None)
     with pytest.raises(SystemExit):
         mod.main([str(txt), "--game", "nope"])
+
+
+def test_tag_script_refuses_a_game_that_contradicts_the_campaign(
+    lib, tmp_path, monkeypatch
+):
+    """roborev #7146: --game used to overwrite the campaign's game."""
+    monkeypatch.setenv("LIBRARY_DIR", str(tmp_path))
+    mod = _script("tag_session")
+    txt = tmp_path / "2026-09-01_19-00-00.txt"
+    txt.write_text("x", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        mod.main([str(txt), "--campaign", "return-to-night-city", "--game", "dnd-5e"])
+    assert sessions.read_meta(txt) is None  # nothing written
+    args = [str(txt), "--campaign", "return-to-night-city", "--game", "cyberpunk-red"]
+    assert mod.main(args) == 0
+    m = sessions.read_meta(txt)
+    assert (m.campaign, m.game) == ("return-to-night-city", "cyberpunk-red")
+
+
+def test_script_recaps_an_unevenly_tagged_night_as_ask_groups_it(
+    lib, tmp_path, monkeypatch
+):
+    """roborev #7146: one recording of the 13th names only the game and
+    group. /ask still treats the night as one earlier session, so the
+    script must write one recap for all of it, and /ask must find it."""
+    now = _earlier_fixture(lib, tmp_path)
+    monkeypatch.setenv("LIBRARY_DIR", str(tmp_path))
+    first, late = _night_13(tmp_path)
+    sessions.retag(
+        late, lib, game="cyberpunk-red", group="noah-gm", whole_session=False
+    )
+    assert sessions.read_meta(late).campaign is None
+    assert sessions.story_night_files(first) == [first, late]
+    assert sessions.story_night_files(late) == [first, late]
+
+    seen = []
+    mod = _script("recap_sessions")
+    args = ["--dir", str(tmp_path), "--generate", "--day", "2026-10-13"]
+    assert mod.main(args, ask=_fake_ask(seen=seen)) == 0
+    assert len(seen) == 1  # once, not once per differently-tagged half
+    assert "the deal went bad" in seen[0]["transcript"]
+    assert "we ran" in seen[0]["transcript"]
+    assert "recap-2026-10-13" in [n.id for n in sessions.earlier_session_notes(now)]
+    assert mod.main(args, ask=_fake_ask(seen=seen)) == 0 and len(seen) == 1

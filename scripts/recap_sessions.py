@@ -26,17 +26,31 @@ from src import campaigns, library, recaps, sessions  # noqa: E402
 
 
 def _eligible(model, campaign=None, day=None, today=False):
-    """Sessions `/ask` can offer as an earlier session: tagged with a
-    campaign, or with a game and a group (``sessions._same_story``)."""
+    """``(session, files)`` for every night `/ask` can offer as an earlier
+    session: tagged with a campaign, or with a game and a group
+    (``sessions._same_story``). ``files`` is the night as /ask groups it
+    (``sessions.story_night_files``), which is what the recap is checked
+    against; it can hold more recordings than the session's own key does
+    when a night is tagged unevenly (roborev #7146). Sessions that name a
+    campaign go first, so when two of them share a night the recap is
+    written once, from the campaign's point of view."""
     now_day = sessions.session_day(datetime.now())
-    for s in model.sessions(campaign):
+    taken = set()
+    found = []
+    for s in sorted(model.sessions(campaign), key=lambda s: not s.campaign_id):
         if not (s.campaign_id or (s.game_id and s.group_id)):
             continue
         if day and s.day != day:
             continue
         if s.day == now_day and not today:
             continue
-        yield s
+        files = sessions.story_night_files(s.files[0])
+        where = recaps.recap_path(files)
+        if where in taken:
+            continue
+        taken.add(where)
+        found.append((s, files))
+    return sorted(found, key=lambda pair: (pair[0].day or "", pair[0].key or ""))
 
 
 def main(argv=None, ask=None) -> int:
@@ -62,13 +76,13 @@ def main(argv=None, ask=None) -> int:
         load_dotenv()
 
     failed = 0
-    found = list(_eligible(model, args.campaign, args.day, args.today))
+    found = _eligible(model, args.campaign, args.day, args.today)
     if not found:
         print("no finished, tagged sessions")
         return 0
-    for s in found:
-        have = recaps.load(s.files)
-        label = f"{s.key:44} {s.recordings} recording(s)"
+    for s, files in found:
+        have = recaps.load(files)
+        label = f"{s.key:44} {len(files)} recording(s)"
         if not args.generate:
             state = f"recap ({have.model}, {have.generated_at})" if have else "no recap"
             print(f"{label}  {state}")
@@ -78,8 +92,8 @@ def main(argv=None, ask=None) -> int:
             continue
         try:
             recap = recaps.generate(
-                s.files,
-                header=sessions.header_text(model.lib, s.meta, s.recordings),
+                files,
+                header=sessions.header_text(model.lib, s.meta, len(files)),
                 ask=ask,
             )
         except Exception as e:  # AskFailed, AskBlocked, RecapError, OSError

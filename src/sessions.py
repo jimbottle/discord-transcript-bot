@@ -385,6 +385,30 @@ def earlier_sessions(transcript_path) -> list:
     return sorted(by_day.items())
 
 
+def story_night_files(transcript_path) -> list:
+    """Every recording of the game night ``transcript_path`` belongs to,
+    grouped the way :func:`earlier_sessions` groups it for a later
+    recording with the same tag: same session day and ``_same_story``.
+    That can be wider than ``session_files`` (same key), e.g. a night
+    where one recording names the campaign and another only the game and
+    group. Whoever caches something per earlier session (src/recaps.py)
+    must use this set, or /ask will not find it (roborev #7146)."""
+    target = Path(transcript_path)
+    meta = read_meta(target)
+    if meta is None:
+        return [target]
+    out = []
+    for txt in sorted(target.parent.glob("*.txt")):
+        other = read_meta(txt)
+        if (
+            other is not None
+            and other.session_day == meta.session_day
+            and _same_story(meta, other)
+        ):
+            out.append(txt)
+    return out or [target]
+
+
 def earlier_session_notes(transcript_path) -> list:
     """Each earlier session as a note the model can read on demand through
     ``read_campaign_notes`` (id ``session-YYYY-MM-DD``, body = that night's
