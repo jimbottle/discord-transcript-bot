@@ -514,3 +514,135 @@ def test_an_oversized_earlier_session_keeps_its_most_recent_part(
     monkeypatch.setenv("EARLIER_SESSION_MAX_CHARS", "30")
     body = sessions.earlier_session_notes(now)[-1].body
     assert body == sessions.EARLIER_TRIM_MARK + "\n[9:01 PM] Jim (Jill): we ran"
+
+
+# ── campaign defaults and dashboard-made campaigns (discord-transcript-bot-5bd) ──
+
+
+def _tagged(t, stamp, lib, **kw):
+    return _rec(t, stamp, "[19:00:00] A (B) [1]: x\n", lib, **kw)
+
+
+def test_default_tag_is_the_library_binding_until_something_is_recorded(lib, tmp_path):
+    assert sessions.default_tag(lib, 111, 5, tmp_path) == (
+        "noah-gm",
+        "return-to-night-city",
+    )
+    assert sessions.default_tag(lib, 222, 5, tmp_path) == (None, None)
+
+
+def test_default_tag_follows_the_campaign_used_last_in_the_server(lib, tmp_path):
+    new = library.add_campaign(
+        "Second Arc", game="cyberpunk-red", group="noah-gm", root=lib.root
+    )
+    lib = library.load(lib.root)
+    _tagged(tmp_path, "2026-10-13_19-00-00", lib, guild_id=111, channel_id=5)
+    last = _tagged(tmp_path, "2026-10-20_19-00-00", lib, guild_id=111, channel_id=5)
+    sessions.retag(last, lib, campaign=new.id)
+    assert sessions.default_tag(lib, 111, 5, tmp_path) == ("noah-gm", "second-arc")
+    # an older recording being retagged does not change the default
+    sessions.retag(tmp_path / "2026-10-13_19-00-00.txt", lib, campaign="lost-mine")
+    assert sessions.default_tag(lib, 111, 5, tmp_path) == ("noah-gm", "second-arc")
+
+
+def test_default_tag_never_borrows_another_tables_campaign(lib, tmp_path):
+    # the side table shares the server through its own voice channel
+    _tagged(tmp_path, "2026-10-20_19-00-00", lib, guild_id=111, channel_id=999)
+    assert sessions.default_tag(lib, 111, 5, tmp_path) == (
+        "noah-gm",
+        "return-to-night-city",
+    )
+    assert sessions.default_tag(lib, 111, 999, tmp_path) == ("side-table", "lost-mine")
+    # another server's recordings never count
+    _tagged(tmp_path, "2026-10-21_19-00-00", lib, guild_id=333, campaign="lost-mine")
+    assert sessions.default_tag(lib, 111, 5, tmp_path)[1] == "return-to-night-city"
+
+
+def test_default_tag_for_an_unbound_server_needs_the_same_channel(lib, tmp_path):
+    f = tmp_path / "2026-10-20_19-00-00.txt"
+    f.write_text("x\n")
+    sessions.write_meta(
+        f,
+        sessions.build_meta(
+            lib,
+            guild_id=222,
+            channel_id=7,
+            started_at=datetime(2026, 10, 20, 19),
+            campaign="return-to-night-city",
+        ),
+    )
+    assert sessions.default_tag(lib, 222, 7, tmp_path) == (
+        "noah-gm",
+        "return-to-night-city",
+    )
+    assert sessions.default_tag(lib, 222, 8, tmp_path) == (None, None)
+    # a campaign the library no longer has is not a default
+    sessions.write_meta(
+        f,
+        sessions.SessionMeta(
+            session_day="2026-10-20", campaign="gone", guild_id=222, channel_id=7
+        ),
+    )
+    assert sessions.default_tag(lib, 222, 7, tmp_path) == (None, None)
+
+
+def test_add_campaign_writes_the_dashboard_file_and_a_notes_folder(lib):
+    before = (lib.root / "library.yml").read_text()
+    c = library.add_campaign(
+        "  The  Night Market! ", game="cyberpunk-red", group="noah-gm", root=lib.root
+    )
+    assert (c.id, c.name, c.game, c.group) == (
+        "the-night-market",
+        "The Night Market!",
+        "cyberpunk-red",
+        "noah-gm",
+    )
+    assert (lib.root / "campaigns" / "the-night-market" / "notes").is_dir()
+    assert (
+        lib.root / "library.yml"
+    ).read_text() == before  # hand-written file untouched
+    again = library.load(lib.root)
+    assert again.campaigns["the-night-market"].name == "The Night Market!"
+    assert again.game_for("the-night-market") == "cyberpunk-red"
+    assert "return-to-night-city" in again.campaigns
+    library.add_campaign("Another", root=lib.root)
+    assert {"the-night-market", "another"} <= set(library.load(lib.root).campaigns)
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        ({"name": "   "}, "name is required"),
+        ({"name": "x" * 81}, "too long"),
+        ({"name": "!!!"}, "at least one letter"),
+        ({"name": "Ok", "game": "nope"}, "unknown game"),
+        ({"name": "Ok", "group": "nope"}, "unknown group"),
+        ({"name": "return to night city"}, "already exists"),
+        ({"name": "Lost Mine"}, "already exists"),
+    ],
+)
+def test_add_campaign_refuses_bad_input(lib, kwargs, message):
+    with pytest.raises(library.LibraryError, match=message):
+        library.add_campaign(root=lib.root, **kwargs)
+    assert not (lib.root / library.DASHBOARD_FILE).exists()
+
+
+def test_library_yml_wins_over_a_dashboard_entry_and_bad_files_are_ignored(lib):
+    (lib.root / library.DASHBOARD_FILE).write_text(
+        "campaigns:\n  lost-mine: {name: Hijacked}\n  extra: {name: Extra}\n"
+    )
+    loaded = library.load(lib.root)
+    assert loaded.campaigns["lost-mine"].name == "Lost Mine"
+    assert loaded.campaigns["extra"].name == "Extra"
+    (lib.root / library.DASHBOARD_FILE).write_text("campaigns: [not, a, mapping")
+    assert "lost-mine" in library.load(lib.root).campaigns
+
+
+def test_scribe_line_names_the_campaign_or_says_there_is_none(lib):
+    m = sessions.build_meta(lib, guild_id=111, started_at=datetime(2026, 10, 20, 19))
+    assert sessions.scribe_line(lib, m).startswith(
+        "\nCampaign: **Return to Night City** (Cyberpunk RED)."
+    )
+    assert "No campaign is set" in sessions.scribe_line(lib, None)
+    untagged = sessions.build_meta(lib, guild_id=222, started_at=datetime(2026, 10, 20))
+    assert "No campaign is set" in sessions.scribe_line(lib, untagged)

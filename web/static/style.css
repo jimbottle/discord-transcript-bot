@@ -513,3 +513,22 @@ button.confirming {
         transform: none;
     }
 }
+
+/* Campaign picker on the Live page */
+.campaign-picker {
+    margin-bottom: 1rem;
+}
+
+.campaign-picker select,
+.campaign-picker input[type="text"] {
+    display: inline-block;
+    width: auto;
+    min-width: 14rem;
+    margin: 0 0.5rem 0.5rem 0;
+}
+
+.campaign-picker button {
+    display: inline-block;
+    width: auto;
+    margin: 0 0.5rem 0.5rem 0;
+}

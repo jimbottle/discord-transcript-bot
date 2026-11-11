@@ -276,6 +276,12 @@ if __name__ == "__main__":
         message = (
             "Recording. Every word in this channel is being transcribed in realtime."
         )
+        # The campaign decides which notes and earlier sessions /ask reads,
+        # so say it where a wrong one gets noticed (5bd).
+        message += sessions.scribe_line(
+            library.load(),
+            getattr(bot.guild_whisper_sinks.get(ctx.guild_id), "session_meta", None),
+        )
         # Non-ephemeral so every participant sees it, not just whoever ran the
         # command — they have no other way to know audio is being kept.
         notice = scribe_notice(bot.guild_whisper_sinks.get(ctx.guild_id))

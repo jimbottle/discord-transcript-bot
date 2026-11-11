@@ -564,12 +564,22 @@ class VoloBot(discord.Bot):
         try:
             helper = self.guild_to_helper.get(ctx.guild_id)
             channel = getattr(getattr(helper, "vc", None), "channel", None)
+            lib = library.load()
+            # The campaign last used here, else the library's binding (5bd).
+            group, campaign = sessions.default_tag(
+                lib,
+                ctx.guild_id,
+                getattr(channel, "id", None),
+                os.path.dirname(os.path.abspath(whisper_sink.session_file)),
+            )
             meta = sessions.build_meta(
-                library.load(),
+                lib,
                 guild_id=ctx.guild_id,
                 guild=getattr(ctx.guild, "name", None),
                 channel_id=getattr(channel, "id", None),
                 channel=getattr(channel, "name", None),
+                group=group,
+                campaign=campaign,
             )
             sessions.write_meta(whisper_sink.session_file, meta)
             whisper_sink.session_meta = meta

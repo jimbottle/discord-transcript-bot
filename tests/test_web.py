@@ -1547,6 +1547,66 @@ def _run_node_test(name):
     assert r.returncode == 0, r.stderr or r.stdout
 
 
+def test_campaign_picker_behaviour():
+    """tests/js/campaign_picker.test.mjs: choose, failed save, poll does not
+    fight the reader, create-and-use, empty name, cancel."""
+    _run_node_test("campaign_picker.test.mjs")
+
+
+def test_live_page_has_the_campaign_picker(client, tagged_session):
+    body = client.get("/live").get_data(as_text=True)
+    assert 'id="campaign-picker"' in body and "campaign-picker.js" in body
+    assert '<option value="rtnc">Return to Night City</option>' in body
+    assert '<option value="__new__">' in body
+    assert client.get("/live/data").get_json()["session"]["campaign_id"] == "rtnc"
+
+
+def test_create_campaign_then_tag_the_session_with_it(client, tagged_session):
+    from src import library, sessions
+
+    r = client.post(
+        "/library/campaigns",
+        json={"name": "Second Arc", "game": "cyberpunk-red", "group": "noah-gm"},
+        headers=_XHR,
+    )
+    assert r.status_code == 201
+    assert r.get_json() == {
+        "id": "second-arc",
+        "name": "Second Arc",
+        "game": "cyberpunk-red",
+        "group": "noah-gm",
+    }
+    assert (library.library_dir() / "campaigns" / "second-arc" / "notes").is_dir()
+    assert '<option value="second-arc">' in client.get("/live").get_data(as_text=True)
+    r = client.post(
+        "/transcripts/" + tagged_session[1].name + "/tag",
+        json={"campaign": "second-arc", "whole_session": True},
+        headers=_XHR,
+    )
+    assert r.status_code == 200 and len(r.get_json()["updated"]) == 2
+    assert r.get_json()["session"]["campaign"] == "Second Arc"
+    # and it is now what the next recording in that server starts with
+    assert sessions.default_tag(
+        library.load(), 111, None, tagged_session[0].parent
+    ) == (
+        "noah-gm",
+        "second-arc",
+    )
+
+
+def test_create_campaign_rejects_bad_requests(client, tagged_session):
+    post = lambda **kw: client.post("/library/campaigns", **kw)  # noqa: E731
+    assert post(json={"name": "X"}).status_code == 403  # no CSRF header
+    for body, why in (
+        ({"name": ""}, "required"),
+        ({"name": 5}, "must be a string"),
+        ({"name": "Ok", "game": "nope"}, "unknown game"),
+        ({"name": "Return to Night City"}, "already exists"),
+    ):
+        r = post(json=body, headers=_XHR)
+        assert r.status_code == 400 and why in r.get_json()["error"], body
+
+
 def test_live_feed_order_behaviour():
     """tests/js/live_feed.test.mjs: both orders, follow + place-keeping,
     switching, empty state, and the remembered toggle."""

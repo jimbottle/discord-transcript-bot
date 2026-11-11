@@ -122,6 +122,41 @@ def build_meta(
     )
 
 
+def default_tag(lib, guild_id=None, channel_id=None, transcripts_dir=None):
+    """``(group_id, campaign_id)`` a new recording should start with
+    (discord-transcript-bot-5bd): the campaign most recently used in this
+    Discord server, so picking a campaign once (dashboard, retag) carries
+    forward, else the library's binding (the group's ``active_campaign``).
+
+    "Most recently used" is the newest recording here with a campaign the
+    library still has. It must be this table's: when the library binds the
+    server or channel to a group, another group's campaign is skipped (two
+    tables can share a server by channel); when it binds nothing, only a
+    recording made in the same voice channel counts. Never raises."""
+    group, campaign = lib.resolve(guild_id, channel_id)
+    if guild_id is None or transcripts_dir is None:
+        return group, campaign
+    try:
+        recordings = sorted(Path(transcripts_dir).glob("*.txt"), reverse=True)
+    except OSError:
+        return group, campaign
+    for txt in recordings:
+        m = read_meta(txt)
+        if m is None or m.guild_id != int(guild_id) or not m.campaign:
+            continue
+        c = lib.campaigns.get(m.campaign)
+        if c is None:
+            continue
+        owner = c.group or m.group
+        if group:
+            if owner and owner != group:
+                continue
+        elif channel_id is None or m.channel_id != int(channel_id):
+            continue
+        return owner or group, m.campaign
+    return group, campaign
+
+
 def write_meta(transcript_path, meta: SessionMeta) -> Path:
     path = meta_path(transcript_path)
     tmp = path.with_name(path.name + ".tmp")
@@ -219,6 +254,25 @@ def describe(lib, meta: Optional[SessionMeta], recordings: int = 1) -> dict:
         "channel": meta.channel,
         "recordings": recordings,
     }
+
+
+def scribe_line(lib, meta: Optional[SessionMeta]) -> str:
+    """What /scribe adds to its reply about the tag (5bd). The campaign
+    decides which notes and earlier sessions /ask can read, so a wrong or
+    missing one should be seen when recording starts, not at the first
+    question."""
+    d = describe(lib, meta)
+    if not d["tagged"] or not d.get("campaign"):
+        return (
+            "\nNo campaign is set for this recording, so questions get no "
+            "campaign notes or earlier sessions. Pick one on the dashboard's "
+            "Live page."
+        )
+    game = f" ({d['game']})" if d.get("game") else ""
+    return (
+        f"\nCampaign: **{d['campaign']}**{game}. If that's wrong, change it on "
+        "the dashboard's Live page."
+    )
 
 
 def header_text(lib, meta: Optional[SessionMeta], recordings: int = 1) -> str:
