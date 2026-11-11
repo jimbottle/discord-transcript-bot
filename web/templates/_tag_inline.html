@@ -6,12 +6,25 @@
   The whole session is retagged; the transcript page's editor can retag one
   recording alone. Variables: filename, session (session_info dict),
   tag_choices, form_id (unique on the page).
+
+  A recording can carry an id the library no longer has (library.yml is
+  edited by hand). That id is shown as the selected option, never as
+  "none": the row then says what the tag really is, and a save that still
+  carries it is refused by the endpoint ("unknown campaign ...") instead of
+  quietly clearing it. Picking a real value, or "none", for that field
+  fixes it (roborev #7166).
 #}
+{% macro stale(current, choices) -%}
+{% if current and current not in choices | map(attribute='id') | list -%}
+<option value="{{ current }}" selected>{{ current }} (not in library)</option>
+{%- endif %}
+{%- endmacro %}
 <td>
     <form id="{{ form_id }}" class="tag-inline" data-url="{{ url_for('retag_transcript', filename=filename) }}"></form>
     <select name="campaign" form="{{ form_id }}" aria-label="Campaign of {{ filename }}"
             title="Changing the campaign moves the recording to that campaign's session for the same night{% if session.recordings and session.recordings > 1 %} (all {{ session.recordings }} recordings of this session){% endif %}">
         <option value="">{{ '— untagged —' if not session.tagged else '— none —' }}</option>
+        {{ stale(session.campaign_id, tag_choices.campaigns) }}
         {% for c in tag_choices.campaigns %}
         <option value="{{ c.id }}" data-group="{{ c.group }}" data-game="{{ c.game }}"
             {% if session.campaign_id == c.id %}selected{% endif %}>{{ c.name }}</option>
@@ -22,6 +35,7 @@
 <td>
     <select name="game" form="{{ form_id }}" aria-label="Game of {{ filename }}">
         <option value="">— none —</option>
+        {{ stale(session.game_id, tag_choices.games) }}
         {% for g in tag_choices.games %}
         <option value="{{ g.id }}" {% if session.game_id == g.id %}selected{% endif %}>{{ g.name }}</option>
         {% endfor %}
@@ -30,6 +44,7 @@
 <td>
     <select name="group" form="{{ form_id }}" aria-label="Group of {{ filename }}">
         <option value="">— none —</option>
+        {{ stale(session.group_id, tag_choices.groups) }}
         {% for g in tag_choices.groups %}
         <option value="{{ g.id }}" {% if session.group_id == g.id %}selected{% endif %}>{{ g.name }}</option>
         {% endfor %}

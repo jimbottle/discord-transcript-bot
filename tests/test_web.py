@@ -1839,3 +1839,33 @@ def test_lore_page_lets_you_ask_when_a_campaign_has_only_session_records(
     # only GM-only notes, but records to ask about: no "tick GM notes" hint
     (lore_library / "campaigns" / "rtnc" / "notes" / "npcs.md").unlink()
     assert b'id="gm-only-hint"' not in client.get("/lore").data
+
+
+def test_inline_tag_row_shows_a_tag_the_library_no_longer_has(client, deletable):
+    """roborev #7166: a recording tagged with a campaign, game or group
+    that has left the library used to show as "— none —" in its row, and
+    saving any other field then cleared the old tag without a word. The
+    stale id is now the selected option, so it is visible, and a save that
+    still carries it is refused by the endpoint (the row says why)."""
+    from src import sessions
+
+    tdir, _, files = deletable
+    meta = sessions.read_meta(files[0])
+    meta.campaign, meta.game, meta.group = "ghost-campaign", "old-game", "gone-group"
+    sessions.write_meta(files[0], meta)
+    page = client.get("/transcripts").get_data(as_text=True)
+    for stale in ("ghost-campaign", "old-game", "gone-group"):
+        assert (
+            f'<option value="{stale}" selected>{stale} (not in library)</option>'
+            in page
+        )
+    # the other recording, tagged with nothing stale, gets no such option
+    assert page.count("(not in library)") == 3
+    # what the row would post if only another field changed: refused, not cleared
+    r = client.post(
+        f"/transcripts/{files[0].name}/tag",
+        json={"campaign": "ghost-campaign", "game": "", "group": ""},
+        headers=_XHR,
+    )
+    assert r.status_code == 400 and "ghost-campaign" in r.get_json()["error"]
+    assert sessions.read_meta(files[0]).campaign == "ghost-campaign"
