@@ -473,6 +473,10 @@ def lore():
         group_name=lib.name("group", c.group_id) if c else None,
         notes=all_notes,
         table_count=len(table_notes),
+        # Sessions on record are askable too (their recaps and transcripts
+        # are fetched on demand). The count comes from the tags, not from
+        # reading the transcripts.
+        session_count=len(c.sessions) if c else 0,
         ask_configured=provider.configured(),
     )
 

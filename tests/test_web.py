@@ -1787,3 +1787,41 @@ def test_session_id_has_a_copy_button_on_every_page_that_shows_it(client, deleta
     # the Live poll fills the box in; the id is no longer buried in the text
     assert "idCopy.dataset.copy = sid" in live
     assert '" · session id " + s.session_id' not in live
+
+
+def test_lore_page_lets_you_ask_when_a_campaign_has_only_session_records(
+    client, lore_library, monkeypatch, tmp_path
+):
+    """roborev #7160: POST /lore/ask answers from session records alone,
+    but the page kept the question box disabled without library notes."""
+    from datetime import datetime
+
+    from src import library, sessions
+
+    tdir = tmp_path / "transcripts"
+    tdir.mkdir()
+    monkeypatch.setattr(transcript_service, "TRANSCRIPTS_DIR", tdir)
+    # neither notes nor records: still disabled
+    body = client.get("/lore?campaign=empty").get_data(as_text=True)
+    assert 'data-empty="true"' in body
+    lib = library.load(lore_library)
+    for stamp, campaign_id in (
+        ("2026-10-13_19-00-00", "empty"),
+        ("2026-10-14_19-00-00", "rtnc"),
+    ):
+        f = tdir / f"{stamp}.txt"
+        f.write_text("[19:01:00] Noah (GM) [420]: the deal went bad\n")
+        sessions.write_meta(
+            f,
+            sessions.build_meta(
+                lib,
+                campaign=campaign_id,
+                started_at=datetime.strptime(stamp, "%Y-%m-%d_%H-%M-%S"),
+            ),
+        )
+    body = client.get("/lore?campaign=empty").get_data(as_text=True)
+    assert 'data-empty="false"' in body
+    assert "1 session on record" in body
+    # only GM-only notes, but records to ask about: no "tick GM notes" hint
+    (lore_library / "campaigns" / "rtnc" / "notes" / "npcs.md").unlink()
+    assert b'id="gm-only-hint"' not in client.get("/lore").data
