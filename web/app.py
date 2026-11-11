@@ -331,7 +331,14 @@ def ask_session():
 
     started = time.perf_counter()
     try:
-        result = provider.ask(transcript, question, header=header, note_dirs=note_dirs)
+        result = provider.ask(
+            transcript,
+            question,
+            header=header,
+            note_dirs=note_dirs,
+            # Earlier sessions of the campaign, readable on demand (ij0).
+            extra_notes=sessions.earlier_session_notes(path),
+        )
     except provider.AskBlocked as e:
         _log(question_log.BLOCKED, started, error=e.user_message, verdict=e.verdict)
         return jsonify(_blocked_body(question, e))

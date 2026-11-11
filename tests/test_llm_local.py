@@ -466,3 +466,29 @@ def test_malformed_tool_arguments_are_an_error_the_model_reads(monkeypatch, note
     assert r.answer == "Couldn't read that." and r.notes_used == []
     tool = [m for m in fake.calls[1]["messages"] if m["role"] == "tool"][0]
     assert tool["content"].startswith("Error")
+
+
+# ── earlier sessions (discord-transcript-bot-ij0) ─────────────────────
+
+
+def test_earlier_sessions_are_read_through_the_tool_and_cut_to_budget(monkeypatch):
+    monkeypatch.setenv("LOCAL_LLM_MAX_TRANSCRIPT_CHARS", "80")
+    note = local.campaign.Note(
+        id="session-2026-10-13",
+        title="Earlier session",
+        summary="full transcript",
+        body="[7:00 PM] A (B): " + "x" * 60 + "\n[9:01 PM] Jim (Jill): we ran",
+    )
+    fake = _use(
+        monkeypatch,
+        _Fake(
+            _response("", [_call(["session-2026-10-13"])], finish="tool_calls"),
+            _response("They ran."),
+        ),
+    )
+    r = local.ask("t", "What happened last session?", extra_notes=[note])
+    assert r.notes_used == ["session-2026-10-13"]
+    assert "session-2026-10-13" in fake.calls[0]["messages"][1]["content"]
+    tool_msg = fake.calls[1]["messages"][-1]["content"]
+    assert "we ran" in tool_msg and "xxxx" not in tool_msg
+    assert local.TRIM_MARK in tool_msg

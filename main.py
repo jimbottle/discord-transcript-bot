@@ -625,11 +625,13 @@ if __name__ == "__main__":
         # still work after /stop, /disconnect or a restart (csk, as fwv did
         # for /generate_pdf).
         session_file = bot.session_file_for_export(guild_id)
-        transcript_text, header, note_dirs = None, "", []
+        transcript_text, header, note_dirs, earlier = None, "", [], []
         if session_file:
             transcript_text, header, note_dirs, _files = sessions.ask_context(
                 session_file
             )
+            # Earlier sessions of the campaign, readable on demand (ij0).
+            earlier = sessions.earlier_session_notes(session_file)
 
         source = "discord-public" if public else "discord"
 
@@ -673,6 +675,7 @@ if __name__ == "__main__":
                 header=header,
                 note_dirs=note_dirs,
                 max_chars=answer_budget(question),
+                extra_notes=earlier,
             )
             # No truncation: anything past Discord's limit is split below.
             answer = clean_answer(result.answer)

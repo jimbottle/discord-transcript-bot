@@ -33,9 +33,13 @@ SYSTEM_PROMPT = (
     "the transcript; if the answer isn't there, say so. When a CAMPAIGN NOTES "
     "INDEX is provided you may read campaign notes with the read_campaign_notes "
     "tool, but only when the question needs background the transcript lacks, "
-    "and say when an answer comes from the notes rather than the transcript."
-    + TIME_STYLE
-    + TABLE_RULES
+    "and say when an answer comes from the notes rather than the transcript. "
+    "Index entries whose id starts with session- are the transcripts of "
+    "earlier sessions of the same campaign. TRANSCRIPT below is the current "
+    "session; when the question is about an earlier one ('last session', "
+    "'previously', something that did not happen tonight), read the relevant "
+    "earlier session the same way, starting with the most recent, and say "
+    "which session's date the answer comes from." + TIME_STYLE + TABLE_RULES
 )
 
 LORE_SYSTEM_PROMPT = (

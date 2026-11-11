@@ -26,8 +26,10 @@ Anthropic backend.
 """
 
 import json
+
 import logging
 import re
+from dataclasses import replace
 
 import openai
 
@@ -377,14 +379,36 @@ def build_lore_messages(question: str, index: str, header: str = "") -> list:
     ]
 
 
+def _fit_extra(notes) -> list:
+    """Earlier-session notes cut to half the transcript budget each (most
+    recent part kept): a whole earlier night on top of tonight's would
+    overrun a local context window."""
+    budget = max_transcript_chars() // 2
+    if not budget:
+        return list(notes)
+    out = []
+    for n in notes:
+        if len(n.body) > budget:
+            cut = n.body.find("\n", len(n.body) - budget)
+            n = replace(n, body=TRIM_MARK + "\n" + n.body[cut + 1 :])
+        out.append(n)
+    return out
+
+
 def ask(
-    transcript: str, question: str, *, header: str = "", note_dirs=(), max_chars=None
+    transcript: str,
+    question: str,
+    *,
+    header: str = "",
+    note_dirs=(),
+    max_chars=None,
+    extra_notes=(),
 ) -> AskResult:
     """Answer ``question`` from ``transcript`` with the local model. Blocking.
     Raises :class:`AskFailed` (Discord-ready) or :class:`AskBlocked`."""
     try:
         verdict = _gate(question, context=header.split("\n")[0] if header else "")
-        notes = campaign.load_notes(note_dirs)
+        notes = campaign.load_notes(note_dirs) + _fit_extra(extra_notes)
         index = campaign.index_text(notes)
         fitted, kept, total = fit_transcript(transcript, max_transcript_chars())
         messages = build_messages(
