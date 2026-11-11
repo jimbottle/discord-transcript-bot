@@ -1712,7 +1712,8 @@ def test_dashboard_shows_the_session_id_and_backfills_old_recordings(client, del
     for sid in ids:
         assert f"<code>{sid}</code>" in page
     # stable on the next view, and on the transcript page
-    assert client.get("/transcripts").get_data(as_text=True).count(ids[0]) == 1
+    again = client.get("/transcripts").get_data(as_text=True)
+    assert again.count(f"<code>{ids[0]}</code>") == 1
     one = client.get(f"/transcripts/{files[0].name}").get_data(as_text=True)
     assert ids[0] in one and ids[1] not in one
 
@@ -1759,3 +1760,30 @@ def test_lore_ask_offers_the_campaigns_session_records(
     assert r.status_code == 200
     assert [n.id for n in seen["notes"]] == ["session-2026-10-13"]
     assert "the deal went bad" in seen["notes"][0].body
+
+
+# ── copy button for the session id ────────────────────────────────────
+
+
+def test_copy_id_behaviour():
+    """tests/js/copy_id.test.mjs: copies data-copy, label feedback and
+    reset, textarea fallback, failure message, ignores other clicks."""
+    _run_node_test("copy_id.test.mjs")
+
+
+def test_session_id_has_a_copy_button_on_every_page_that_shows_it(client, deletable):
+    from src import sessions
+
+    tdir, _, files = deletable
+    page = client.get("/transcripts").get_data(as_text=True)
+    sid = sessions.read_meta(files[0]).session_id
+    assert "copy-id.js" in page  # loaded from the base template
+    assert f'class="copy-id" data-copy="{sid}"' in page
+    assert page.count('class="copy-id"') == 2  # one per recording row
+    one = client.get(f"/transcripts/{files[0].name}").get_data(as_text=True)
+    assert f'class="copy-id" data-copy="{sid}"' in one
+    live = client.get("/live").get_data(as_text=True)
+    assert 'id="session-id-copy"' in live and 'id="session-id-box"' in live
+    # the Live poll fills the box in; the id is no longer buried in the text
+    assert "idCopy.dataset.copy = sid" in live
+    assert '" · session id " + s.session_id' not in live

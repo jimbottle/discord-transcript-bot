@@ -532,3 +532,19 @@ button.confirming {
     width: auto;
     margin: 0 0.5rem 0.5rem 0;
 }
+
+/* Session id with its copy button (static/copy-id.js). Pico makes buttons
+   full-size; this one sits inline next to the code. */
+.session-id {
+    white-space: nowrap;
+}
+
+button.copy-id {
+    display: inline-block;
+    width: auto;
+    margin: 0 0 0 0.25rem;
+    padding: 0.05rem 0.45rem;
+    font-size: 0.75rem;
+    line-height: 1.4;
+    vertical-align: baseline;
+}
