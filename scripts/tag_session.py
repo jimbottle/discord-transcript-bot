@@ -90,7 +90,12 @@ def main(argv=None) -> int:
         )
         if args.game:
             meta.game = args.game
+        # Keep the session id a GM may already have copied for /summary;
+        # a recording moved to another session takes that session's id.
+        if old is not None and old.key == meta.key:
+            meta.session_id = old.session_id
         sessions.write_meta(txt, meta)
+        sessions.ensure_session_id(txt)
         print(f"{txt.name:28} {meta.key}  (group={meta.group}, game={meta.game})")
     return 0
 

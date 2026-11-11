@@ -363,6 +363,22 @@ if __name__ == "__main__":
         recording = [
             getattr(s, "session_file", None) for s in bot.guild_whisper_sinks.values()
         ]
+
+        async def _tell(text):
+            """A problem, to the caller alone. A slow local model can fail
+            after the 15-minute interaction token has expired; the reason
+            is then posted to the channel instead of being lost with a
+            raised follow-up (roborev #7151). None of these messages
+            contains the session id."""
+            try:
+                await ctx.followup.send(text, ephemeral=True)
+            except Exception as e:
+                logger.warning(f"summary error reply failed ({e}); using the channel")
+                try:
+                    await ctx.channel.send(text)
+                except Exception as e2:
+                    logger.error(f"could not report the summary failure: {e2}")
+
         try:
             # Blocking for up to minutes (one model call): off the event loop.
             result = await asyncio.to_thread(
@@ -373,17 +389,15 @@ if __name__ == "__main__":
                 refresh=refresh,
             )
         except session_summary.SummaryError as e:
-            await ctx.followup.send(e.user_message, ephemeral=True)
+            await _tell(e.user_message)
             return False
         except (AskBlocked, AskFailed) as e:
             logger.error(f"session summary failed: {e.user_message}")
-            await ctx.followup.send(e.user_message, ephemeral=True)
+            await _tell(e.user_message)
             return False
         except Exception:
             logger.exception("session summary failed unexpectedly")
-            await ctx.followup.send(
-                "Could not write the summary. Check the bot's log.", ephemeral=True
-            )
+            await _tell("Could not write the summary. Check the bot's log.")
             return False
         parts = session_summary.messages(lib, result, DISCORD_MESSAGE_LIMIT)
         logger.info(

@@ -247,3 +247,44 @@ def test_discord_never_prints_the_session_id():
         for line in text.splitlines():
             if ".session_id" in line:
                 assert "ensure_session_id" in line, (path, line)
+
+
+def test_summary_failures_are_reported_even_after_the_token_expires():
+    """roborev #7151: every error reply goes through the helper that falls
+    back to the channel, not a bare follow-up that can raise."""
+    src = _main_source()
+    deliver = src[src.index("async def _deliver_summary") : src.index('name="summary"')]
+    errors = deliver[deliver.index("except session_summary.SummaryError") :]
+    errors = errors[: errors.index("parts = session_summary.messages")]
+    assert errors.count("await _tell(") == 3 and "ctx.followup.send" not in errors
+    tell = deliver[deliver.index("async def _tell") : deliver.index("# Blocking")]
+    assert "ctx.followup.send(text, ephemeral=True)" in tell
+    assert "ctx.channel.send(text)" in tell
+
+
+def test_the_tag_script_keeps_a_sessions_id(lib, tmp_path, monkeypatch):
+    """roborev #7151: retagging by script used to drop the id, so the one
+    the GM had copied for /summary stopped working."""
+    import importlib.util
+    from pathlib import Path
+
+    from src import library
+
+    spec = importlib.util.spec_from_file_location(
+        "tag_session", Path(library.PROJECT_ROOT) / "scripts" / "tag_session.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _earlier_fixture(lib, tmp_path)
+    monkeypatch.setenv("LIBRARY_DIR", str(tmp_path))
+    first, late = _night_13(tmp_path)
+    sid = sessions.ensure_session_id(first)
+    args = [str(first), str(late), "--campaign", "return-to-night-city"]
+    assert mod.main(args) == 0
+    assert sessions.read_meta(first).session_id == sid
+    assert sessions.read_meta(late).session_id == sid
+    assert sessions.find_by_session_id(tmp_path, sid) == late
+    # moved to another session: it does not take the old id with it
+    assert mod.main([str(late), "--game", "dnd-5e", "--group", "side-table"]) == 0
+    moved = sessions.read_meta(late)
+    assert moved.campaign is None and moved.session_id and moved.session_id != sid
