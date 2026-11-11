@@ -18,7 +18,7 @@ ANSWER = (
 
 
 def _fake_ask(seen=None, answer=ANSWER):
-    def ask(transcript, question, *, header=""):
+    def ask(transcript, question, *, header="", **context):
         if seen is not None:
             seen.append(transcript)
         return AskResult(answer=answer, model="test-model")
@@ -166,7 +166,7 @@ def test_a_failed_model_call_leaves_no_lock_behind(lib, tmp_path):
     _earlier_fixture(lib, tmp_path)
     first = _night_13(tmp_path)[0]
 
-    def down(transcript, question, *, header=""):
+    def down(transcript, question, *, header="", **context):
         raise AskFailed("The model server is down.")
 
     with pytest.raises(AskFailed):
@@ -179,7 +179,7 @@ def test_a_second_request_for_the_same_session_does_not_pay_twice(lib, tmp_path)
     first = _night_13(tmp_path)[0]
     inner = {}
 
-    def slow(transcript, question, *, header=""):
+    def slow(transcript, question, *, header="", **context):
         with pytest.raises(session_summary.SummaryError) as e:
             session_summary.summarise(first, lib, ask=_fake_ask())
         inner["msg"] = e.value.user_message

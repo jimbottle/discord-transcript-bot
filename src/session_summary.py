@@ -129,6 +129,7 @@ def summarise(path, lib, *, recording=(), refresh=False, ask=None) -> Summary:
             files,
             header=sessions.header_text(lib, meta, len(files)),
             style=recaps.summary_style(lib, meta),
+            lib=lib,
             ask=ask,
         )
         if not recap.summary:

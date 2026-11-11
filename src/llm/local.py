@@ -434,10 +434,18 @@ def ask(
 
 
 def ask_lore(
-    question: str, *, header: str = "", note_dirs=(), include_gm: bool = False
+    question: str,
+    *,
+    header: str = "",
+    note_dirs=(),
+    include_gm: bool = False,
+    extra_notes=(),
 ) -> AskResult:
-    """A notes-only question (dashboard Lore page) on the local model."""
-    notes = campaign.load_notes(note_dirs, include_gm=include_gm)
+    """A campaign question (dashboard Lore page) on the local model, from
+    the notes and, on demand, the campaign's session records
+    (``extra_notes``, cut and budgeted like /ask's earlier sessions)."""
+    records = _fit_extra(extra_notes)
+    notes = campaign.load_notes(note_dirs, include_gm=include_gm) + records
     if not notes:
         if not include_gm and campaign.load_notes(note_dirs, include_gm=True):
             raise AskFailed(ONLY_GM_NOTES_MSG)
@@ -447,7 +455,14 @@ def ask_lore(
             question, context=header.split("\n")[0] if header else "", gm=include_gm
         )
         messages = build_lore_messages(question, campaign.index_text(notes), header)
-        result = _run(messages, notes, tools=[_tool()])
+        result = _run(
+            messages,
+            notes,
+            tools=[_tool()],
+            session_ids=[
+                n.id for n in records if not n.id.startswith(campaign.RECAP_PREFIX)
+            ],
+        )
     except LocalError as e:
         raise e.failure from e
     result.guard = verdict

@@ -523,6 +523,9 @@ def lore_ask():
             header=model.campaign_header(c.id),
             note_dirs=list(c.note_dirs),
             include_gm=include_gm,
+            # The campaign's sessions, on demand: index lines only, a recap
+            # or transcript is fetched when the question needs it (3bx).
+            extra_notes=c.session_notes(),
         )
     except provider.AskBlocked as e:
         _log(question_log.BLOCKED, started, error=e.user_message, verdict=e.verdict)

@@ -462,6 +462,50 @@ def test_ask_lore_gm_notes_only_when_asked(monkeypatch, notes_dir):
     assert "secrets" in client.calls[1]["system"][1]["text"]
 
 
+def test_lore_indexes_session_records_and_fetches_one_on_demand(monkeypatch):
+    """discord-transcript-bot-3bx: the campaign's recaps and transcripts
+    reach Lore as index lines; a body is sent only when asked for."""
+    records = [
+        campaign.Note(
+            id="session-2026-10-06",
+            title="Session",
+            summary="full transcript",
+            body="[7:01 PM] Jim (Jill): we met the fixer",
+        ),
+        campaign.Note(
+            id="recap-2026-10-13",
+            title="Recap",
+            summary="short recap; topics: Fixie, Militech",
+            body="At 7:01 PM the deal with Militech went bad.",
+        ),
+    ]
+    client = _use(
+        monkeypatch,
+        _FakeClient(
+            [_tool_call(["recap-2026-10-13"]), _response("It went bad on the 13th.")]
+        ),
+    )
+    # no library notes at all: the records alone are enough to ask
+    r = claude.ask_lore("what happened with Militech?", extra_notes=records)
+    assert r.notes_used == ["recap-2026-10-13"]
+    first = client.calls[0]["system"][1]["text"]
+    assert "recap-2026-10-13" in first and "session-2026-10-06" in first
+    assert "topics: Fixie, Militech" in first
+    # nothing of any transcript or recap body is sent until it is asked for
+    assert "went bad" not in str(client.calls[0])
+    assert "we met the fixer" not in str(client.calls[0])
+    fetched = client.calls[1]["messages"][2]["content"][0]["content"]
+    assert "the deal with Militech went bad" in fetched
+    assert "we met the fixer" not in str(client.calls[1])  # other nights stay unread
+
+
+def test_lore_still_refuses_with_neither_notes_nor_records(monkeypatch, tmp_path):
+    client = _use(monkeypatch, _FakeClient(_response()))
+    with pytest.raises(claude.AskFailed) as e:
+        claude.ask_lore("q", note_dirs=[tmp_path], extra_notes=[])
+    assert e.value.user_message == claude.NO_NOTES_MSG and client.calls == []
+
+
 def test_lore_is_not_exposed_to_discord():
     """The Lore Q&A is dashboard-only: no bot code may reach ask_lore."""
     from pathlib import Path

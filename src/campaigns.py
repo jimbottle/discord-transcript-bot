@@ -93,6 +93,16 @@ class Campaign:
         """Session day of the newest session, or None if never recorded."""
         return self.sessions[-1].day if self.sessions else None
 
+    def session_notes(self) -> list:
+        """Every session of the campaign as on-demand notes: its cached
+        recap when there is one, then its transcript
+        (``sessions.campaign_session_notes``). For questions about the
+        campaign as a whole (the Lore page). Reads the transcripts, so call
+        it off the event loop."""
+        if self._model is None or self._model.transcripts_dir is None:
+            return []
+        return sessions.campaign_session_notes(self._model.transcripts_dir, self.id)
+
     def sessions_before(self, day: str) -> list:
         return [s for s in self.sessions if s.day and s.day < day]
 

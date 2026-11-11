@@ -1099,7 +1099,7 @@ def test_lore_ask_answers_from_notes_and_records_history(
 
     seen = {}
 
-    def ask_lore(question, header="", note_dirs=(), include_gm=False):
+    def ask_lore(question, header="", note_dirs=(), include_gm=False, extra_notes=()):
         seen.update(header=header, dirs=list(note_dirs), include_gm=include_gm)
         return web_app.provider.AskResult(
             answer="A fixer, choom.", model="m", notes_used=["npcs"]
@@ -1715,3 +1715,47 @@ def test_dashboard_shows_the_session_id_and_backfills_old_recordings(client, del
     assert client.get("/transcripts").get_data(as_text=True).count(ids[0]) == 1
     one = client.get(f"/transcripts/{files[0].name}").get_data(as_text=True)
     assert ids[0] in one and ids[1] not in one
+
+
+def test_lore_ask_offers_the_campaigns_session_records(
+    client, lore_library, ask_configured, monkeypatch, tmp_path
+):
+    """discord-transcript-bot-3bx: recaps and transcripts reach Lore as
+    on-demand notes, for that campaign only."""
+    from datetime import datetime
+
+    from src import library, sessions
+
+    tdir = tmp_path / "transcripts"
+    tdir.mkdir()
+    monkeypatch.setattr(transcript_service, "TRANSCRIPTS_DIR", tdir)
+    lib = library.load(lore_library)
+    for stamp, campaign_id, line in (
+        ("2026-10-13_19-00-00", "rtnc", "the deal went bad"),
+        ("2026-10-14_19-00-00", "empty", "another table's night"),
+    ):
+        f = tdir / f"{stamp}.txt"
+        f.write_text(f"[19:01:00] Noah (GM) [420]: {line}\n")
+        sessions.write_meta(
+            f,
+            sessions.build_meta(
+                lib,
+                campaign=campaign_id,
+                started_at=datetime.strptime(stamp, "%Y-%m-%d_%H-%M-%S"),
+            ),
+        )
+    seen = {}
+
+    def ask_lore(question, extra_notes=(), **kw):
+        seen["notes"] = list(extra_notes)
+        return web_app.provider.AskResult(answer="ok", model="m")
+
+    monkeypatch.setattr(web_app.provider, "ask_lore", ask_lore)
+    r = client.post(
+        "/lore/ask",
+        json={"question": "what happened?", "campaign": "rtnc"},
+        headers=_XHR,
+    )
+    assert r.status_code == 200
+    assert [n.id for n in seen["notes"]] == ["session-2026-10-13"]
+    assert "the deal went bad" in seen["notes"][0].body
