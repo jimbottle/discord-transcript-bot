@@ -125,6 +125,11 @@ class RecapError(Exception):
     """A recap could not be made (nothing transcribed, or an empty answer)."""
 
 
+class NoRecapSection(RecapError):
+    """The model answered, but without a usable RECAP part (for example it
+    dropped the ``RECAP:`` label, so everything landed in the summary)."""
+
+
 @dataclass
 class Recap:
     text: str
@@ -307,6 +312,8 @@ def generate(files, *, header: str = "", style: str = "", lib=None, ask=None) ->
     result = ask(body, QUESTION, header=plain, note_dirs=note_dirs, extra_notes=earlier)
     topics, summary, text = parse(result.answer)
     if not text:
+        if summary:
+            raise NoRecapSection("the model's answer had no RECAP section")
         raise RecapError("the model returned an empty recap")
     recap = Recap(
         text=text,

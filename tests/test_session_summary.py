@@ -505,3 +505,45 @@ def test_a_failed_fallback_delivery_is_caught_not_raised():
     assert fallback.index("try:") < fallback.index("await target.send(rest)")
     assert "except Exception as e2:" in fallback and "return False" in fallback
     assert "ctx.channel.send" not in fallback
+
+
+def test_continuing_a_session_whose_key_cannot_match_is_not_claimed(
+    lib, tmp_path, monkeypatch
+):
+    """roborev #7158: an earlier recording tagged by hand with a group but
+    no campaign and no server has a key no new recording can share. Carrying
+    it on would leave two sessions with one id, so it is not joined."""
+    from types import SimpleNamespace
+
+    from src.bot.volo_bot import VoloBot
+
+    _earlier_fixture(lib, tmp_path)
+    monkeypatch.setenv("LIBRARY_DIR", str(lib.root))
+    old = tmp_path / "2026-09-01_19-00-00.txt"
+    old.write_text("[19:00:00] Jim (Jill) [371]: session zero\n")
+    sessions.retag(old, lib, game="cyberpunk-red", group="noah-gm", whole_session=False)
+    sid = sessions.ensure_session_id(old)
+    assert sessions.read_meta(old).guild_id is None
+
+    new = tmp_path / "2026-11-02_20-00-00.txt"
+    sink = SimpleNamespace(session_file=str(new), session_meta=None)
+    ctx = SimpleNamespace(guild_id=111, guild=SimpleNamespace(name="personal"))
+    bot = SimpleNamespace(guild_to_helper={}, guild_continue_from={111: str(old)})
+    VoloBot._tag_session(bot, ctx, sink)
+    meta = sessions.read_meta(new)
+    assert meta.source != "continued"  # /scribe then says it was not joined
+    assert meta.session_id and meta.session_id != sid
+    assert sessions.find_by_session_id(tmp_path, sid) == old  # the id still means it
+
+
+def test_an_answer_missing_its_recap_section_is_not_blamed_on_the_transcript(
+    lib, tmp_path
+):
+    """roborev #7158: the model wrote TOPICS and SUMMARY but no RECAP."""
+    _earlier_fixture(lib, tmp_path)
+    first = _night_13(tmp_path)[0]
+    answer = "TOPICS: a, b\n\nSUMMARY:\nThe deal went bad.\n\nReference: plain facts"
+    with pytest.raises(session_summary.SummaryError) as e:
+        session_summary.summarise(first, lib, ask=_fake_ask(answer=answer))
+    assert e.value.user_message == session_summary.NO_SUMMARY
+    assert not recaps.recap_path(_night_13(tmp_path)).exists()  # nothing saved

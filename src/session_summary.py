@@ -8,11 +8,13 @@ Two ways in, one path through:
 * ``/disconnect summary:True``: summarises the session the bot just
   recorded in that server.
 
-Either way the summary *is* the session's cached recap (src/recaps.py): it
-is generated once with one model call, saved beside the transcripts, posted
-to the channel, and from then on read by ``/ask`` before the transcript. A
-session that already has a recap is posted from the cache, with no model
-call, unless a refresh is asked for.
+Either way one model call (src/recaps.py) writes three parts into the
+session's recap file: TOPICS, a short in-world SUMMARY in the game's voice,
+and the plain RECAP. Discord gets only the summary, always as one message:
+private to the caller of ``/summary`` unless ``public: True``, public for
+``/disconnect``. ``/ask`` reads only the plain recap, before the transcript.
+A session whose saved recap has a summary is answered from the cache, with
+no model call, unless a refresh is asked for.
 
 Everything here is plain, blocking Python with no Discord objects, so it is
 unit-tested; main.py only defers, calls :func:`summarise` in a thread and
@@ -37,7 +39,8 @@ NOTHING_RECORDED = "Nothing was recorded this time, so there is no summary to wr
 NOTHING_SAID = "Nothing was transcribed in that session, so there is no summary."
 ALREADY_RUNNING = "A summary of that session is already being written."
 NO_SUMMARY = (
-    "The model answered without a summary section. Try again with `refresh: True`."
+    "The model's answer was missing a section, so nothing was saved. Try again "
+    "with `refresh: True`."
 )
 
 
@@ -134,6 +137,8 @@ def summarise(path, lib, *, recording=(), refresh=False, ask=None) -> Summary:
         )
         if not recap.summary:
             raise SummaryError(NO_SUMMARY)
+    except recaps.NoRecapSection as e:
+        raise SummaryError(NO_SUMMARY) from e
     except recaps.RecapError as e:
         raise SummaryError(NOTHING_SAID) from e
     except FileNotFoundError as e:  # tagged, but nobody spoke: no .txt
