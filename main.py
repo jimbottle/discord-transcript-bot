@@ -8,7 +8,7 @@ from datetime import datetime
 import discord
 from dotenv import load_dotenv
 
-from src import campaigns, cli, library, question_log, sessions
+from src import campaigns, cli, library, question_log, session_summary, sessions
 from src.bot import command_errors
 from src.bot.guild_voice import GuildVoice
 from src.llm.provider import AskBlocked, AskFailed, ask as llm_ask
@@ -45,6 +45,7 @@ COMMAND_SUMMARY = (
     ("ask-public", "Ask about the transcript (answer shown to everyone)."),
     ("session", "Show the group, game, campaign and session being recorded."),
     ("recap", "Summarise the session."),
+    ("summary", "Summarise a finished session (needs its session id)."),
     ("transcript", "Download the session as text."),
     ("generate_pdf", "Export transcript as PDF."),
     ("update_player_map", "Sync player names with roster."),
@@ -253,8 +254,23 @@ if __name__ == "__main__":
             bot._connecting_guilds.discard(guild_id)
 
     @bot.slash_command(name="scribe", description="Start transcribing voice to text.")
-    async def ink(ctx: discord.context.ApplicationContext):
-        await ctx.trigger_typing()
+    async def ink(
+        ctx: discord.context.ApplicationContext,
+        session_id: discord.Option(
+            str,
+            description="Carry on an earlier session (id from the dashboard) instead of starting a new one",
+            required=False,
+            default=None,
+        ),
+    ):
+        # With a session id the reply is private and the recording notice is
+        # a plain channel message: a public reply would let anyone read the
+        # id off the command, and knowing it is what authorises /summary.
+        continuing = bool(session_id and session_id.strip())
+        if continuing:
+            await ctx.defer(ephemeral=True)
+        else:
+            await ctx.trigger_typing()
         if ctx.guild_id not in bot.guild_to_helper:
             await ctx.respond(
                 f"Not connected yet. Use {command_mention(ctx, 'connect')} first.",
@@ -266,6 +282,30 @@ if __name__ == "__main__":
                 "Already recording. Can't run two taps at once.", ephemeral=True
             )
             return
+        earlier = None
+        if continuing:
+            try:
+                earlier = await asyncio.to_thread(
+                    session_summary.find,
+                    os.path.join(os.getcwd(), "transcripts"),
+                    session_id,
+                    ctx.guild_id,
+                )
+            except session_summary.SummaryError as e:
+                # Not started: recording under the wrong session is worse
+                # than a second try.
+                await ctx.respond(
+                    f"{e.user_message}\nRecording has **not** started. Run "
+                    "`/scribe` again with the right id, or without one to "
+                    "start a new session.",
+                    ephemeral=True,
+                )
+                return
+        # Set or cleared on every /scribe; a recovery restart reuses it.
+        if earlier is not None:
+            bot.guild_continue_from[ctx.guild_id] = str(earlier)
+        else:
+            bot.guild_continue_from.pop(ctx.guild_id, None)
         if not bot.start_recording(ctx):
             await ctx.respond(
                 "Couldn't start recording — the transcriber failed to start. "
@@ -287,7 +327,27 @@ if __name__ == "__main__":
         notice = scribe_notice(bot.guild_whisper_sinks.get(ctx.guild_id))
         if notice:
             message += f"\n\n{notice}"
-        await ctx.respond(message, ephemeral=False)
+        if not continuing:
+            await ctx.respond(message, ephemeral=False)
+            return
+        meta = getattr(bot.guild_whisper_sinks.get(ctx.guild_id), "session_meta", None)
+        joined = getattr(meta, "source", None) == "continued"
+        await ctx.respond(
+            f"Recording, as part of the session of {meta.session_day}."
+            if joined
+            else "Recording, but the session could not be joined (check the "
+            "bot's log); this is a new session.",
+            ephemeral=True,
+        )
+        try:
+            await ctx.channel.send(message)
+        except Exception as e:
+            logger.warning(f"/scribe: could not post the recording notice: {e}")
+            await ctx.followup.send(
+                "I couldn't post the recording notice in this channel (missing "
+                "permission?). Let the table know recording is on.",
+                ephemeral=True,
+            )
 
     @bot.slash_command(name="stop", description="Stop transcribing.")
     async def stop(ctx: discord.context.ApplicationContext):
@@ -353,8 +413,161 @@ if __name__ == "__main__":
                 f"{capture_line}"
             )
 
+    async def _deliver_summary(
+        ctx, path, *, refresh=False, public=True, hide_command=False
+    ) -> bool:
+        """Write (or reuse) the summary of the session ``path`` belongs to
+        and send it: to the channel as public follow-ups, or with
+        ``public=False`` to the caller alone (it is saved either way).
+        Problems always go to the caller alone. The interaction must
+        already be deferred or answered. Shared by /summary and
+        /disconnect (discord-transcript-bot-qef)."""
+        lib = library.load()
+        recording = [
+            getattr(s, "session_file", None) for s in bot.guild_whisper_sinks.values()
+        ]
+
+        async def _tell(text):
+            """A problem, to the caller alone. A slow local model can fail
+            after the 15-minute interaction token has expired; the reason
+            is then sent another way instead of being lost with a raised
+            follow-up (roborev #7151): to the channel for a public request,
+            and as a direct message for a private one, which must never
+            show the table that a summary was attempted (roborev #7157).
+            None of these messages contains the session id."""
+            try:
+                await ctx.followup.send(text, ephemeral=True)
+            except Exception as e:
+                where = "the channel" if public else "a direct message"
+                logger.warning(f"summary error reply failed ({e}); using {where}")
+                try:
+                    await (ctx.channel if public else ctx.author).send(text)
+                except Exception as e2:
+                    logger.error(f"could not report the summary failure: {e2}")
+
+        try:
+            # Blocking for up to minutes (one model call): off the event loop.
+            result = await asyncio.to_thread(
+                session_summary.summarise,
+                path,
+                lib,
+                recording=recording,
+                refresh=refresh,
+            )
+        except session_summary.SummaryError as e:
+            await _tell(e.user_message)
+            return False
+        except (AskBlocked, AskFailed) as e:
+            logger.error(f"session summary failed: {e.user_message}")
+            await _tell(e.user_message)
+            return False
+        except Exception:
+            logger.exception("session summary failed unexpectedly")
+            await _tell("Could not write the summary. Check the bot's log.")
+            return False
+        parts = session_summary.messages(lib, result, DISCORD_MESSAGE_LIMIT)
+        logger.info(
+            f"session summary for {result.meta.key}: "
+            f"{'written' if result.generated else 'from cache'}, "
+            f"{len(parts)} message(s), {'public' if public else 'private'}"
+        )
+        if public and hide_command:
+            # /summary: a public follow-up would hang off the command that
+            # carried the session id, so post plain channel messages.
+            try:
+                for part in parts:
+                    await ctx.channel.send(part)
+            except Exception as e:
+                logger.warning(f"/summary: could not post to the channel: {e}")
+                await _tell(
+                    "The summary is saved, but I couldn't post it in this "
+                    "channel (missing permission?)."
+                )
+                return False
+            return True
+        for i, part in enumerate(parts):
+            try:
+                await ctx.followup.send(part, ephemeral=not public)
+            except Exception as e:
+                # An interaction token lasts 15 minutes; a slow local model
+                # can outlive it. The summary is saved either way, so what
+                # is left goes to the channel, or, for a private summary,
+                # to the caller as a direct message (never the channel).
+                where = "the channel" if public else "a direct message"
+                logger.warning(f"summary follow-up failed ({e}); using {where}")
+                target = ctx.channel if public else ctx.author
+                try:
+                    for rest in parts[i:]:
+                        await target.send(rest)
+                except Exception as e2:
+                    # e.g. the caller blocks direct messages. The summary is
+                    # saved; a private one is never rerouted to the channel.
+                    logger.error(
+                        f"summary could not be delivered to {where}: {e2}; "
+                        "it is saved and /summary will show it again"
+                    )
+                    return False
+                break
+        return True
+
+    @bot.slash_command(
+        name="summary",
+        description="Summarise a finished session. Needs the session id from the dashboard.",
+        contexts={discord.InteractionContextType.guild},
+    )
+    async def summary(
+        ctx: discord.context.ApplicationContext,
+        session_id: discord.Option(
+            str, description="Session id, from the dashboard's Transcripts page"
+        ),
+        refresh: discord.Option(
+            bool,
+            description="Write the summary again even if one is saved (default: reuse it)",
+            required=False,
+            default=False,
+        ),
+        public: discord.Option(
+            bool,
+            description="Post the summary to the whole channel (default: only you)",
+            required=False,
+            default=False,
+        ),
+    ):
+        # Ephemeral, so the id typed into the command is never shown to the
+        # channel: knowing it is what authorises the command.
+        await ctx.defer(ephemeral=True)
+        try:
+            path = await asyncio.to_thread(
+                session_summary.find,
+                os.path.join(os.getcwd(), "transcripts"),
+                session_id,
+                ctx.guild_id,
+            )
+        except session_summary.SummaryError as e:
+            logger.info(f"/summary refused for {ctx.author}: unknown session id")
+            await ctx.followup.send(e.user_message, ephemeral=True)
+            return
+        await ctx.followup.send(
+            "On it. The summary will be posted in this channel."
+            if public
+            else "On it. Only you will see the summary. Run it again with "
+            "`public: True` to post it to the channel.",
+            ephemeral=True,
+        )
+        await _deliver_summary(
+            ctx, str(path), refresh=refresh, public=public, hide_command=True
+        )
+
     @bot.slash_command(name="disconnect", description="Leave the voice channel.")
-    async def disconnect(ctx: discord.context.ApplicationContext):
+    async def disconnect(
+        ctx: discord.context.ApplicationContext,
+        summary: discord.Option(
+            bool,
+            description="Post a summary of the session once disconnected",
+            required=False,
+            default=False,
+        ),
+    ):
         guild_id = ctx.guild_id
         voice = bot.guild_to_helper.get(guild_id)
         if voice is None:
@@ -414,11 +627,22 @@ if __name__ == "__main__":
         if teardown_ok:
             await ctx.followup.send(
                 "Disconnected. Session archived. Catch you on the next one, chooms."
+                + ("\nWriting the session summary now." if summary else "")
             )
         else:
             await ctx.followup.send(
                 "Disconnected, but session cleanup hit an error — check the logs."
             )
+        if summary:
+            # The recording this process made here, never an older night
+            # picked from disk: this option has no session id to gate it.
+            last = bot.guild_last_session_file.get(guild_id)
+            if not last:
+                await ctx.followup.send(
+                    session_summary.NOTHING_RECORDED, ephemeral=True
+                )
+            else:
+                await _deliver_summary(ctx, last)
 
     @bot.slash_command(
         name="generate_pdf", description="Export the transcript as a PDF."

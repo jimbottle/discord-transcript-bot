@@ -13,8 +13,10 @@ default 6): a restart at 00:40 still belongs to the night it started.
 
 import json
 import logging
+import hmac
 import os
 import re
+import secrets
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -62,6 +64,10 @@ class SessionMeta:
     # "auto" = resolved from library.yml at /scribe; "manual" = set by
     # scripts/tag_session.py. Informational only.
     source: str = "auto"
+    # A random code shared by every recording of the session, shown only on
+    # the dashboard. Discord's /summary asks for it, so only someone with
+    # dashboard access can run that command (discord-transcript-bot-qef).
+    session_id: Optional[str] = None
     schema: int = SCHEMA
 
     @property
@@ -181,6 +187,126 @@ def read_meta(transcript_path) -> Optional[SessionMeta]:
         return None
 
 
+# No 0/O, 1/I/L: the id is read off the dashboard and typed into Discord.
+_ID_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+SESSION_ID_LENGTH = 8
+
+
+def new_session_id() -> str:
+    raw = "".join(secrets.choice(_ID_ALPHABET) for _ in range(SESSION_ID_LENGTH))
+    return raw[:4] + "-" + raw[4:]
+
+
+def normalize_session_id(value) -> str:
+    """The id as compared: upper case, without dashes or spaces."""
+    return "".join(c for c in str(value or "").upper() if c.isalnum())
+
+
+def ensure_session_id(transcript_path) -> Optional[str]:
+    """The session's id, made on first use and written to every recording
+    of the session (the oldest recording's id wins when they differ, e.g.
+    after two sessions were merged by retagging). None for an untagged
+    recording or when the tag cannot be written. Never raises."""
+    target = Path(transcript_path)
+    try:
+        own = read_meta(target)
+        if own is None:
+            return None
+        # The sink creates the .txt on the first spoken line, so a brand-new
+        # recording has only its tag and session_files does not list it.
+        files = [f for f in session_files(target) if f != target] + [target]
+        metas = [(f, read_meta(f)) for f in sorted(files)]
+        metas = [(f, m) for f, m in metas if m is not None]
+        chosen = next((m.session_id for _, m in metas if m.session_id), None)
+        chosen = chosen or new_session_id()
+        for f, m in metas:
+            if m.session_id != chosen:
+                m.session_id = chosen
+                write_meta(f, m)
+        return chosen
+    except OSError as e:
+        logger.warning("could not store a session id for %s: %s", target, e)
+        return None
+
+
+def continued_meta(meta: SessionMeta, earlier: SessionMeta) -> SessionMeta:
+    """``meta`` (a recording that is just starting) made part of the
+    session ``earlier`` belongs to: same campaign, group, game, session day
+    and session id, so the two have one key and everything that works per
+    session (/ask, /summary, the PDF) reads them as one. Where and when it
+    was actually recorded stays its own. Used by ``/scribe session_id:``
+    to carry on a session after a crash or an update, also past the
+    6am cutoff or after the server's default campaign changed
+    (discord-transcript-bot-qef)."""
+    meta.campaign = earlier.campaign
+    meta.group = earlier.group
+    meta.game = earlier.game
+    meta.session_day = earlier.session_day
+    meta.session_id = earlier.session_id
+    meta.source = "continued"
+    return meta
+
+
+def settle_session_ids(paths, old_ids) -> None:
+    """Give recordings that were just re-tagged from scratch (``paths``,
+    by scripts/tag_session.py) their session ids back. ``old_ids`` maps a
+    path to the id it had. A recording keeps its id, also across a change
+    of campaign, so a whole night that is re-tagged keeps the id a GM
+    already copied for /summary (roborev #7151, #7152). It gives the id
+    up, and takes its new session's, when that session already has one
+    from recordings outside ``paths``, or when recordings it left behind
+    in its old session still carry the id. Never raises."""
+    paths = [Path(p) for p in paths]
+    moved = set(paths)
+    try:
+        everything = (
+            [(f, read_meta(f)) for f in sorted(paths[0].parent.glob("*.txt"))]
+            if paths
+            else []
+        )
+        for txt in paths:
+            meta = read_meta(txt)
+            if meta is None:
+                continue
+            sid = old_ids.get(txt)
+            keep = bool(sid)
+            for other, m in everything:
+                if m is None or other in moved or not m.session_id:
+                    continue
+                if m.key == meta.key or m.session_id == sid:
+                    keep = False  # joined a session with an id / left its own
+                    break
+            wanted = sid if keep else None
+            if meta.session_id != wanted:
+                meta.session_id = wanted
+                write_meta(txt, meta)
+    except OSError as e:
+        logger.warning("could not settle session ids: %s", e)
+    for txt in paths:
+        ensure_session_id(txt)
+
+
+def find_by_session_id(transcripts_dir, session_id) -> Optional[Path]:
+    """The newest recording whose session id is ``session_id`` (dashes,
+    spaces and case ignored), or None."""
+    wanted = normalize_session_id(session_id)
+    if len(wanted) != SESSION_ID_LENGTH:
+        return None
+    try:
+        paths = sorted(Path(transcripts_dir).glob("*.txt"), reverse=True)
+    except OSError:
+        return None
+    for txt in paths:
+        meta = read_meta(txt)
+        if (
+            meta is not None
+            and meta.session_id
+            and hmac.compare_digest(normalize_session_id(meta.session_id), wanted)
+        ):
+            return txt
+    return None
+
+
 def session_files(transcript_path) -> list:
     """Every transcript of the same session, oldest first. An untagged
     transcript is a session of one."""
@@ -258,6 +384,8 @@ def describe(lib, meta: Optional[SessionMeta], recordings: int = 1) -> dict:
         "gm": group.gm if group else None,
         "channel": meta.channel,
         "recordings": recordings,
+        # Dashboard only: never show it in Discord (it gates /summary).
+        "session_id": meta.session_id,
     }
 
 
@@ -415,15 +543,52 @@ def earlier_session_notes(transcript_path) -> list:
     transcript as the model reads it), preceded by ``recap-YYYY-MM-DD`` when
     a recap of it is cached (discord-transcript-bot-fkj). Only the one-line index entry rides
     along with a question. Never raises: /ask must work without them."""
-    from src import recaps
-    from src.llm.campaign import RECAP_PREFIX, Note
-
-    notes = []
     try:
         sessions_ = earlier_sessions(transcript_path)
     except OSError as e:
         logger.warning("could not list earlier sessions: %s", e)
         return []
+    return session_notes(sessions_)
+
+
+def campaign_sessions(transcripts_dir, campaign_id) -> list:
+    """``[(session_day, [files])]`` for every session of ``campaign_id``,
+    oldest first, each night grouped the way /ask groups it
+    (:func:`story_night_files`), so its cached recap is found."""
+    if not campaign_id:
+        return []
+    by_day = {}
+    try:
+        paths = sorted(Path(transcripts_dir).glob("*.txt"))
+    except OSError as e:
+        logger.warning("could not list the campaign's sessions: %s", e)
+        return []
+    for txt in paths:
+        meta = read_meta(txt)
+        if meta is None or meta.campaign != campaign_id:
+            continue
+        if meta.session_day not in by_day:
+            by_day[meta.session_day] = story_night_files(txt)
+    return sorted(by_day.items())
+
+
+def campaign_session_notes(transcripts_dir, campaign_id) -> list:
+    """Every session of a campaign as on-demand notes (recap first, then
+    the transcript), for questions asked about the campaign as a whole:
+    the dashboard's Lore page (discord-transcript-bot-3bx). Only their
+    index lines go with a question. Never raises."""
+    return session_notes(
+        campaign_sessions(transcripts_dir, campaign_id), label="Session"
+    )
+
+
+def session_notes(sessions_, label: str = "Earlier session") -> list:
+    """``[(day, files)]`` as notes: ``recap-<day>`` when a recap is cached,
+    then ``session-<day>`` with the transcript as the model reads it."""
+    from src import recaps
+    from src.llm.campaign import RECAP_PREFIX, Note
+
+    notes = []
     cap = earlier_max_chars()
     for day, files in sessions_:
         body = model_text(join(files)).strip()
@@ -449,7 +614,7 @@ def earlier_session_notes(transcript_path) -> list:
         notes.append(
             Note(
                 id=EARLIER_PREFIX + day,
-                title=f"Earlier session, {nice}",
+                title=f"{label}, {nice}",
                 summary=(
                     f"full transcript of the session played on {nice} "
                     f"(about {lines} lines"
@@ -539,7 +704,12 @@ def retag(
                 session_day=session_day(started),
                 started_at=started.isoformat(timespec="seconds"),
             )
+        before = meta.key
         meta.campaign = campaign or None
+        if meta.key != before and not whole_session:
+            # One recording moved to another session: it takes that
+            # session's id below instead of carrying this one along.
+            meta.session_id = None
         if not keep_group:
             meta.group = group or None
         if not keep_game:
@@ -547,4 +717,6 @@ def retag(
         meta.source = "manual"
         write_meta(txt, meta)
         written.append(Path(txt))
+    if written:
+        ensure_session_id(written[0])
     return written

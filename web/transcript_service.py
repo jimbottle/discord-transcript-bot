@@ -76,8 +76,11 @@ def session_info(filename, lib=None):
     path = _safe_path(TRANSCRIPTS_DIR, filename) if filename else None
     if path is None:
         return {"tagged": False, "recordings": 0}
-    from src import campaigns
+    from src import campaigns, sessions
 
+    # Recordings tagged before session ids existed get theirs here, the
+    # first time the dashboard shows them (discord-transcript-bot-qef).
+    sessions.ensure_session_id(path)
     return campaigns.Model(TRANSCRIPTS_DIR, lib or _library()).describe(path)
 
 
@@ -91,6 +94,11 @@ def list_transcripts():
     lib = _library()
     files = sorted(TRANSCRIPTS_DIR.glob("*.txt"), reverse=True)
     metas = {f: sessions.read_meta(f) for f in files}
+    # Give sessions tagged before ids existed their id (written once).
+    for f, m in metas.items():
+        if m is not None and not m.session_id:
+            sessions.ensure_session_id(f)
+            metas[f] = sessions.read_meta(f)
     # Real session sizes (one pass, not session_files per row), so each
     # row's tag editor offers "Apply to all N recordings" like the
     # transcript page does (roborev #6491).

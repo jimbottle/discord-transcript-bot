@@ -87,6 +87,8 @@ Edits to notes and `library.yml` apply on the next question; no restart.
 
 ## Lore page
 
-The dashboard's **Lore** page answers questions about a campaign from these notes alone, with no
-transcript, for prep between sessions. It is dashboard-only; there is no Discord command. GM-only
+The dashboard's **Lore** page answers questions about a campaign from these notes, for prep between
+sessions. It can also look up what happened in play: each session's recap (once one has been written
+with `/summary` or `make recaps`) and its transcript are listed for the model, which reads one only
+when the question needs it. It is dashboard-only; there is no Discord command. GM-only
 notes are used only when you tick "Include GM-only notes" for that question.

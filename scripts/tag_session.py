@@ -60,6 +60,7 @@ def main(argv=None) -> int:
             "leave --game out, or change the campaign in library.yml"
         )
 
+    written, old_ids = [], {}
     for name in args.files:
         txt = Path(name)
         if not txt.is_file():
@@ -91,7 +92,12 @@ def main(argv=None) -> int:
         if args.game:
             meta.game = args.game
         sessions.write_meta(txt, meta)
+        if old is not None and old.session_id:
+            old_ids[txt] = old.session_id
+        written.append(txt)
         print(f"{txt.name:28} {meta.key}  (group={meta.group}, game={meta.game})")
+    # Keep the session id a GM may already have copied for /summary.
+    sessions.settle_session_ids(written, old_ids)
     return 0
 
 

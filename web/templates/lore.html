@@ -30,8 +30,8 @@
           data-campaign="{{ chosen.id }}"
           data-ask-configured="{{ 'true' if ask_configured else 'false' }}"
           data-static="true"
-          data-empty="{{ 'true' if not notes else 'false' }}"
-          data-empty-reason="This campaign has no notes yet."
+          data-empty="{{ 'true' if not notes and not session_count else 'false' }}"
+          data-empty-reason="This campaign has no notes or recorded sessions yet."
           data-history-url="{{ url_for('questions_data') }}"
           data-history-query="source=dashboard-lore&campaign={{ chosen.id }}">
         <textarea id="ask-question" name="question" rows="2" maxlength="2000" required
@@ -42,7 +42,7 @@
             <span id="ask-status" class="search-meta" aria-live="polite"></span>
         </div>
     </form>
-    {% if notes and not table_count %}
+    {% if notes and not table_count and not session_count %}
     <p class="search-meta" id="gm-only-hint">This campaign only has GM-only notes, so tick "Include GM-only notes" to ask about it.</p>
     {% endif %}
     <div id="ask-answers" aria-live="polite"></div>
@@ -50,7 +50,7 @@
 <script src="{{ url_for('static', filename='ask.js') }}"></script>
 
 <details class="lore-notes">
-    <summary>{{ notes|length }} note{{ '' if notes|length == 1 else 's' }} available to the model</summary>
+    <summary>{{ notes|length }} note{{ '' if notes|length == 1 else 's' }}{% if session_count %} and {{ session_count }} session{{ '' if session_count == 1 else 's' }} on record{% endif %} available to the model</summary>
     <ul>
     {% for n in notes %}
         <li><strong>{{ n.title }}</strong>{% if n.audience == 'gm' %} <span class="qa-status">GM only</span>{% endif %}

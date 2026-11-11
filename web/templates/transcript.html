@@ -11,6 +11,7 @@
     <p class="session-tag">
         {{ session.game or '—' }} &middot; <strong>{{ session.campaign or 'no campaign' }}</strong>
         &middot; {{ session.group or '—' }} &middot; session {{ session.session_day }}
+        {% if session.session_id %}&middot; session id <span title="For /summary in Discord. Keep it to yourself."><span class="session-id"><code>{{ session.session_id }}</code> <button type="button" class="copy-id" data-copy="{{ session.session_id }}" title="Copy the session id" aria-label="Copy session id {{ session.session_id }}">Copy</button></span></span>{% endif %}
         {% if session.recordings > 1 %}&middot; {{ session.recordings }} recordings (questions cover all of them){% endif %}
     </p>
     {% else %}

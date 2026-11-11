@@ -36,26 +36,107 @@ SUFFIX = ".recap.json"
 TOPICS_MAX_CHARS = 300
 TOPICS_LABEL = "TOPICS:"
 
+SUMMARY_LABEL = "SUMMARY:"
+RECAP_LABEL = "RECAP:"
+# The summary is posted to Discord as ONE message (2000 characters with its
+# title). Models overshoot a stated count by up to a third, so the target
+# is well under the ceiling; session_summary trims anything still over.
+SUMMARY_TARGET_CHARS = 1200
+SUMMARY_MAX_CHARS = 1700
+
 QUESTION = (
-    "Write a recap of this whole session for players who will ask about it "
-    "weeks from now. First line: 'TOPICS: ' followed by the people, places, "
-    "factions, items and events that came up, comma-separated, most "
-    "important first, at most 25 entries. Then a blank line and the recap: "
-    "what happened in order, with the time of each major event, the "
-    "decisions the party made, who they dealt with, what they gained or "
-    "paid, and what was left unresolved. Plain facts only, about 300 to 500 "
+    "Write up this whole session in three parts, in exactly this layout.\n\n"
+    "TOPICS: the people, places, factions, items and events that came up, "
+    "comma-separated, most important first, at most 25 entries.\n\n"
+    "SUMMARY:\n"
+    "For the players, posted to the table's Discord as a single message: aim "
+    f"for about {SUMMARY_TARGET_CHARS} characters and never more than "
+    f"{SUMMARY_MAX_CHARS}. Only what happened in the game world: what the "
+    "characters did, the choices they made, who they dealt with, fights, "
+    "deals and discoveries, what they gained or lost, and what happened as "
+    "a result. Use character names. Leave out table talk, rules "
+    "and dice discussion, clock times, and anything said out of character. "
+    "Two or three short paragraphs of prose, no headings, no bullet lists. "
+    "Follow the SUMMARY RULES given with the session, and write it in the "
+    "SUMMARY STYLE given there, if there is one.\n\n"
+    "RECAP:\n"
+    "A reference record for answering questions weeks from now, in plain "
+    "language with no style: what happened in order, with the time of each "
+    "major event, the decisions the party made, who they dealt with, what "
+    "they gained or paid, and what was left unresolved. About 300 to 500 "
     "words, no introduction."
 )
+
+# What the SUMMARY may contain, whatever the game. Sent in the system
+# prompt with the session, ahead of the style. The players read this at the
+# table: it retells the night and must not steer the next one (owner's
+# direction, 2026-11-11).
+SUMMARY_RULES = (
+    "SUMMARY RULES: The SUMMARY is a retelling of what happened in this "
+    "session and nothing else. Tell what the characters did and what "
+    "happened in response. Do not suggest, hint at or list what the party "
+    "should or could do next, and do not point out open threads, unfinished "
+    "business or opportunities. Do not analyse, explain or evaluate: no "
+    "judging whether a choice was wise, no lessons, no commentary on how "
+    "well things went, no speculation about why anyone acted or what an "
+    "NPC intends, wants or is planning. Report only actions, events and "
+    "words as they occurred, including plans and intentions only where a "
+    "character stated them aloud. When something went especially badly, "
+    "say that it happened, with relish if the style allows, but without "
+    "assessing it."
+)
+
+# How the SUMMARY should sound, per game: sent in the system prompt, under
+# the SESSION line. Stronger than the light ``voice`` /ask answers use,
+# because a summary is a piece of the game's fiction, not a lookup. A game
+# whose ``voice`` is switched off in library.yml (``voice: ""``) gets none.
+SUMMARY_STYLES = {
+    "cyberpunk-red": (
+        "Write the SUMMARY the way a Night City fixer or a street-level "
+        "screamsheet would tell it: Cyberpunk RED slang used naturally "
+        "(chooms, eddies, corpos, flatlined, preem, nova, delta), clipped, "
+        "gritty and neon-noir. Every name, deal, payment and outcome stays "
+        "exactly as it happened."
+    ),
+    "dnd-5e": (
+        "Write the SUMMARY the way a tavern chronicler or travelling bard "
+        "would tell the tale: high-fantasy diction, a little flourish, the "
+        "party as heroes of a saga. Every name, deed, treasure and outcome "
+        "stays exactly as it happened."
+    ),
+}
+
+
+def summary_style(lib, meta) -> str:
+    """The ``SUMMARY STYLE:`` line for the session's game, or ''."""
+    game_id = getattr(meta, "game", None)
+    game = lib.games.get(game_id) if (lib is not None and game_id) else None
+    if game is None or not game.voice:
+        return ""
+    style = SUMMARY_STYLES.get(game_id) or (
+        f"Write the SUMMARY in the voice, vocabulary and mood of {game.name}, "
+        "as someone inside that world would tell it. Every name, event and "
+        "outcome stays exactly as it happened."
+    )
+    return "SUMMARY STYLE: " + style
 
 
 class RecapError(Exception):
     """A recap could not be made (nothing transcribed, or an empty answer)."""
 
 
+class NoRecapSection(RecapError):
+    """The model answered, but without a usable RECAP part (for example it
+    dropped the ``RECAP:`` label, so everything landed in the summary)."""
+
+
 @dataclass
 class Recap:
     text: str
     topics: str = ""
+    # The short, in-world, themed version posted in Discord ('' on recaps
+    # written before it existed).
+    summary: str = ""
     model: str = ""
     generated_at: str = ""
 
@@ -96,6 +177,7 @@ def load(files) -> Optional[Recap]:
     return Recap(
         text=text,
         topics=str(data.get("topics") or "").strip(),
+        summary=str(data.get("summary") or "").strip(),
         model=str(data.get("model") or ""),
         generated_at=str(data.get("generated_at") or ""),
     )
@@ -109,6 +191,7 @@ def save(files, recap: Recap) -> Path:
         "generated_at": recap.generated_at,
         "model": recap.model,
         "topics": recap.topics,
+        "summary": recap.summary,
         "recap": recap.text,
     }
     tmp = path.with_name(path.name + ".tmp")
@@ -117,29 +200,99 @@ def save(files, recap: Recap) -> Path:
     return path
 
 
+def _label(line: str, label: str):
+    """The text after ``label`` when ``line`` starts with it (markdown
+    dressing such as ``**SUMMARY:**`` or ``## Recap`` allowed), else None."""
+    bare = line.strip().lstrip("*# ").replace("**", "")
+    name = label.rstrip(":")
+    if not bare.upper().startswith(name):
+        return None
+    rest = bare[len(name) :]
+    # "SUMMARY:" or a bare heading line, never a sentence that happens to
+    # begin with the word ("Summary of the heist ...").
+    if rest.strip() and not rest.lstrip().startswith(":"):
+        return None
+    return rest.lstrip(": \t")
+
+
 def parse(answer: str):
-    """``(topics, recap text)`` from the model's answer. The TOPICS line is
-    optional: a model that leaves it out still yields a usable recap."""
-    lines = (answer or "").strip().splitlines()
+    """``(topics, summary, recap text)`` from the model's answer. Every
+    label is optional: an answer without them is all recap, so a model that
+    ignores the layout still yields a usable reference."""
     topics = ""
-    for i, line in enumerate(lines[:3]):
-        bare = line.strip().lstrip("*# ").replace("**", "")
-        if bare.upper().startswith(TOPICS_LABEL):
-            topics = " ".join(bare[len(TOPICS_LABEL) :].split())
-            del lines[i]
-            break
+    parts = {"recap": [], "summary": []}
+    where = "recap"
+    seen_section = False
+    for i, line in enumerate((answer or "").strip().splitlines()):
+        if not seen_section and not topics and i < 3:
+            found = _label(line, TOPICS_LABEL)
+            if found is not None:
+                topics = " ".join(found.split())
+                continue
+        for name, label in (("summary", SUMMARY_LABEL), ("recap", RECAP_LABEL)):
+            found = _label(line, label)
+            if found is not None and not (name == where and seen_section):
+                where, seen_section = name, True
+                line = found
+                break
+        parts[where].append(line)
     if len(topics) > TOPICS_MAX_CHARS:
         cut = topics.rfind(",", 0, TOPICS_MAX_CHARS)
         topics = topics[: cut if cut > 0 else TOPICS_MAX_CHARS].rstrip(", ")
-    return topics, "\n".join(lines).strip()
+    return (
+        topics,
+        "\n".join(parts["summary"]).strip(),
+        "\n".join(parts["recap"]).strip(),
+    )
 
 
-def generate(files, *, header: str = "", ask=None) -> Recap:
+# How the summary generator may use the campaign's notes and earlier
+# sessions (discord-transcript-bot-3bx). They are offered on demand, like
+# /ask's: only the index is sent, and this tells the model what a lookup is
+# for, so a summary of tonight never turns into a summary of the campaign.
+CONTEXT_RULES = (
+    "CONTEXT: The CAMPAIGN NOTES INDEX, when there is one, lists the "
+    "campaign's reference notes and its earlier sessions (recap- and "
+    "session- ids). The transcript is speech-to-text and often garbles "
+    "names. Use the index, and read a note or an earlier session's recap "
+    "when you need to, only to get a name or its spelling right and to "
+    "know who or what something already established is. Do not read an "
+    "earlier session's full transcript. Everything you write is about this "
+    "session's events alone: bring in nothing from the notes or earlier "
+    "sessions beyond a correct name or a few words saying who someone is."
+)
+
+
+def context_for(files, lib):
+    """``(note_dirs, extra_notes)`` the generator may look things up in:
+    the session's game, group and campaign note folders, and the campaign's
+    earlier sessions as on-demand notes. Empty for an untagged session or
+    without a library. Never raises."""
+    files = sorted(Path(f) for f in files)
+    meta = sessions.read_meta(files[0]) if files else None
+    if meta is None or lib is None:
+        return [], []
+    try:
+        dirs = list(
+            lib.note_dirs(game=meta.game, group=meta.group, campaign=meta.campaign)
+        )
+    except Exception as e:  # noqa: BLE001 - a recap must not fail on notes
+        logger.warning("recap: could not resolve note folders: %s", e)
+        dirs = []
+    return dirs, sessions.earlier_session_notes(files[0])
+
+
+def generate(files, *, header: str = "", style: str = "", lib=None, ask=None) -> Recap:
     """Write and cache the recap of the session made of ``files``. One
     blocking model call through ``provider.ask`` (so the GM check and the
     backend's limits apply); raises its ``AskFailed``/``AskBlocked``, or
-    :class:`RecapError`. ``header`` is the session's ``SESSION:`` line; its
-    ``STYLE:`` line is dropped, because a recap is reference material."""
+    :class:`RecapError`. ``header`` is the session's ``SESSION:`` line. Its
+    ``STYLE:`` line (the light voice of /ask answers) is replaced by
+    ``SUMMARY_RULES`` and ``style`` (:func:`summary_style`), which go into
+    the system prompt and govern the SUMMARY part only; the RECAP part
+    stays plain. With ``lib``, the campaign's notes and earlier sessions
+    are offered to the model on demand (:func:`context_for`): index lines
+    only, read through ``read_campaign_notes`` when a name needs checking."""
     if ask is None:
         from src.llm import provider
 
@@ -150,13 +303,22 @@ def generate(files, *, header: str = "", ask=None) -> Recap:
     plain = "\n".join(
         line for line in header.splitlines() if not line.startswith("STYLE:")
     )
-    result = ask(body, QUESTION, header=plain)
-    topics, text = parse(result.answer)
+    plain = (plain + "\n" if plain else "") + SUMMARY_RULES
+    if style:
+        plain += "\n" + style
+    note_dirs, earlier = context_for(files, lib)
+    if note_dirs or earlier:
+        plain += "\n" + CONTEXT_RULES
+    result = ask(body, QUESTION, header=plain, note_dirs=note_dirs, extra_notes=earlier)
+    topics, summary, text = parse(result.answer)
     if not text:
+        if summary:
+            raise NoRecapSection("the model's answer had no RECAP section")
         raise RecapError("the model returned an empty recap")
     recap = Recap(
         text=text,
         topics=topics,
+        summary=summary,
         model=result.model,
         generated_at=datetime.now().isoformat(timespec="seconds"),
     )
