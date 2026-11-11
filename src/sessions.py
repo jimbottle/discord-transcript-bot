@@ -206,7 +206,7 @@ def latest_for_guild(guild_id, transcripts_dir) -> Optional[Path]:
     return None
 
 
-def _join(files) -> str:
+def join(files) -> str:
     """Recordings joined oldest first with a restart marker between them."""
     parts = []
     for i, f in enumerate(files):
@@ -232,7 +232,7 @@ def session_transcript(transcript_path):
     order with a restart marker between them. ``meta`` is the target
     file's tag (None when untagged)."""
     files = session_files(transcript_path)
-    return _join(files), read_meta(transcript_path), files
+    return join(files), read_meta(transcript_path), files
 
 
 def describe(lib, meta: Optional[SessionMeta], recordings: int = 1) -> dict:
@@ -395,7 +395,7 @@ def earlier_session_notes(transcript_path) -> list:
         return []
     cap = earlier_max_chars()
     for day, files in sessions_:
-        body = model_text(_join(files)).strip()
+        body = model_text(join(files)).strip()
         if not body:
             continue
         lines = body.count("\n") + 1

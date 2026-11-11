@@ -34,7 +34,7 @@ from src import player_map_store  # noqa: E402
 # so the prompt, the transcript cache and the error messages are identical
 # whether the question comes from Discord or from the dashboard.
 from src.llm import provider  # noqa: E402
-from src import library, question_log, sessions  # noqa: E402
+from src import campaigns, library, question_log, sessions  # noqa: E402
 from src.utils import timefmt  # noqa: E402
 import time  # noqa: E402
 
@@ -142,20 +142,10 @@ def transcripts():
 def _tag_choices():
     """Campaigns (with their group and game), groups and games from
     library.yml, for the tag editor's dropdowns."""
-    lib = sessions_library()
+    model = campaign_model()
+    lib = model.lib
     return {
-        "campaigns": sorted(
-            (
-                {
-                    "id": c.id,
-                    "name": c.name,
-                    "group": c.group or "",
-                    "game": c.game or "",
-                }
-                for c in lib.campaigns.values()
-            ),
-            key=lambda c: c["name"].lower(),
-        ),
+        "campaigns": [c.choice() for c in model.campaigns()],
         "groups": sorted(
             ({"id": g.id, "name": g.name} for g in lib.groups.values()),
             key=lambda g: g["name"].lower(),
@@ -350,8 +340,12 @@ def ask_session():
 
     # The whole session the file belongs to (every recording of that
     # campaign night), its header line and its note folders.
+    asked = campaign_model().ask_context(path) if path else campaigns.AskContext()
     transcript, header, note_dirs, files = (
-        sessions.ask_context(path) if path else ("", "", [], [])
+        asked.transcript,
+        asked.header,
+        asked.note_dirs,
+        asked.files,
     )
     if not transcript or not transcript.strip():
         no_data = "No transcript data in the current session yet."
@@ -366,7 +360,7 @@ def ask_session():
             header=header,
             note_dirs=note_dirs,
             # Earlier sessions of the campaign, readable on demand (ij0).
-            extra_notes=sessions.earlier_session_notes(path),
+            extra_notes=asked.earlier_notes(),
         )
     except provider.AskBlocked as e:
         _log(question_log.BLOCKED, started, error=e.user_message, verdict=e.verdict)
@@ -459,25 +453,24 @@ def _blocked_body(question, e):
 def lore():
     """Campaign Q&A from library notes only. Dashboard-only on purpose: no
     Discord command reaches provider.ask_lore."""
-    lib = sessions_library()
-    campaigns = sorted(lib.campaigns.values(), key=lambda c: c.name.lower())
+    model = campaign_model()
+    lib = model.lib
+    all_campaigns = model.campaigns()
     chosen = request.args.get("campaign") or next(
         (g.active_campaign for g in lib.groups.values() if g.active_campaign), None
     )
-    if chosen not in lib.campaigns:
-        chosen = campaigns[0].id if campaigns else None
-    c = lib.campaigns.get(chosen) if chosen else None
+    c = model.campaign(chosen) or (all_campaigns[0] if all_campaigns else None)
     from src.llm import campaign as notes_mod
 
-    dirs = lib.note_dirs(game=c.game, group=c.group, campaign=c.id) if c else []
+    dirs = list(c.note_dirs) if c else []
     table_notes = notes_mod.load_notes(dirs, include_gm=False)
     all_notes = notes_mod.load_notes(dirs, include_gm=True)
     return render_template(
         "lore.html",
-        campaigns=campaigns,
+        campaigns=all_campaigns,
         chosen=c,
-        game_name=lib.name("game", c.game) if c else None,
-        group_name=lib.name("group", c.group) if c else None,
+        game_name=lib.name("game", c.game_id) if c else None,
+        group_name=lib.name("group", c.group_id) if c else None,
         notes=all_notes,
         table_count=len(table_notes),
         ask_configured=provider.configured(),
@@ -502,11 +495,11 @@ def lore_ask():
             400,
         )
     campaign_id = data.get("campaign")
-    lib = sessions_library()
-    if not isinstance(campaign_id, str) or campaign_id not in lib.campaigns:
+    model = campaign_model()
+    c = model.campaign(campaign_id) if isinstance(campaign_id, str) else None
+    if c is None:
         return jsonify({"error": "unknown campaign"}), 404
     include_gm = data.get("include_gm") is True
-    c = lib.campaigns[campaign_id]
 
     def _log(status, started=None, **kw):
         question_log.record(
@@ -527,8 +520,8 @@ def lore_ask():
     try:
         result = provider.ask_lore(
             question,
-            header=sessions.campaign_header(lib, campaign_id),
-            note_dirs=lib.note_dirs(game=c.game, group=c.group, campaign=c.id),
+            header=model.campaign_header(c.id),
+            note_dirs=list(c.note_dirs),
             include_gm=include_gm,
         )
     except provider.AskBlocked as e:
@@ -590,6 +583,13 @@ def questions_data():
     except ValueError:
         limit = 100
     return jsonify(question_log.read(**_history_filters(), limit=limit))
+
+
+def campaign_model():
+    """The campaign data model for this request (src/campaigns.py)."""
+    import transcript_service
+
+    return campaigns.Model(transcript_service.TRANSCRIPTS_DIR, sessions_library())
 
 
 def sessions_library():

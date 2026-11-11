@@ -8,7 +8,7 @@ from typing import Optional
 import discord
 from discord.sinks.errors import RecordingException
 
-from src import library, player_map_store, sessions
+from src import campaigns, player_map_store, sessions
 from src.bot import command_errors
 from src.bot.health import HealthCheck
 from src.sinks.whisper_sink import WhisperSink
@@ -564,16 +564,13 @@ class VoloBot(discord.Bot):
         try:
             helper = self.guild_to_helper.get(ctx.guild_id)
             channel = getattr(getattr(helper, "vc", None), "channel", None)
-            lib = library.load()
+            model = campaigns.for_recording(os.path.abspath(whisper_sink.session_file))
             # The campaign last used here, else the library's binding (5bd).
-            group, campaign = sessions.default_tag(
-                lib,
-                ctx.guild_id,
-                getattr(channel, "id", None),
-                os.path.dirname(os.path.abspath(whisper_sink.session_file)),
+            group, campaign = model.default_for(
+                ctx.guild_id, getattr(channel, "id", None)
             )
             meta = sessions.build_meta(
-                lib,
+                model.lib,
                 guild_id=ctx.guild_id,
                 guild=getattr(ctx.guild, "name", None),
                 channel_id=getattr(channel, "id", None),

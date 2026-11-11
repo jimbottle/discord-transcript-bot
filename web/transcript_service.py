@@ -72,16 +72,13 @@ def _library():
 def session_info(filename, lib=None):
     """Display fields for the session ``filename`` belongs to (group, game,
     campaign, session day, how many recordings), or ``{"tagged": False}``."""
-    from src import sessions
 
     path = _safe_path(TRANSCRIPTS_DIR, filename) if filename else None
     if path is None:
         return {"tagged": False, "recordings": 0}
-    lib = lib or _library()
-    files = sessions.session_files(path)
-    info = sessions.describe(lib, sessions.read_meta(path), len(files))
-    info["files"] = [f.name for f in files]
-    return info
+    from src import campaigns
+
+    return campaigns.Model(TRANSCRIPTS_DIR, lib or _library()).describe(path)
 
 
 def list_transcripts():

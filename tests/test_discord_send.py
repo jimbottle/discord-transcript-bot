@@ -62,9 +62,11 @@ def test_earlier_sessions_are_read_off_the_event_loop_after_the_defer():
     inside the function handed to asyncio.to_thread, never on the event loop
     (no slash-command harness, so this checks the source order)."""
     main = (pathlib.Path(__file__).resolve().parent.parent / "main.py").read_text()
-    assert main.count("earlier_session_notes(") == 1
+    # The only route to them is AskContext.earlier_notes (src/campaigns.py).
+    assert "earlier_session_notes(" not in main
+    assert main.count(".earlier_notes()") == 1
     defer = main.index("await ctx.defer(ephemeral=private)")
     worker = main.index("def _answer():", defer)
-    build = main.index("sessions.earlier_session_notes(session_file)")
+    build = main.index("asked.earlier_notes()")
     handoff = main.index("await asyncio.to_thread(_answer)")
     assert defer < worker < build < handoff
