@@ -25,6 +25,10 @@ dev = [
     "pytest",
     # tests/test_llm_local.py imports httpx directly (the SDKs pull it in at runtime).
     "httpx",
+    # The documented lint command is `uv run ruff`; without ruff in the
+    # environment uv falls through to whatever `ruff` is on PATH (a pyenv shim
+    # on the owner's Mac, which fails). Same version as .pre-commit-config.yaml.
+    "ruff==0.17.3",
 ]
 
 # torch from the CPU index (requirements.txt's --extra-index-url); explicit so no
