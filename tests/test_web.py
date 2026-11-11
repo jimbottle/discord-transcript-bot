@@ -1846,7 +1846,7 @@ def test_inline_tag_row_shows_a_tag_the_library_no_longer_has(client, deletable)
     that has left the library used to show as "— none —" in its row, and
     saving any other field then cleared the old tag without a word. The
     stale id is now the selected option, so it is visible, and a save that
-    still carries it is refused by the endpoint (the row says why)."""
+    still carries it keeps it (roborev #7167)."""
     from src import sessions
 
     tdir, _, files = deletable
@@ -1861,11 +1861,44 @@ def test_inline_tag_row_shows_a_tag_the_library_no_longer_has(client, deletable)
         )
     # the other recording, tagged with nothing stale, gets no such option
     assert page.count("(not in library)") == 3
-    # what the row would post if only another field changed: refused, not cleared
+    # a stale id that is newly chosen (not the one already there) is refused
+    r = client.post(
+        f"/transcripts/{files[0].name}/tag",
+        json={"campaign": "other-ghost", "game": "old-game", "group": "gone-group"},
+        headers=_XHR,
+    )
+    assert r.status_code == 400 and "other-ghost" in r.get_json()["error"]
+    assert sessions.read_meta(files[0]).campaign == "ghost-campaign"
+
+
+def test_inline_tag_row_clears_one_stale_tag_beside_another(client, deletable):
+    """roborev #7167: with two stale ids on a row, every save posted the other
+    one too and was refused, so neither could be cleared. The row now posts
+    an id the recording already carries is kept, and only a newly chosen one
+    has to be in the library."""
+    from src import sessions
+
+    tdir, _, files = deletable
+    meta = sessions.read_meta(files[0])
+    meta.campaign, meta.game, meta.group = "ghost-campaign", "old-game", ""
+    sessions.write_meta(files[0], meta)
+    # what the row posts when the campaign cell is set to none
+    r = client.post(
+        f"/transcripts/{files[0].name}/tag",
+        json={"campaign": "", "game": "old-game", "group": ""},
+        headers=_XHR,
+    )
+    assert r.status_code == 200, r.get_json()
+    after = sessions.read_meta(files[0])
+    assert not after.campaign and after.game == "old-game"
+    # and when the game cell is cleared beside a stale campaign
+    after.campaign = "ghost-campaign"
+    sessions.write_meta(files[0], after)
     r = client.post(
         f"/transcripts/{files[0].name}/tag",
         json={"campaign": "ghost-campaign", "game": "", "group": ""},
         headers=_XHR,
     )
-    assert r.status_code == 400 and "ghost-campaign" in r.get_json()["error"]
-    assert sessions.read_meta(files[0]).campaign == "ghost-campaign"
+    assert r.status_code == 200, r.get_json()
+    after = sessions.read_meta(files[0])
+    assert after.campaign == "ghost-campaign" and not after.game

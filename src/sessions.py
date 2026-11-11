@@ -666,7 +666,9 @@ def retag(
 ):
     """Set a recording's (or its whole session's) campaign/group/game.
 
-    Ids are validated against the library; ``None``/"" clears a field.
+    A newly chosen id must exist in the library (one the recording already
+    carries is kept even if the library has since dropped it); ``None``/""
+    clears a field.
     Choosing a campaign fills in its group and game unless those are given
     explicitly; a campaign that names no group, or no game, leaves each
     recording's as it was (the Live picker sends only the campaign, and
@@ -674,16 +676,21 @@ def retag(
     /ask; roborev #7125, #7135).
     Discord fields and the session day are kept; ``source``
     becomes "manual". Returns the rewritten paths (oldest first)."""
+    # An id the recording already carries is not checked: it may have left
+    # the hand-edited library since, and refusing it would make every save
+    # of the row fail while two fields are stale (roborev #7167). Only a
+    # newly chosen id has to exist.
+    current = read_meta(transcript_path)
     for kind, value, table in (
         ("campaign", campaign, lib.campaigns),
         ("group", group, lib.groups),
         ("game", game, lib.games),
     ):
-        if value and value not in table:
+        if value and value not in table and value != getattr(current, kind, None):
             raise TagError(f"unknown {kind} '{value}'")
     keep_group = keep_game = False
-    if campaign:
-        c = lib.campaigns[campaign]
+    c = lib.campaigns.get(campaign) if campaign else None
+    if c is not None:
         keep_group = group is None and not c.group
         keep_game = game is None and not c.game
         group = group if group is not None else c.group

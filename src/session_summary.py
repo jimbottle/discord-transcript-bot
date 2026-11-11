@@ -39,8 +39,8 @@ NOTHING_RECORDED = "Nothing was recorded this time, so there is no summary to wr
 NOTHING_SAID = "Nothing was transcribed in that session, so there is no summary."
 ALREADY_RUNNING = "A summary of that session is already being written."
 NO_SUMMARY = (
-    "The model's answer was missing a section, so nothing was saved. Try again "
-    "with `refresh: True`."
+    "The model's answer was missing a section, so there is no summary to "
+    "show. Try again with `refresh: True`."
 )
 
 
