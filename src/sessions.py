@@ -171,11 +171,8 @@ def latest_for_guild(guild_id, transcripts_dir) -> Optional[Path]:
     return None
 
 
-def session_transcript(transcript_path):
-    """``(text, meta, files)``: all of a session's recordings joined in
-    order with a restart marker between them. ``meta`` is the target
-    file's tag (None when untagged)."""
-    files = session_files(transcript_path)
+def _join(files) -> str:
+    """Recordings joined oldest first with a restart marker between them."""
     parts = []
     for i, f in enumerate(files):
         try:
@@ -192,7 +189,15 @@ def session_transcript(transcript_path):
                 )
             )
         parts.append(body.rstrip("\n"))
-    return "\n".join(parts) + ("\n" if parts else ""), read_meta(transcript_path), files
+    return "\n".join(parts) + ("\n" if parts else "")
+
+
+def session_transcript(transcript_path):
+    """``(text, meta, files)``: all of a session's recordings joined in
+    order with a restart marker between them. ``meta`` is the target
+    file's tag (None when untagged)."""
+    files = session_files(transcript_path)
+    return _join(files), read_meta(transcript_path), files
 
 
 def describe(lib, meta: Optional[SessionMeta], recordings: int = 1) -> dict:
@@ -270,6 +275,107 @@ def ask_context(transcript_path, lib=None):
     header = header_text(lib, meta, len(files))
     dirs = lib.note_dirs(game=meta.game, group=meta.group, campaign=meta.campaign)
     return text, header, dirs, files
+
+
+# ── earlier sessions (discord-transcript-bot-ij0) ─────────────────────
+
+EARLIER_PREFIX = "session-"
+# One earlier session is read whole when the model asks for it. The cap
+# (characters, most recent kept) only guards against a runaway file.
+EARLIER_MAX_CHARS_ENV = "EARLIER_SESSION_MAX_CHARS"
+EARLIER_MAX_CHARS = 400_000
+EARLIER_TRIM_MARK = "[... the start of this session is not included ...]"
+_SPEAKER = re.compile(r"^\[[^\]\n]+\] ([^\[\n:]+?)(?: \[\d+\])?:", re.M)
+
+
+def earlier_max_chars() -> int:
+    try:
+        return max(0, int(os.getenv(EARLIER_MAX_CHARS_ENV, "") or EARLIER_MAX_CHARS))
+    except ValueError:
+        return EARLIER_MAX_CHARS
+
+
+def _same_story(a: SessionMeta, b: SessionMeta) -> bool:
+    """Whether two recordings belong to the same ongoing game. The same
+    campaign when both name one; otherwise the same game *and* the same
+    group, so a recording tagged without a campaign still connects but
+    never to another table that happens to play the same game: one bot
+    serves several groups, and an earlier transcript is that group's."""
+    if a.campaign and b.campaign:
+        return a.campaign == b.campaign
+    return bool(a.game and a.group) and a.game == b.game and a.group == b.group
+
+
+def earlier_sessions(transcript_path) -> list:
+    """``[(session_day, [files])]`` for every session before the one
+    ``transcript_path`` belongs to, in the same campaign (or game), oldest
+    first. Empty for an untagged recording."""
+    target = Path(transcript_path)
+    meta = read_meta(target)
+    if meta is None:
+        return []
+    by_day = {}
+    for txt in sorted(target.parent.glob("*.txt")):
+        other = read_meta(txt)
+        if (
+            other is not None
+            and other.session_day < meta.session_day
+            and _same_story(meta, other)
+        ):
+            by_day.setdefault(other.session_day, []).append(txt)
+    return sorted(by_day.items())
+
+
+def earlier_session_notes(transcript_path) -> list:
+    """Each earlier session as a note the model can read on demand through
+    ``read_campaign_notes`` (id ``session-YYYY-MM-DD``, body = that night's
+    transcript as the model reads it). Only the one-line index entry rides
+    along with a question. Never raises: /ask must work without them."""
+    from src.llm.campaign import Note
+
+    notes = []
+    try:
+        sessions_ = earlier_sessions(transcript_path)
+    except OSError as e:
+        logger.warning("could not list earlier sessions: %s", e)
+        return []
+    cap = earlier_max_chars()
+    for day, files in sessions_:
+        body = model_text(_join(files)).strip()
+        if not body:
+            continue
+        lines = body.count("\n") + 1
+        # Recordings from before the roster carry bare Discord ids: not names.
+        speakers = dedupe_keep_order(
+            s for s in _SPEAKER.findall(body) if not s.strip().isdigit()
+        )[:8]
+        if cap and len(body) > cap:
+            cut = body.find("\n", len(body) - cap)
+            body = EARLIER_TRIM_MARK + "\n" + body[cut + 1 :]
+        try:
+            nice = datetime.strptime(day, "%Y-%m-%d").strftime("%A, %B %-d, %Y")
+        except ValueError:
+            nice = day
+        notes.append(
+            Note(
+                id=EARLIER_PREFIX + day,
+                title=f"Earlier session, {nice}",
+                summary=(
+                    f"full transcript of the session played on {nice} "
+                    f"(about {lines} lines"
+                    + (f"; speakers: {', '.join(speakers)}" if speakers else "")
+                    + ")"
+                ),
+                body=body,
+                keywords=["earlier session", "last time", "previously"],
+            )
+        )
+    return notes
+
+
+def dedupe_keep_order(items) -> list:
+    seen = set()
+    return [i for i in items if not (i in seen or seen.add(i))]
 
 
 def campaign_header(lib, campaign_id: str) -> str:

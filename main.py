@@ -666,14 +666,23 @@ if __name__ == "__main__":
             # llm_ask is blocking and can take tens of seconds, so it must
             # not run on the event loop — that would stall voice receive and
             # the gateway heartbeat, not just this command.
-            result = await asyncio.to_thread(
-                llm_ask,
-                transcript_text,
-                question,
-                header=header,
-                note_dirs=note_dirs,
-                max_chars=answer_budget(question),
-            )
+            def _answer():
+                # Earlier sessions of the campaign, readable on demand (ij0).
+                # Built here, on the worker thread and after the defer: it
+                # reads every earlier session's files, which grows with the
+                # campaign and must not hold up the event loop or the
+                # 3-second interaction deadline (roborev #7119).
+                earlier = sessions.earlier_session_notes(session_file)
+                return llm_ask(
+                    transcript_text,
+                    question,
+                    header=header,
+                    note_dirs=note_dirs,
+                    max_chars=answer_budget(question),
+                    extra_notes=earlier,
+                )
+
+            result = await asyncio.to_thread(_answer)
             # No truncation: anything past Discord's limit is split below.
             answer = clean_answer(result.answer)
             logger.info(

@@ -651,7 +651,7 @@ def ask_configured(monkeypatch):
 
 
 def _fake_ask(calls, answer="They decided to head for the keep."):
-    def ask(transcript, question, header="", note_dirs=()):
+    def ask(transcript, question, header="", note_dirs=(), extra_notes=()):
         calls.append((transcript, question))
         return web_app.provider.AskResult(
             answer=answer,
@@ -906,7 +906,7 @@ def test_ask_covers_every_recording_of_the_session(
 ):
     seen = {}
 
-    def ask(transcript, question, header="", note_dirs=()):
+    def ask(transcript, question, header="", note_dirs=(), extra_notes=()):
         seen.update(transcript=transcript, header=header)
         return web_app.provider.AskResult(answer="ok", model="m")
 
@@ -920,6 +920,32 @@ def test_ask_covers_every_recording_of_the_session(
         "SESSION: Game: Cyberpunk RED · Campaign: Return to Night City"
     )
     assert "\nSTYLE: " in seen["header"]
+
+
+def test_ask_offers_earlier_sessions_of_the_campaign(
+    client, tagged_session, ask_configured, monkeypatch
+):
+    """discord-transcript-bot-ij0: last week's session is passed as an
+    on-demand note, not as part of tonight's transcript."""
+    from src import library, sessions
+
+    old = tagged_session[0].with_name("2026-10-13_19-00-00.txt")
+    old.write_text("[19:01:00] A (B) [1]: last week\n", encoding="utf-8")
+    sessions.retag(old, library.load(), campaign="rtnc", whole_session=False)
+    seen = {}
+
+    def ask(transcript, question, header="", note_dirs=(), extra_notes=()):
+        seen.update(transcript=transcript, extra=list(extra_notes))
+        return web_app.provider.AskResult(
+            answer="ok", model="m", notes_used=["session-2026-10-13"]
+        )
+
+    monkeypatch.setattr(web_app.provider, "ask", ask)
+    r = client.post("/ask", json={"question": "last session?"}, headers=_XHR)
+    assert r.status_code == 200
+    assert [n.id for n in seen["extra"]] == ["session-2026-10-13"]
+    assert seen["extra"][0].body == "[7:01 PM] A (B): last week"
+    assert "last week" not in seen["transcript"]
 
 
 def test_transcripts_page_shows_session_columns(client, tagged_session):

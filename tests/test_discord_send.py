@@ -54,3 +54,17 @@ def test_ask_never_sends_a_followup_directly():
     start = main.index("async def _run_ask(")
     end = main.index("@bot.slash_command(", start)
     assert not re.search(r"ctx\.followup\.send\(", main[start:end])
+
+
+def test_earlier_sessions_are_read_off_the_event_loop_after_the_defer():
+    """roborev #7119: building the earlier-session notes reads every earlier
+    transcript of the campaign. In /ask that must happen after ctx.defer and
+    inside the function handed to asyncio.to_thread, never on the event loop
+    (no slash-command harness, so this checks the source order)."""
+    main = (pathlib.Path(__file__).resolve().parent.parent / "main.py").read_text()
+    assert main.count("earlier_session_notes(") == 1
+    defer = main.index("await ctx.defer(ephemeral=private)")
+    worker = main.index("def _answer():", defer)
+    build = main.index("sessions.earlier_session_notes(session_file)")
+    handoff = main.index("await asyncio.to_thread(_answer)")
+    assert defer < worker < build < handoff

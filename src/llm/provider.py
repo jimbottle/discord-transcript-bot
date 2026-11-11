@@ -79,10 +79,19 @@ def describe() -> str:
     return f"Anthropic API ({claude.model()}, effort {claude.effort()})"
 
 
-def ask(transcript, question, *, header="", note_dirs=(), max_chars=None):
+def ask(
+    transcript, question, *, header="", note_dirs=(), max_chars=None, extra_notes=()
+):
+    """``extra_notes`` are ready-made notes added to the index after the
+    library's (the earlier sessions, ``sessions.earlier_session_notes``)."""
     backend = local if name() == LOCAL else claude
     return backend.ask(
-        transcript, question, header=header, note_dirs=note_dirs, max_chars=max_chars
+        transcript,
+        question,
+        header=header,
+        note_dirs=note_dirs,
+        max_chars=max_chars,
+        extra_notes=extra_notes,
     )
 
 

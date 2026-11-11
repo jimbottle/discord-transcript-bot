@@ -404,3 +404,113 @@ def test_model_text_drops_discord_ids_and_uses_12_hour_times():
         "--- recording restarted at 8:15 PM ---\n"
         "an unrecognised line [123]: kept as is\n"
     )
+
+
+# ── earlier sessions (discord-transcript-bot-ij0) ─────────────────────
+
+
+def _earlier_fixture(lib, t):
+    _rec(
+        t,
+        "2026-10-06_19-00-00",
+        "[19:01:00] Jim (Jill) [371]: we met the fixer\n",
+        lib,
+        guild_id=111,
+    )
+    _rec(
+        t,
+        "2026-10-13_19-00-00",
+        "[19:01:00] Noah (GM) [420]: the deal went bad\n",
+        lib,
+        guild_id=111,
+    )
+    _rec(
+        t,
+        "2026-10-13_21-00-00",
+        "[21:01:00] Jim (Jill) [371]: we ran\n",
+        lib,
+        guild_id=111,
+    )
+    # another campaign and game: never offered
+    _rec(
+        t,
+        "2026-10-12_19-00-00",
+        "[19:01:00] C (D) [2]: goblins\n",
+        lib,
+        guild_id=111,
+        channel_id=999,
+    )
+    # untagged: never offered
+    (t / "2026-10-01_19-00-00.txt").write_text("[19:00:00] X (Y) [9]: test\n")
+    return _rec(
+        t,
+        "2026-10-20_19-38-38",
+        "[19:40:00] Jim (Jill) [371]: tonight\n",
+        lib,
+        guild_id=111,
+    )
+
+
+def test_earlier_sessions_are_the_same_campaigns_previous_nights(lib, tmp_path):
+    now = _earlier_fixture(lib, tmp_path)
+    found = sessions.earlier_sessions(now)
+    assert [(day, [f.name for f in files]) for day, files in found] == [
+        ("2026-10-06", ["2026-10-06_19-00-00.txt"]),
+        ("2026-10-13", ["2026-10-13_19-00-00.txt", "2026-10-13_21-00-00.txt"]),
+    ]
+    # the first session has nothing before it; an untagged file has none
+    assert sessions.earlier_sessions(tmp_path / "2026-10-06_19-00-00.txt") == []
+    assert sessions.earlier_sessions(tmp_path / "2026-10-01_19-00-00.txt") == []
+
+
+def test_earlier_session_notes_hold_the_model_facing_transcript(lib, tmp_path):
+    now = _earlier_fixture(lib, tmp_path)
+    notes = sessions.earlier_session_notes(now)
+    assert [n.id for n in notes] == ["session-2026-10-06", "session-2026-10-13"]
+    last = notes[-1]
+    assert last.title == "Earlier session, Tuesday, October 13, 2026"
+    assert "speakers: Noah (GM), Jim (Jill)" in last.summary
+    # joined across the restart, 12-hour times, no Discord ids
+    assert last.body == (
+        "[7:01 PM] Noah (GM): the deal went bad\n"
+        "--- recording restarted at 9:00 PM ---\n"
+        "[9:01 PM] Jim (Jill): we ran"
+    )
+    assert "tonight" not in "".join(n.body for n in notes)
+    assert last.index_line().startswith("- session-2026-10-13 — Earlier session")
+
+
+def test_a_game_and_group_tag_connects_without_a_campaign(lib, tmp_path):
+    now = _earlier_fixture(lib, tmp_path)
+    old = tmp_path / "2026-09-01_19-00-00.txt"
+    old.write_text("[19:00:00] Jim (Jill) [371]: session zero\n")
+    sessions.retag(old, lib, game="cyberpunk-red", group="noah-gm", whole_session=False)
+    days = [day for day, _ in sessions.earlier_sessions(now)]
+    assert days == ["2026-09-01", "2026-10-06", "2026-10-13"]
+
+
+def test_another_groups_recordings_of_the_same_game_are_never_offered(lib, tmp_path):
+    now = _earlier_fixture(lib, tmp_path)
+    # same game, other table; and same game with no group at all
+    other = tmp_path / "2026-09-02_19-00-00.txt"
+    other.write_text("[19:00:00] C (D) [2]: their secret heist\n")
+    sessions.retag(
+        other, lib, game="cyberpunk-red", group="side-table", whole_session=False
+    )
+    loose = tmp_path / "2026-09-03_19-00-00.txt"
+    loose.write_text("[19:00:00] E (F) [3]: nobody's table\n")
+    sessions.retag(loose, lib, game="cyberpunk-red", whole_session=False)
+    days = [day for day, _ in sessions.earlier_sessions(now)]
+    assert days == ["2026-10-06", "2026-10-13"]
+    assert "secret heist" not in "".join(
+        n.body for n in sessions.earlier_session_notes(now)
+    )
+
+
+def test_an_oversized_earlier_session_keeps_its_most_recent_part(
+    lib, tmp_path, monkeypatch
+):
+    now = _earlier_fixture(lib, tmp_path)
+    monkeypatch.setenv("EARLIER_SESSION_MAX_CHARS", "30")
+    body = sessions.earlier_session_notes(now)[-1].body
+    assert body == sessions.EARLIER_TRIM_MARK + "\n[9:01 PM] Jim (Jill): we ran"

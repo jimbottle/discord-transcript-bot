@@ -466,3 +466,154 @@ def test_malformed_tool_arguments_are_an_error_the_model_reads(monkeypatch, note
     assert r.answer == "Couldn't read that." and r.notes_used == []
     tool = [m for m in fake.calls[1]["messages"] if m["role"] == "tool"][0]
     assert tool["content"].startswith("Error")
+
+
+# ── earlier sessions (discord-transcript-bot-ij0) ─────────────────────
+
+
+def test_earlier_sessions_are_read_through_the_tool_and_cut_to_budget(monkeypatch):
+    monkeypatch.setenv("LOCAL_LLM_MAX_TRANSCRIPT_CHARS", "80")
+    note = local.campaign.Note(
+        id="session-2026-10-13",
+        title="Earlier session",
+        summary="full transcript",
+        body="[7:00 PM] A (B): " + "x" * 60 + "\n[9:01 PM] Jim (Jill): we ran",
+    )
+    fake = _use(
+        monkeypatch,
+        _Fake(
+            _response("", [_call(["session-2026-10-13"])], finish="tool_calls"),
+            _response("They ran."),
+        ),
+    )
+    r = local.ask("t", "What happened last session?", extra_notes=[note])
+    assert r.notes_used == ["session-2026-10-13"]
+    assert "session-2026-10-13" in fake.calls[0]["messages"][1]["content"]
+    tool_msg = fake.calls[1]["messages"][-1]["content"]
+    assert "we ran" in tool_msg and "xxxx" not in tool_msg
+    assert local.TRIM_MARK in tool_msg
+
+
+def _two_sessions():
+    return [
+        local.campaign.Note(
+            id=f"session-2026-10-{day}",
+            title="Earlier session",
+            summary="full transcript",
+            body=f"[7:00 PM] A (B): night {day} " + "y" * 20,
+        )
+        for day in ("06", "13")
+    ]
+
+
+def test_one_request_reads_a_capped_total_of_earlier_sessions(monkeypatch):
+    """roborev #7120: each session fits the per-note cut, but two together
+    would overrun the window, so the second is refused in words the model
+    can act on."""
+    monkeypatch.setenv("LOCAL_LLM_MAX_TRANSCRIPT_CHARS", "120")  # 60 in total
+    fake = _use(
+        monkeypatch,
+        _Fake(
+            _response(
+                "",
+                [_call(["session-2026-10-13", "session-2026-10-06"])],
+                finish="tool_calls",
+            ),
+            _response("", [_call(["session-2026-10-06"], "c2")], "tool_calls"),
+            _response("Only the 13th."),
+        ),
+    )
+    r = local.ask("t", "The last two sessions?", extra_notes=_two_sessions())
+    assert r.notes_used == ["session-2026-10-13"]
+    first = fake.calls[1]["messages"][-1]["content"]
+    assert "night 13" in first and "night 06" not in first
+    assert "Not read" in first and "session-2026-10-06" in first
+    # the budget is per request, not per round: asking again is refused too
+    again = fake.calls[2]["messages"][-1]["content"]
+    assert again.startswith("Error: Not read") and "night 06" not in again
+
+
+def test_library_notes_do_not_count_against_the_session_budget(monkeypatch, notes_dir):
+    monkeypatch.setenv("LOCAL_LLM_MAX_TRANSCRIPT_CHARS", "120")
+    fake = _use(
+        monkeypatch,
+        _Fake(
+            _response("", [_call(["npcs", "session-2026-10-13"])], finish="tool_calls"),
+            _response("ok"),
+        ),
+    )
+    r = local.ask("t", "q", note_dirs=[notes_dir], extra_notes=_two_sessions())
+    assert r.notes_used == ["npcs", "session-2026-10-13"]
+    assert "Not read" not in fake.calls[1]["messages"][-1]["content"]
+
+
+def test_a_prompt_cut_after_a_tool_round_is_named_in_the_answer(monkeypatch):
+    """roborev #7120: the first call fits; the earlier session read in the
+    tool round is what overflows the window."""
+    monkeypatch.setenv("LOCAL_LLM_MAX_TRANSCRIPT_CHARS", "0")
+    big = local.campaign.Note(
+        id="session-2026-10-13",
+        title="Earlier session",
+        summary="full transcript",
+        body="z" * 60_000,
+    )
+    _use(
+        monkeypatch,
+        _Fake(
+            _response("", [_call(["session-2026-10-13"])], "tool_calls", prompt=900),
+            _response("An answer.", prompt=4096),
+        ),
+    )
+    r = local.ask("t", "Last session?", extra_notes=[big])
+    assert r.answer == "An answer." + local.CONTEXT_NOTE
+
+
+def test_asking_again_for_a_session_already_read_is_not_a_refusal(monkeypatch):
+    """roborev #7122: the body is already in the conversation, so a repeat
+    (same call or a later round) is neither charged nor reported unread."""
+    monkeypatch.setenv("LOCAL_LLM_MAX_TRANSCRIPT_CHARS", "120")
+    fake = _use(
+        monkeypatch,
+        _Fake(
+            _response(
+                "",
+                [_call(["session-2026-10-13", "session-2026-10-13"])],
+                finish="tool_calls",
+            ),
+            _response("", [_call(["session-2026-10-13"], "c2")], "tool_calls"),
+            _response("The 13th."),
+        ),
+    )
+    r = local.ask("t", "Last session?", extra_notes=_two_sessions())
+    assert r.notes_used == ["session-2026-10-13"]
+    first = fake.calls[1]["messages"][-1]["content"]
+    assert first.count("night 13") == 1 and "Not read" not in first
+    again = fake.calls[2]["messages"][-1]["content"]
+    assert again == "Already provided above, not repeated: session-2026-10-13."
+
+
+def test_a_library_note_named_like_a_session_is_not_charged(monkeypatch, tmp_path):
+    """roborev #7122: earlier sessions are known by where they came from,
+    not by an id prefix a GM's note can share."""
+    monkeypatch.setenv("LOCAL_LLM_MAX_TRANSCRIPT_CHARS", "120")
+    (tmp_path / "session-zero.md").write_text(
+        "---\nid: session-zero\ntitle: Session zero\nsummary: house rules\n---\n"
+        + "house rules " * 10,
+        encoding="utf-8",
+    )
+    fake = _use(
+        monkeypatch,
+        _Fake(
+            _response(
+                "",
+                [_call(["session-zero", "session-2026-10-13"])],
+                finish="tool_calls",
+            ),
+            _response("ok"),
+        ),
+    )
+    r = local.ask("t", "q", note_dirs=[tmp_path], extra_notes=_two_sessions())
+    assert r.notes_used == ["session-zero", "session-2026-10-13"]
+    result = fake.calls[1]["messages"][-1]["content"]
+    assert "house rules" in result and "night 13" in result
+    assert "Not read" not in result

@@ -12,7 +12,7 @@ try:
 except ImportError:  # older SDKs
     import httpx
 
-from src.llm import claude
+from src.llm import campaign, claude
 
 
 @pytest.fixture(autouse=True)
@@ -607,3 +607,41 @@ def test_no_budget_without_max_chars(monkeypatch):
 def test_both_prompts_ask_for_12_hour_times():
     assert claude.TIME_STYLE in claude.SYSTEM_PROMPT
     assert claude.TIME_STYLE in claude.LORE_SYSTEM_PROMPT
+
+
+# ── earlier sessions (discord-transcript-bot-ij0) ─────────────────────
+
+
+def _session_note():
+    return campaign.Note(
+        id="session-2026-10-13",
+        title="Earlier session, Tuesday, October 13, 2026",
+        summary="full transcript",
+        body="[7:01 PM] Noah (GM): the deal went bad",
+    )
+
+
+def test_earlier_sessions_are_indexed_and_read_through_the_notes_tool(monkeypatch):
+    client = _use(
+        monkeypatch,
+        _FakeClient(
+            [_tool_call(["session-2026-10-13"]), _response("The deal went bad.")]
+        ),
+    )
+    result = claude.ask(
+        "t", "what happened last session?", extra_notes=[_session_note()]
+    )
+    first = client.calls[0]
+    # no library notes at all: the index and the tool still appear
+    assert first["tools"][0]["name"] == campaign.TOOL_NAME
+    assert "- session-2026-10-13 — Earlier session" in first["system"][2]["text"]
+    # the earlier transcript is not sent until asked for
+    assert "the deal went bad" not in str(first)
+    tool_result = client.calls[1]["messages"][-1]["content"][0]
+    assert "the deal went bad" in tool_result["content"]
+    assert result.notes_used == ["session-2026-10-13"]
+
+
+def test_the_prompt_tells_the_model_about_earlier_sessions():
+    assert "session-" in claude.SYSTEM_PROMPT
+    assert "session-" in campaign.TOOL["description"]

@@ -235,17 +235,19 @@ def ask(
     header: str = "",
     note_dirs=(),
     max_chars=None,
+    extra_notes=(),
 ) -> AskResult:
     """Answer ``question`` from ``transcript``. Blocking. Raises
     :class:`AskFailed` with a Discord-ready message on any failure.
 
     ``header`` and ``note_dirs`` come from the session's tag
     (src/sessions.py, src/library.py); without them the question is
-    answered from the transcript alone."""
+    answered from the transcript alone. ``extra_notes`` (the earlier
+    sessions' transcripts) join the index and are read with the same tool."""
     if not configured():
         raise AskFailed(NO_KEY_MSG)
     verdict = _gate(question, context=header.split("\n")[0] if header else "")
-    notes = campaign.load_notes(note_dirs)
+    notes = campaign.load_notes(note_dirs) + list(extra_notes)
     request = build_request(
         transcript, question, campaign.index_text(notes), header=header
     )
