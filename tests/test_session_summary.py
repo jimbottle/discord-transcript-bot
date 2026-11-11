@@ -7,7 +7,7 @@ import pytest
 from src import recaps, session_summary, sessions
 from src.llm.common import AskFailed, AskResult
 from tests import test_library_sessions as _base
-from tests.test_library_sessions import _earlier_fixture
+from tests.test_library_sessions import _earlier_fixture, _rec
 
 lib = _base.lib  # the same library fixture, under its usual name
 
@@ -288,3 +288,75 @@ def test_the_tag_script_keeps_a_sessions_id(lib, tmp_path, monkeypatch):
     assert mod.main([str(late), "--game", "dnd-5e", "--group", "side-table"]) == 0
     moved = sessions.read_meta(late)
     assert moved.campaign is None and moved.session_id and moved.session_id != sid
+
+
+def test_find_fails_closed_when_the_sessions_server_is_unknown(lib, tmp_path):
+    """Security review: a session with no server on its tag used to be
+    summarisable from any server. Now its group's servers decide, and
+    with neither it is not found."""
+    _earlier_fixture(lib, tmp_path)
+    # tagged by hand: a campaign (group noah-gm, bound to server 111), no guild
+    manual = _rec(
+        tmp_path,
+        "2026-09-08_19-00-00",
+        "[19:01:00] Jim (Jill) [371]: by hand\n",
+        lib,
+        campaign="return-to-night-city",
+    )
+    assert sessions.read_meta(manual).guild_id is None
+    sid = sessions.ensure_session_id(manual)
+    assert session_summary.owner_guilds(sessions.read_meta(manual), lib) == {111}
+    assert session_summary.find(tmp_path, sid, 111, lib) == manual
+    for guild in (222, None):
+        with pytest.raises(session_summary.SummaryError) as e:
+            session_summary.find(tmp_path, sid, guild, lib)
+        assert e.value.user_message == session_summary.NOT_FOUND
+    # no server and no group that names one: nobody may summarise it
+    loose = tmp_path / "2026-09-09_19-00-00.txt"
+    loose.write_text("[19:01:00] E (F) [3]: nobody's table\n")
+    sessions.retag(loose, lib, game="cyberpunk-red", whole_session=False)
+    loose_id = sessions.ensure_session_id(loose)
+    assert (
+        loose_id
+        and session_summary.owner_guilds(sessions.read_meta(loose), lib) == set()
+    )
+    with pytest.raises(session_summary.SummaryError):
+        session_summary.find(tmp_path, loose_id, 111, lib)
+
+
+def test_the_tag_script_keeps_the_id_when_a_whole_night_changes_campaign(
+    lib, tmp_path, monkeypatch
+):
+    """roborev #7152: the documented usage, on a night that had no
+    campaign, changes every file's key; the id must survive that."""
+    import importlib.util
+    from pathlib import Path
+
+    from src import library
+
+    spec = importlib.util.spec_from_file_location(
+        "tag_session", Path(library.PROJECT_ROOT) / "scripts" / "tag_session.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _earlier_fixture(lib, tmp_path)
+    monkeypatch.setenv("LIBRARY_DIR", str(tmp_path))
+    first, late = _night_13(tmp_path)
+    sessions.retag(first, lib, campaign="")  # the whole night: no campaign
+    before = sessions.read_meta(first).key
+    sid = sessions.ensure_session_id(first)
+    assert mod.main([str(first), str(late), "--campaign", "return-to-night-city"]) == 0
+    assert sessions.read_meta(first).key != before
+    assert sessions.read_meta(first).session_id == sid
+    assert sessions.read_meta(late).session_id == sid
+    # one recording moved into a night that has its own id takes that id
+    other = tmp_path / "2026-10-06_19-00-00.txt"
+    other_id = sessions.ensure_session_id(other)
+    stray = tmp_path / "2026-10-06_23-00-00.txt"
+    stray.write_text("x")
+    sessions.retag(stray, lib, game="cyberpunk-red", group="noah-gm")
+    stray_id = sessions.ensure_session_id(stray)
+    assert stray_id not in (None, other_id)
+    assert mod.main([str(stray), "--campaign", "return-to-night-city"]) == 0
+    assert sessions.read_meta(stray).session_id == other_id
+    assert sessions.read_meta(other).session_id == other_id

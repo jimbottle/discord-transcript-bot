@@ -229,6 +229,45 @@ def ensure_session_id(transcript_path) -> Optional[str]:
         return None
 
 
+def settle_session_ids(paths, old_ids) -> None:
+    """Give recordings that were just re-tagged from scratch (``paths``,
+    by scripts/tag_session.py) their session ids back. ``old_ids`` maps a
+    path to the id it had. A recording keeps its id, also across a change
+    of campaign, so a whole night that is re-tagged keeps the id a GM
+    already copied for /summary (roborev #7151, #7152). It gives the id
+    up, and takes its new session's, when that session already has one
+    from recordings outside ``paths``, or when recordings it left behind
+    in its old session still carry the id. Never raises."""
+    paths = [Path(p) for p in paths]
+    moved = set(paths)
+    try:
+        everything = (
+            [(f, read_meta(f)) for f in sorted(paths[0].parent.glob("*.txt"))]
+            if paths
+            else []
+        )
+        for txt in paths:
+            meta = read_meta(txt)
+            if meta is None:
+                continue
+            sid = old_ids.get(txt)
+            keep = bool(sid)
+            for other, m in everything:
+                if m is None or other in moved or not m.session_id:
+                    continue
+                if m.key == meta.key or m.session_id == sid:
+                    keep = False  # joined a session with an id / left its own
+                    break
+            wanted = sid if keep else None
+            if meta.session_id != wanted:
+                meta.session_id = wanted
+                write_meta(txt, meta)
+    except OSError as e:
+        logger.warning("could not settle session ids: %s", e)
+    for txt in paths:
+        ensure_session_id(txt)
+
+
 def find_by_session_id(transcripts_dir, session_id) -> Optional[Path]:
     """The newest recording whose session id is ``session_id`` (dashes,
     spaces and case ignored), or None."""

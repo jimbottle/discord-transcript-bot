@@ -62,19 +62,39 @@ _running = set()
 _running_lock = threading.Lock()
 
 
-def find(transcripts_dir, session_id, guild_id=None) -> Path:
-    """The recording ``session_id`` names. A session recorded in another
-    Discord server is reported exactly like an unknown id: the bot serves
-    several tables, and one must not post another's summary."""
+def owner_guilds(meta, lib) -> set:
+    """The Discord servers a session belongs to: the one it was recorded
+    in, or, for a recording tagged by hand with no server on it, the
+    servers its group is bound to in library.yml. Empty when neither is
+    known."""
+    if meta.guild_id is not None:
+        return {int(meta.guild_id)}
+    group = lib.groups.get(meta.group) if (lib and meta.group) else None
+    out = set()
+    for g in getattr(group, "discord_guilds", None) or []:
+        try:
+            out.add(int(g))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def find(transcripts_dir, session_id, guild_id, lib=None) -> Path:
+    """The recording ``session_id`` names, for a command run in
+    ``guild_id``. Fails closed: the session must be known to belong to
+    that server (:func:`owner_guilds`), and one that belongs to another
+    server, or to none we can tell, is reported exactly like an unknown
+    id. The bot serves several tables, and one must not post another's
+    summary."""
     path = sessions.find_by_session_id(transcripts_dir, session_id)
     meta = sessions.read_meta(path) if path else None
-    if meta is None:
+    if meta is None or guild_id is None:
         raise SummaryError(NOT_FOUND)
-    if (
-        guild_id is not None
-        and meta.guild_id is not None
-        and int(meta.guild_id) != int(guild_id)
-    ):
+    if lib is None:
+        from src import library
+
+        lib = library.load()
+    if int(guild_id) not in owner_guilds(meta, lib):
         raise SummaryError(NOT_FOUND)
     return path
 
