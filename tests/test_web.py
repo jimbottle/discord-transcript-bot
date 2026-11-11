@@ -1404,7 +1404,12 @@ def test_retag_endpoint_rejects_bad_input(client, tagged_session):
 
 def test_tag_editor_is_on_the_list_and_transcript_pages(client, tagged_session):
     listing = client.get("/transcripts").get_data(as_text=True)
-    assert listing.count('class="tag-form"') == 3
+    # The list edits each row in place: its Campaign / Game / Group cells are
+    # the dropdowns, joined to one form per row (no separate editor).
+    assert listing.count('class="tag-inline"') == 3
+    assert 'class="tag-form"' not in listing and "Edit campaign" not in listing
+    for name in ("campaign", "game", "group"):
+        assert listing.count(f'<select name="{name}" form="tag-') == 3
     assert 'data-group="noah-gm"' in listing and "tag-editor.js" in listing
     page = client.get("/transcripts/2026-10-20_19-38-38.txt").get_data(as_text=True)
     assert 'class="tag-form"' in page
@@ -1550,6 +1555,13 @@ def _run_node_test(name):
     assert r.returncode == 0, r.stderr or r.stdout
 
 
+def test_tag_inline_behaviour():
+    """tests/js/tag_inline.test.mjs: the Transcripts list's in-row dropdowns
+    save on change (a campaign fills its game and group), and a failed save
+    puts the row back."""
+    _run_node_test("tag_inline.test.mjs")
+
+
 def test_campaign_picker_behaviour():
     """tests/js/campaign_picker.test.mjs: choose, failed save, poll does not
     fight the reader, create-and-use, empty name, cancel."""
@@ -1626,9 +1638,11 @@ def test_order_toggle_is_on_live_and_transcript_pages(client, live_transcript):
 
 
 def test_list_page_offers_whole_session_choice(client, tagged_session):
-    # roborev #6491: each list row knows its real session size
+    # roborev #6491: each list row knows its real session size. The list's
+    # dropdowns always retag the whole session and say so; the transcript
+    # page keeps the choice (test_tag_editor_is_on_the_list_and_transcript_pages).
     listing = client.get("/transcripts").get_data(as_text=True)
-    assert listing.count("Apply to all 2 recordings") == 2
+    assert listing.count("(all 2 recordings of this session)") == 2
 
 
 def test_stale_bot_state_does_not_block_delete(client, deletable, tmp_path):

@@ -1,0 +1,37 @@
+{#
+  Campaign / Game / Group cells of one recording's row on the Transcripts
+  list, each a dropdown that saves when it changes (static/tag-editor.js).
+  Emits three <td>s; the form lives in the first and the other selects join
+  it through form="...". Choosing a campaign fills in its game and group.
+  The whole session is retagged; the transcript page's editor can retag one
+  recording alone. Variables: filename, session (session_info dict),
+  tag_choices, form_id (unique on the page).
+#}
+<td>
+    <form id="{{ form_id }}" class="tag-inline" data-url="{{ url_for('retag_transcript', filename=filename) }}"></form>
+    <select name="campaign" form="{{ form_id }}" aria-label="Campaign of {{ filename }}"
+            title="Changing the campaign moves the recording to that campaign's session for the same night{% if session.recordings and session.recordings > 1 %} (all {{ session.recordings }} recordings of this session){% endif %}">
+        <option value="">{{ '— untagged —' if not session.tagged else '— none —' }}</option>
+        {% for c in tag_choices.campaigns %}
+        <option value="{{ c.id }}" data-group="{{ c.group }}" data-game="{{ c.game }}"
+            {% if session.campaign_id == c.id %}selected{% endif %}>{{ c.name }}</option>
+        {% endfor %}
+    </select>
+    <span class="tag-status search-meta" aria-live="polite"></span>
+</td>
+<td>
+    <select name="game" form="{{ form_id }}" aria-label="Game of {{ filename }}">
+        <option value="">— none —</option>
+        {% for g in tag_choices.games %}
+        <option value="{{ g.id }}" {% if session.game_id == g.id %}selected{% endif %}>{{ g.name }}</option>
+        {% endfor %}
+    </select>
+</td>
+<td>
+    <select name="group" form="{{ form_id }}" aria-label="Group of {{ filename }}">
+        <option value="">— none —</option>
+        {% for g in tag_choices.groups %}
+        <option value="{{ g.id }}" {% if session.group_id == g.id %}selected{% endif %}>{{ g.name }}</option>
+        {% endfor %}
+    </select>
+</td>

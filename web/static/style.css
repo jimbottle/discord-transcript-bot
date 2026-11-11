@@ -316,9 +316,75 @@
     font-size: 0.85rem;
 }
 
-.tag-row td {
-    padding-top: 0;
-    border-top: none;
+/* Transcripts list: Campaign / Game / Group cells are dropdowns that read
+   as text until hovered or focused. */
+select[form^="tag-"] {
+    width: auto;
+    max-width: 100%;
+    margin: 0;
+    padding: 0.2rem 1.8rem 0.2rem 0.4rem;
+    font-size: inherit;
+    background-color: transparent;
+    border-color: transparent;
+    box-shadow: none;
+    background-position: center right 0.4rem;
+}
+
+select[form^="tag-"]:hover,
+select[form^="tag-"]:focus {
+    border-color: var(--pico-form-element-border-color);
+    background-color: var(--pico-form-element-background-color);
+}
+
+select[form^="tag-"] + .tag-status:not(:empty) {
+    display: block;
+    font-size: 0.8rem;
+}
+
+/* One line per recording: a compact table so the tag dropdowns and Delete fit. */
+table.transcripts-list {
+    font-size: 0.9rem;
+}
+
+table.transcripts-list th,
+table.transcripts-list td {
+    padding: 0.5rem 0.4rem;
+}
+
+td.nowrap {
+    white-space: nowrap;
+}
+
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+}
+
+/* The Transcripts list's Delete sits at the end of the row; its "are you
+   sure" step opens as a panel under the button instead of widening the row. */
+td.row-actions {
+    position: relative;
+    text-align: right;
+}
+
+td.row-actions .delete-transcript {
+    margin-top: 0;
+}
+
+td.row-actions .delete-confirm:not([hidden]) {
+    position: absolute;
+    right: 0;
+    top: 100%;
+    z-index: 2;
+    width: min(28rem, 90vw);
+    text-align: left;
+    background: var(--pico-card-background-color);
+    box-shadow: var(--pico-card-box-shadow);
+    padding: 0.6rem 0.75rem;
 }
 
 /* Delete control */
