@@ -151,6 +151,11 @@ def default_tag(lib, guild_id=None, channel_id=None, transcripts_dir=None):
         if group:
             if owner and owner != group:
                 continue
+            # No group on the campaign or the recording: go by where it
+            # was recorded, so a table bound to the server does not pick
+            # up one played in another table's channel (roborev #7125).
+            if not owner and lib.resolve(guild_id, m.channel_id)[0] != group:
+                continue
         elif channel_id is None or m.channel_id != int(channel_id):
             continue
         return owner or group, m.campaign
@@ -462,7 +467,10 @@ def retag(
 
     Ids are validated against the library; ``None``/"" clears a field.
     Choosing a campaign fills in its group and game unless those are given
-    explicitly. Discord fields and the session day are kept; ``source``
+    explicitly; a campaign that belongs to no group leaves each recording's
+    group as it was (the Live picker sends only the campaign, and losing
+    the group would drop its notes and GM from /ask, roborev #7125).
+    Discord fields and the session day are kept; ``source``
     becomes "manual". Returns the rewritten paths (oldest first)."""
     for kind, value, table in (
         ("campaign", campaign, lib.campaigns),
@@ -471,8 +479,10 @@ def retag(
     ):
         if value and value not in table:
             raise TagError(f"unknown {kind} '{value}'")
+    keep_group = False
     if campaign:
         c = lib.campaigns[campaign]
+        keep_group = group is None and not c.group
         group = group if group is not None else c.group
         game = game if game is not None else c.game
     targets = (
@@ -492,7 +502,8 @@ def retag(
                 started_at=started.isoformat(timespec="seconds"),
             )
         meta.campaign = campaign or None
-        meta.group = group or None
+        if not keep_group:
+            meta.group = group or None
         meta.game = game or None
         meta.source = "manual"
         write_meta(txt, meta)
