@@ -14,8 +14,11 @@ Never raises on bad config: a broken library means untagged recordings and
 no notes, not a broken bot.
 """
 
+import contextlib
+import fcntl
 import logging
 import os
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -159,6 +162,7 @@ class Library:
 # so library.yml stays hand-edited with its comments (5bd). library.yml wins
 # when both define an id.
 DASHBOARD_FILE = "dashboard.yml"
+_DASHBOARD_THREAD_LOCK = threading.Lock()
 MAX_CAMPAIGN_NAME = 80
 
 
@@ -195,51 +199,73 @@ def slug(name: str) -> str:
     return "-".join(part for part in out.split("-") if part)[:60]
 
 
+@contextlib.contextmanager
+def _dashboard_lock(root: Path):
+    """Exclusive lock for rewriting ``dashboard.yml``: a thread lock (the
+    dashboard serves requests on threads) plus an ``flock`` on a lock file
+    (a second dashboard process). Raises :class:`LibraryError` when the
+    library folder cannot be written."""
+    with _DASHBOARD_THREAD_LOCK:
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            fh = open(root / (DASHBOARD_FILE + ".lock"), "w")
+        except OSError as e:
+            raise LibraryError(f"could not save the campaign: {e}") from e
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            yield
+        finally:
+            fh.close()
+
+
 def add_campaign(name, game=None, group=None, root: Optional[Path] = None) -> Campaign:
     """Create a campaign from the dashboard: an entry in ``dashboard.yml``
     and an empty ``campaigns/<id>/notes`` folder for its documents. The id
     is a slug of the name. Raises :class:`LibraryError` on a bad name, an
     unknown game or group, or a name already taken."""
     root = Path(root) if root else library_dir()
-    lib = load(root)
-    name = " ".join(str(name or "").split())
-    if not name:
-        raise LibraryError("campaign name is required")
-    if len(name) > MAX_CAMPAIGN_NAME:
-        raise LibraryError(f"campaign name is too long (max {MAX_CAMPAIGN_NAME})")
-    if game and game not in lib.games:
-        raise LibraryError(f"unknown game '{game}'")
-    if group and group not in lib.groups:
-        raise LibraryError(f"unknown group '{group}'")
-    cid = slug(name)
-    if not cid:
-        raise LibraryError("campaign name needs at least one letter or digit")
-    taken = {c.name.lower() for c in lib.campaigns.values()}
-    if cid in lib.campaigns or name.lower() in taken:
-        raise LibraryError(f"a campaign called '{name}' already exists")
-    entries = _read_dashboard(root)
-    entries[cid] = {"name": name}
-    if game:
-        entries[cid]["game"] = game
-    if group:
-        entries[cid]["group"] = group
-    try:
-        root.mkdir(parents=True, exist_ok=True)
-        path = root / DASHBOARD_FILE
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(
-            "# Campaigns created from the dashboard. Written by the app; edit\n"
-            "# library.yml for anything else.\n"
-            + yaml.safe_dump(
-                {"campaigns": entries}, sort_keys=True, allow_unicode=True
-            ),
-            encoding="utf-8",
-        )
-        os.replace(tmp, path)
-        (root / "campaigns" / cid / "notes").mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        raise LibraryError(f"could not save the campaign: {e}") from e
-    return _campaign_from(cid, entries[cid])
+    # One writer at a time, for the whole read, check and write: two
+    # requests at once would otherwise lose one campaign (roborev #7125).
+    with _dashboard_lock(root):
+        lib = load(root)
+        name = " ".join(str(name or "").split())
+        if not name:
+            raise LibraryError("campaign name is required")
+        if len(name) > MAX_CAMPAIGN_NAME:
+            raise LibraryError(f"campaign name is too long (max {MAX_CAMPAIGN_NAME})")
+        if game and game not in lib.games:
+            raise LibraryError(f"unknown game '{game}'")
+        if group and group not in lib.groups:
+            raise LibraryError(f"unknown group '{group}'")
+        cid = slug(name)
+        if not cid:
+            raise LibraryError("campaign name needs at least one letter or digit")
+        taken = {c.name.lower() for c in lib.campaigns.values()}
+        if cid in lib.campaigns or name.lower() in taken:
+            raise LibraryError(f"a campaign called '{name}' already exists")
+        entries = _read_dashboard(root)
+        entries[cid] = {"name": name}
+        if game:
+            entries[cid]["game"] = game
+        if group:
+            entries[cid]["group"] = group
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            path = root / DASHBOARD_FILE
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(
+                "# Campaigns created from the dashboard. Written by the app; edit\n"
+                "# library.yml for anything else.\n"
+                + yaml.safe_dump(
+                    {"campaigns": entries}, sort_keys=True, allow_unicode=True
+                ),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+            (root / "campaigns" / cid / "notes").mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise LibraryError(f"could not save the campaign: {e}") from e
+        return _campaign_from(cid, entries[cid])
 
 
 def _load_section(raw, key, build):

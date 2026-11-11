@@ -646,3 +646,80 @@ def test_scribe_line_names_the_campaign_or_says_there_is_none(lib):
     assert "No campaign is set" in sessions.scribe_line(lib, None)
     untagged = sessions.build_meta(lib, guild_id=222, started_at=datetime(2026, 10, 20))
     assert "No campaign is set" in sessions.scribe_line(lib, untagged)
+
+
+# ── roborev #7125 ─────────────────────────────────────────────────────
+
+
+def test_retag_to_a_campaign_with_no_group_keeps_the_sessions_group(lib, tmp_path):
+    loose = library.add_campaign("One Shot", game="cyberpunk-red", root=lib.root)
+    lib = library.load(lib.root)
+    f = _tagged(tmp_path, "2026-10-20_19-00-00", lib, guild_id=111, channel_id=5)
+    # what the Live picker sends: the campaign alone
+    sessions.retag(f, lib, campaign=loose.id)
+    meta = sessions.read_meta(f)
+    assert (meta.campaign, meta.group, meta.game) == (
+        "one-shot",
+        "noah-gm",
+        "cyberpunk-red",
+    )
+    # the group's notes and GM are still part of the question
+    assert "Noah" in sessions.header_text(lib, meta)
+    # an explicit empty group still clears it (the tag editor)
+    sessions.retag(f, lib, campaign=loose.id, group="")
+    assert sessions.read_meta(f).group is None
+
+
+def test_default_tag_skips_a_groupless_campaign_from_another_tables_channel(
+    lib, tmp_path
+):
+    loose = library.add_campaign("One Shot", root=lib.root)
+    lib = library.load(lib.root)
+    f = tmp_path / "2026-10-20_19-00-00.txt"
+    f.write_text("x\n")
+    # recorded in the side table's channel, with no group on the tag
+    sessions.write_meta(
+        f,
+        sessions.SessionMeta(
+            session_day="2026-10-20", campaign=loose.id, guild_id=111, channel_id=999
+        ),
+    )
+    assert sessions.default_tag(lib, 111, 5, tmp_path) == (
+        "noah-gm",
+        "return-to-night-city",
+    )
+    assert sessions.default_tag(lib, 111, 999, tmp_path) == ("side-table", "one-shot")
+    # the same groupless campaign played in this table's own channel counts
+    g = tmp_path / "2026-10-21_19-00-00.txt"
+    g.write_text("x\n")
+    sessions.write_meta(
+        g,
+        sessions.SessionMeta(
+            session_day="2026-10-21", campaign=loose.id, guild_id=111, channel_id=5
+        ),
+    )
+    assert sessions.default_tag(lib, 111, 5, tmp_path) == ("noah-gm", "one-shot")
+
+
+def test_add_campaign_at_the_same_moment_keeps_every_campaign(lib):
+    import threading
+
+    names = [f"Arc {i}" for i in range(12)]
+    errors = []
+    go = threading.Barrier(len(names))
+
+    def create(name):
+        go.wait()
+        try:
+            library.add_campaign(name, root=lib.root)
+        except Exception as e:  # noqa: BLE001 - any failure fails the test
+            errors.append(e)
+
+    threads = [threading.Thread(target=create, args=(n,)) for n in names]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    assert {f"arc-{i}" for i in range(12)} <= set(library.load(lib.root).campaigns)
+    assert not list(lib.root.glob("*.tmp"))
