@@ -13,8 +13,10 @@ default 6): a restart at 00:40 still belongs to the night it started.
 
 import json
 import logging
+import hmac
 import os
 import re
+import secrets
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -62,6 +64,10 @@ class SessionMeta:
     # "auto" = resolved from library.yml at /scribe; "manual" = set by
     # scripts/tag_session.py. Informational only.
     source: str = "auto"
+    # A random code shared by every recording of the session, shown only on
+    # the dashboard. Discord's /summary asks for it, so only someone with
+    # dashboard access can run that command (discord-transcript-bot-qef).
+    session_id: Optional[str] = None
     schema: int = SCHEMA
 
     @property
@@ -181,6 +187,69 @@ def read_meta(transcript_path) -> Optional[SessionMeta]:
         return None
 
 
+# No 0/O, 1/I/L: the id is read off the dashboard and typed into Discord.
+_ID_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+SESSION_ID_LENGTH = 8
+
+
+def new_session_id() -> str:
+    raw = "".join(secrets.choice(_ID_ALPHABET) for _ in range(SESSION_ID_LENGTH))
+    return raw[:4] + "-" + raw[4:]
+
+
+def normalize_session_id(value) -> str:
+    """The id as compared: upper case, without dashes or spaces."""
+    return "".join(c for c in str(value or "").upper() if c.isalnum())
+
+
+def ensure_session_id(transcript_path) -> Optional[str]:
+    """The session's id, made on first use and written to every recording
+    of the session (the oldest recording's id wins when they differ, e.g.
+    after two sessions were merged by retagging). None for an untagged
+    recording or when the tag cannot be written. Never raises."""
+    target = Path(transcript_path)
+    try:
+        own = read_meta(target)
+        if own is None:
+            return None
+        # The sink creates the .txt on the first spoken line, so a brand-new
+        # recording has only its tag and session_files does not list it.
+        files = [f for f in session_files(target) if f != target] + [target]
+        metas = [(f, read_meta(f)) for f in sorted(files)]
+        metas = [(f, m) for f, m in metas if m is not None]
+        chosen = next((m.session_id for _, m in metas if m.session_id), None)
+        chosen = chosen or new_session_id()
+        for f, m in metas:
+            if m.session_id != chosen:
+                m.session_id = chosen
+                write_meta(f, m)
+        return chosen
+    except OSError as e:
+        logger.warning("could not store a session id for %s: %s", target, e)
+        return None
+
+
+def find_by_session_id(transcripts_dir, session_id) -> Optional[Path]:
+    """The newest recording whose session id is ``session_id`` (dashes,
+    spaces and case ignored), or None."""
+    wanted = normalize_session_id(session_id)
+    if len(wanted) != SESSION_ID_LENGTH:
+        return None
+    try:
+        paths = sorted(Path(transcripts_dir).glob("*.txt"), reverse=True)
+    except OSError:
+        return None
+    for txt in paths:
+        meta = read_meta(txt)
+        if (
+            meta is not None
+            and meta.session_id
+            and hmac.compare_digest(normalize_session_id(meta.session_id), wanted)
+        ):
+            return txt
+    return None
+
+
 def session_files(transcript_path) -> list:
     """Every transcript of the same session, oldest first. An untagged
     transcript is a session of one."""
@@ -258,6 +327,8 @@ def describe(lib, meta: Optional[SessionMeta], recordings: int = 1) -> dict:
         "gm": group.gm if group else None,
         "channel": meta.channel,
         "recordings": recordings,
+        # Dashboard only: never show it in Discord (it gates /summary).
+        "session_id": meta.session_id,
     }
 
 
@@ -539,7 +610,12 @@ def retag(
                 session_day=session_day(started),
                 started_at=started.isoformat(timespec="seconds"),
             )
+        before = meta.key
         meta.campaign = campaign or None
+        if meta.key != before and not whole_session:
+            # One recording moved to another session: it takes that
+            # session's id below instead of carrying this one along.
+            meta.session_id = None
         if not keep_group:
             meta.group = group or None
         if not keep_game:
@@ -547,4 +623,6 @@ def retag(
         meta.source = "manual"
         write_meta(txt, meta)
         written.append(Path(txt))
+    if written:
+        ensure_session_id(written[0])
     return written

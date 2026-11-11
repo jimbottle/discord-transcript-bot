@@ -11,6 +11,7 @@
     <p class="session-tag">
         {{ session.game or '—' }} &middot; <strong>{{ session.campaign or 'no campaign' }}</strong>
         &middot; {{ session.group or '—' }} &middot; session {{ session.session_day }}
+        {% if session.session_id %}&middot; session id <code title="For /summary in Discord. Keep it to yourself.">{{ session.session_id }}</code>{% endif %}
         {% if session.recordings > 1 %}&middot; {{ session.recordings }} recordings (questions cover all of them){% endif %}
     </p>
     {% else %}

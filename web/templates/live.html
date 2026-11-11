@@ -111,7 +111,8 @@ function render(data) {
         meta.textContent = [s.game, s.campaign, s.group, "session " + s.session_day]
             .filter(Boolean).join(" · ")
             + (s.recordings > 1 ? " · " + s.recordings + " recordings" : "")
-            + " · " + data.entries.length + " entries in " + data.filename;
+            + " · " + data.entries.length + " entries in " + data.filename
+            + (s.session_id ? " · session id " + s.session_id : "");
     } else {
         meta.textContent = "untagged recording " + data.filename + " · "
             + data.entries.length + " entries";

@@ -579,6 +579,8 @@ class VoloBot(discord.Bot):
                 campaign=campaign,
             )
             sessions.write_meta(whisper_sink.session_file, meta)
+            # Joins the session's existing id after a restart, else a new one.
+            meta.session_id = sessions.ensure_session_id(whisper_sink.session_file)
             whisper_sink.session_meta = meta
             if meta.campaign:
                 logger.info(

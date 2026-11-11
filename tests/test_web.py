@@ -1696,3 +1696,22 @@ def test_docker_context_excludes_private_material():
         ".git",
     ):
         assert must in rules, must
+
+
+# ── session ids (discord-transcript-bot-qef) ──────────────────────────
+
+
+def test_dashboard_shows_the_session_id_and_backfills_old_recordings(client, deletable):
+    from src import sessions
+
+    tdir, _, files = deletable
+    assert sessions.read_meta(files[0]).session_id is None  # tagged before ids
+    page = client.get("/transcripts").get_data(as_text=True)
+    ids = [sessions.read_meta(f).session_id for f in files]
+    assert all(ids) and ids[0] != ids[1]
+    for sid in ids:
+        assert f"<code>{sid}</code>" in page
+    # stable on the next view, and on the transcript page
+    assert client.get("/transcripts").get_data(as_text=True).count(ids[0]) == 1
+    one = client.get(f"/transcripts/{files[0].name}").get_data(as_text=True)
+    assert ids[0] in one and ids[1] not in one

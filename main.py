@@ -8,7 +8,7 @@ from datetime import datetime
 import discord
 from dotenv import load_dotenv
 
-from src import campaigns, cli, library, question_log, sessions
+from src import campaigns, cli, library, question_log, session_summary, sessions
 from src.bot import command_errors
 from src.bot.guild_voice import GuildVoice
 from src.llm.provider import AskBlocked, AskFailed, ask as llm_ask
@@ -45,6 +45,7 @@ COMMAND_SUMMARY = (
     ("ask-public", "Ask about the transcript (answer shown to everyone)."),
     ("session", "Show the group, game, campaign and session being recorded."),
     ("recap", "Summarise the session."),
+    ("summary", "Post a finished session's summary (needs its session id)."),
     ("transcript", "Download the session as text."),
     ("generate_pdf", "Export transcript as PDF."),
     ("update_player_map", "Sync player names with roster."),
@@ -353,8 +354,102 @@ if __name__ == "__main__":
                 f"{capture_line}"
             )
 
+    async def _deliver_summary(ctx, path, *, refresh=False) -> bool:
+        """Write (or reuse) the summary of the session ``path`` belongs to
+        and post it to the channel as public follow-ups; problems go to the
+        caller alone. The interaction must already be deferred or answered.
+        Shared by /summary and /disconnect (discord-transcript-bot-qef)."""
+        lib = library.load()
+        recording = [
+            getattr(s, "session_file", None) for s in bot.guild_whisper_sinks.values()
+        ]
+        try:
+            # Blocking for up to minutes (one model call): off the event loop.
+            result = await asyncio.to_thread(
+                session_summary.summarise,
+                path,
+                lib,
+                recording=recording,
+                refresh=refresh,
+            )
+        except session_summary.SummaryError as e:
+            await ctx.followup.send(e.user_message, ephemeral=True)
+            return False
+        except (AskBlocked, AskFailed) as e:
+            logger.error(f"session summary failed: {e.user_message}")
+            await ctx.followup.send(e.user_message, ephemeral=True)
+            return False
+        except Exception:
+            logger.exception("session summary failed unexpectedly")
+            await ctx.followup.send(
+                "Could not write the summary. Check the bot's log.", ephemeral=True
+            )
+            return False
+        parts = session_summary.messages(lib, result, DISCORD_MESSAGE_LIMIT)
+        logger.info(
+            f"session summary for {result.meta.key}: "
+            f"{'written' if result.generated else 'from cache'}, "
+            f"{len(parts)} message(s)"
+        )
+        for i, part in enumerate(parts):
+            try:
+                await ctx.followup.send(part, ephemeral=False)
+            except Exception as e:
+                # An interaction token lasts 15 minutes; a slow local model
+                # can outlive it. The summary is saved either way, so fall
+                # back to a plain channel message for what is left.
+                logger.warning(f"summary follow-up failed ({e}); using the channel")
+                for rest in parts[i:]:
+                    await ctx.channel.send(rest)
+                break
+        return True
+
+    @bot.slash_command(
+        name="summary",
+        description="Post a finished session's summary. Needs the session id from the dashboard.",
+        contexts={discord.InteractionContextType.guild},
+    )
+    async def summary(
+        ctx: discord.context.ApplicationContext,
+        session_id: discord.Option(
+            str, description="Session id, from the dashboard's Transcripts page"
+        ),
+        refresh: discord.Option(
+            bool,
+            description="Write the summary again even if one is saved (default: reuse it)",
+            required=False,
+            default=False,
+        ),
+    ):
+        # Ephemeral, so the id typed into the command is never shown to the
+        # channel: knowing it is what authorises the command.
+        await ctx.defer(ephemeral=True)
+        try:
+            path = await asyncio.to_thread(
+                session_summary.find,
+                os.path.join(os.getcwd(), "transcripts"),
+                session_id,
+                ctx.guild_id,
+            )
+        except session_summary.SummaryError as e:
+            logger.info(f"/summary refused for {ctx.author}: unknown session id")
+            await ctx.followup.send(e.user_message, ephemeral=True)
+            return
+        await ctx.followup.send(
+            "On it. The summary will be posted in this channel.", ephemeral=True
+        )
+        await _deliver_summary(ctx, str(path), refresh=refresh)
+
     @bot.slash_command(name="disconnect", description="Leave the voice channel.")
-    async def disconnect(ctx: discord.context.ApplicationContext):
+    async def disconnect(
+        ctx: discord.context.ApplicationContext,
+        summary: discord.Option(
+            bool,
+            description="Post a summary of the session once disconnected",
+            required=False,
+            default=False,
+        ),
+    ):
         guild_id = ctx.guild_id
         voice = bot.guild_to_helper.get(guild_id)
         if voice is None:
@@ -414,11 +509,22 @@ if __name__ == "__main__":
         if teardown_ok:
             await ctx.followup.send(
                 "Disconnected. Session archived. Catch you on the next one, chooms."
+                + ("\nWriting the session summary now." if summary else "")
             )
         else:
             await ctx.followup.send(
                 "Disconnected, but session cleanup hit an error — check the logs."
             )
+        if summary:
+            # The recording this process made here, never an older night
+            # picked from disk: this option has no session id to gate it.
+            last = bot.guild_last_session_file.get(guild_id)
+            if not last:
+                await ctx.followup.send(
+                    session_summary.NOTHING_RECORDED, ephemeral=True
+                )
+            else:
+                await _deliver_summary(ctx, last)
 
     @bot.slash_command(
         name="generate_pdf", description="Export the transcript as a PDF."
