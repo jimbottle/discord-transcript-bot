@@ -11,7 +11,10 @@ from tests.test_library_sessions import _earlier_fixture, _rec
 
 lib = _base.lib  # the same library fixture, under its usual name
 
-ANSWER = "TOPICS: Fixie, Militech\n\nAt 7:01 PM the deal went bad.\nThen they ran."
+ANSWER = (
+    "TOPICS: Fixie, Militech\n\nSUMMARY:\nThe deal went bad, choom. They ran.\n\n"
+    "RECAP:\nAt 7:01 PM the deal went bad.\nThen they ran."
+)
 
 
 def _fake_ask(seen=None, answer=ANSWER):
@@ -186,22 +189,49 @@ def test_a_second_request_for_the_same_session_does_not_pay_twice(lib, tmp_path)
     assert inner["msg"] == session_summary.ALREADY_RUNNING
 
 
-def test_messages_fit_discord_and_never_contain_the_id(lib, tmp_path):
+def test_the_post_is_one_message_with_the_short_summary(lib, tmp_path):
     _earlier_fixture(lib, tmp_path)
     first = _night_13(tmp_path)[0]
     sid = sessions.ensure_session_id(first)
-    long = "TOPICS: a\n\n" + "\n\n".join(
-        f"Paragraph {i}. " + "word " * 80 for i in range(12)
-    )
-    s = session_summary.summarise(first, lib, ask=_fake_ask(answer=long))
+    s = session_summary.summarise(first, lib, ask=_fake_ask())
     parts = session_summary.messages(lib, s)
-    assert len(parts) > 1 and all(len(p) <= 2000 for p in parts)
-    assert parts[0].startswith(
-        "**Session summary: Return to Night City, Tuesday, October 13, 2026**"
+    assert parts == [
+        "**Session summary: Return to Night City, Tuesday, October 13, 2026**\n\n"
+        "The deal went bad, choom. They ran."
+    ]
+    assert "7:01 PM" not in parts[0]  # the reference recap is not posted
+    assert sid not in parts[0] and sid.replace("-", "") not in parts[0]
+
+
+def test_a_summary_that_runs_long_is_still_one_message(lib, tmp_path):
+    _earlier_fixture(lib, tmp_path)
+    first = _night_13(tmp_path)[0]
+    long = "SUMMARY:\n" + " ".join(f"Sentence number {i} happened." for i in range(200))
+    s = session_summary.summarise(
+        first, lib, ask=_fake_ask(answer=long + "\n\nRECAP:\nfacts")
     )
-    joined = "\n".join(parts)
-    assert "Paragraph 11." in joined and "TOPICS" not in joined
-    assert sid not in joined and sid.replace("-", "") not in joined
+    parts = session_summary.messages(lib, s)
+    assert len(parts) == 1 and 1500 < len(parts[0]) <= 2000
+    assert parts[0].endswith("happened.")  # cut at a sentence, not mid-word
+    assert session_summary.fit("word " * 1000, 100).endswith("…")
+    assert len(session_summary.fit("word " * 1000, 100)) <= 100
+    assert session_summary.fit("short", 100) == "short"
+
+
+def test_an_old_recap_without_a_summary_is_written_again(lib, tmp_path):
+    _earlier_fixture(lib, tmp_path)
+    first, late = _night_13(tmp_path)
+    old = recaps.Recap(text="plain facts", topics="a", model="m")
+    recaps.save([first, late], old)
+    seen = []
+    s = session_summary.summarise(first, lib, ask=_fake_ask(seen))
+    assert s.generated and len(seen) == 1 and s.recap.summary
+    # and a model that leaves the summary out is reported, not posted empty
+    with pytest.raises(session_summary.SummaryError) as e:
+        session_summary.summarise(
+            first, lib, refresh=True, ask=_fake_ask(answer="TOPICS: a\n\njust facts")
+        )
+    assert e.value.user_message == session_summary.NO_SUMMARY
 
 
 # ── the Discord commands (no slash-command harness: source checks) ────
@@ -368,8 +398,94 @@ def test_summary_is_private_unless_public_is_asked_for():
     cmd = src[src.index('name="summary"') : src.index('name="disconnect"')]
     option = cmd[cmd.index("public: discord.Option(") :]
     assert "default=False" in option[: option.index("),")]
-    assert "_deliver_summary(ctx, str(path), refresh=refresh, public=public)" in cmd
+    assert "refresh=refresh, public=public, hide_command=True" in cmd
     deliver = src[src.index("async def _deliver_summary") : src.index('name="summary"')]
     assert "ctx.followup.send(part, ephemeral=not public)" in deliver
     # a private summary never falls back to the channel
     assert "target = ctx.channel if public else ctx.author" in deliver
+
+
+# ── continuing a session: /scribe session_id:<id> ─────────────────────
+
+
+def test_a_continued_recording_is_part_of_the_earlier_session(lib, tmp_path):
+    """Carrying a session on the next evening (past the 6am cutoff): by
+    default that is a new session; with the id it is the same one."""
+    _earlier_fixture(lib, tmp_path)
+    first, late = _night_13(tmp_path)
+    sid = sessions.ensure_session_id(first)
+    nxt = tmp_path / "2026-10-14_19-30-00.txt"
+    nxt.write_text("[19:31:00] Jim (Jill) [371]: picking it back up\n")
+    fresh = sessions.build_meta(
+        lib, guild_id=111, started_at=sessions.started_at_from_name(nxt)
+    )
+    assert fresh.key != sessions.read_meta(first).key  # a new session by default
+    meta = sessions.continued_meta(fresh, sessions.read_meta(first))
+    sessions.write_meta(nxt, meta)
+    assert meta.key == sessions.read_meta(first).key
+    assert (meta.session_id, meta.session_day, meta.source) == (
+        sid,
+        "2026-10-13",
+        "continued",
+    )
+    assert meta.started_at.startswith("2026-10-14T19:30")  # its own start is kept
+    assert sessions.session_files(first) == [first, late, nxt]
+    assert sessions.ensure_session_id(nxt) == sid
+    assert sessions.find_by_session_id(tmp_path, sid) == nxt
+    # /ask and /summary read all three as one night
+    s = session_summary.summarise(first, lib, ask=_fake_ask())
+    assert s.files == [first, late, nxt]
+
+
+def test_tagging_continues_the_session_scribe_was_given(lib, tmp_path, monkeypatch):
+    """VoloBot._tag_session with guild_continue_from set, on a recording
+    whose .txt does not exist yet (the sink creates it on the first line)."""
+    from types import SimpleNamespace
+
+    from src.bot.volo_bot import VoloBot
+
+    _earlier_fixture(lib, tmp_path)
+    monkeypatch.setenv("LIBRARY_DIR", str(lib.root))
+    first = _night_13(tmp_path)[0]
+    sid = sessions.ensure_session_id(first)
+    new = tmp_path / "2026-11-02_20-00-00.txt"
+    sink = SimpleNamespace(session_file=str(new), session_meta=None)
+    ctx = SimpleNamespace(guild_id=111, guild=SimpleNamespace(name="personal"))
+    bot = SimpleNamespace(guild_to_helper={}, guild_continue_from={111: str(first)})
+    VoloBot._tag_session(bot, ctx, sink)
+    meta = sessions.read_meta(new)
+    assert meta.session_id == sid and meta.session_day == "2026-10-13"
+    assert meta.campaign == "return-to-night-city" and meta.source == "continued"
+    assert sink.session_meta.session_id == sid
+    # without it: a session of its own, with its own id
+    other = tmp_path / "2026-11-03_20-00-00.txt"
+    sink2 = SimpleNamespace(session_file=str(other), session_meta=None)
+    VoloBot._tag_session(SimpleNamespace(guild_to_helper={}), ctx, sink2)
+    plain = sessions.read_meta(other)
+    assert plain.session_id and plain.session_id != sid
+    assert plain.source == "auto"
+
+
+def test_scribe_with_a_session_id_never_shows_the_id():
+    src = _main_source()
+    cmd = src[src.index('name="scribe"') : src.index('name="stop"')]
+    assert "session_id: discord.Option(" in cmd and "default=None" in cmd
+    assert "ctx.defer(ephemeral=True)" in cmd
+    assert "session_summary.find" in cmd  # same fail-closed server check
+    # a bad id does not start a recording
+    bad = cmd[cmd.index("except session_summary.SummaryError") :]
+    assert bad.index("return") < bad.index("bot.start_recording(ctx)")
+    # the public notice is a plain channel message, not a reply to the command
+    tail = cmd[cmd.index("if not continuing:") :]
+    assert "ctx.channel.send(message)" in tail
+    assert tail.count("ephemeral=False") == 1  # only the no-id path replies publicly
+
+
+def test_public_summary_is_posted_as_plain_channel_messages():
+    src = _main_source()
+    deliver = src[src.index("async def _deliver_summary") : src.index('name="summary"')]
+    block = deliver[deliver.index("if public and hide_command:") :]
+    block = block[: block.index("for i, part in enumerate(parts):")]
+    assert "ctx.channel.send(part)" in block and "followup" not in block.replace(
+        "follow-up", ""
+    )

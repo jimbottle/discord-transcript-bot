@@ -130,7 +130,8 @@ If `ASK_PROVIDER` is not set, the bot uses Anthropic when `ANTHROPIC_API_KEY` is
    - `/stop`: Stop transcribing.
    - `/disconnect`: Disconnect from the voice channel. `summary: True` also posts a summary of the session just recorded.
    - `/ask <question>`: Ask a question about the current or most recent session (works in DMs). Answered by the provider set up under [Questions about the session](#questions-about-the-session-ask).
-   - `/summary session_id:<id>`: Write the summary of a finished session and save it, so later questions about that night read it first. Only you see it unless you add `public: True`, which posts it to the channel. The session id is shown only on the dashboard, so only someone with dashboard access can run this. `refresh: True` writes it again.
+   - `/summary session_id:<id>`: Write a short summary of a finished session (one message: what happened in the game, in the game's voice, with no hints about what to do next) and save a plain recap alongside it, which later questions about that night read first. Only you see it unless you add `public: True`, which posts it to the channel. The session id is shown only on the dashboard, so only someone with dashboard access can run this. `refresh: True` writes it again.
+   - `/scribe session_id:<id>`: Carry on an earlier session instead of starting a new one (after a crash or a restart), so it stays one session.
    - `/recap`: A summary of the current or most recent session (private; `public: True` posts it). Same path as `/ask`.
    - `/transcript`: The full session as a text file, 12-hour times.
    - `/generate_pdf`: Export the current or most recent session (every recording of it) as a PDF. Works after `/stop`, `/disconnect` and a bot restart.

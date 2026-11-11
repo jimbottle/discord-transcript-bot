@@ -229,6 +229,24 @@ def ensure_session_id(transcript_path) -> Optional[str]:
         return None
 
 
+def continued_meta(meta: SessionMeta, earlier: SessionMeta) -> SessionMeta:
+    """``meta`` (a recording that is just starting) made part of the
+    session ``earlier`` belongs to: same campaign, group, game, session day
+    and session id, so the two have one key and everything that works per
+    session (/ask, /summary, the PDF) reads them as one. Where and when it
+    was actually recorded stays its own. Used by ``/scribe session_id:``
+    to carry on a session after a crash or an update, also past the
+    6am cutoff or after the server's default campaign changed
+    (discord-transcript-bot-qef)."""
+    meta.campaign = earlier.campaign
+    meta.group = earlier.group
+    meta.game = earlier.game
+    meta.session_day = earlier.session_day
+    meta.session_id = earlier.session_id
+    meta.source = "continued"
+    return meta
+
+
 def settle_session_ids(paths, old_ids) -> None:
     """Give recordings that were just re-tagged from scratch (``paths``,
     by scripts/tag_session.py) their session ids back. ``old_ids`` maps a

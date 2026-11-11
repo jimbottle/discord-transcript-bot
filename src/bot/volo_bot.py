@@ -107,6 +107,10 @@ class VoloBot(discord.Bot):
         # guild_id -> the .txt of the guild's latest recording; outlives the
         # sink so /generate_pdf works after /stop and /disconnect.
         self.guild_last_session_file = {}
+        # guild_id -> a recording of the session /scribe was asked to carry
+        # on (its session id was given). Kept until the next /scribe, so a
+        # voice-recovery restart stays in that session too.
+        self.guild_continue_from = {}
         # guild_id -> token of a pending voice-thread restart; /stop and
         # /disconnect cancel it (cancel_voice_recovery).
         self._voice_recovery = {}
@@ -578,6 +582,13 @@ class VoloBot(discord.Bot):
                 group=group,
                 campaign=campaign,
             )
+            earlier = getattr(self, "guild_continue_from", {}).get(ctx.guild_id)
+            earlier_meta = sessions.read_meta(earlier) if earlier else None
+            if earlier_meta is not None:
+                # /scribe session_id:<id>: carry that session on.
+                sessions.ensure_session_id(earlier)
+                earlier_meta = sessions.read_meta(earlier) or earlier_meta
+                meta = sessions.continued_meta(meta, earlier_meta)
             sessions.write_meta(whisper_sink.session_file, meta)
             # Joins the session's existing id after a restart, else a new one.
             meta.session_id = sessions.ensure_session_id(whisper_sink.session_file)

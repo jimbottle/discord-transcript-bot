@@ -25,7 +25,6 @@ from datetime import datetime
 from pathlib import Path
 
 from src import recaps, sessions
-from src.utils.answer import split_message
 
 NOT_FOUND = (
     "No session with that id on this server. The id is on the dashboard's "
@@ -37,6 +36,9 @@ STILL_RECORDING = (
 NOTHING_RECORDED = "Nothing was recorded this time, so there is no summary to write."
 NOTHING_SAID = "Nothing was transcribed in that session, so there is no summary."
 ALREADY_RUNNING = "A summary of that session is already being written."
+NO_SUMMARY = (
+    "The model answered without a summary section. Try again with `refresh: True`."
+)
 
 
 class SummaryError(Exception):
@@ -114,7 +116,8 @@ def summarise(path, lib, *, recording=(), refresh=False, ask=None) -> Summary:
         raise SummaryError(STILL_RECORDING)
     if not refresh:
         cached = recaps.load(files)
-        if cached is not None:
+        # A recap from before summaries existed has nothing to post.
+        if cached is not None and cached.summary:
             return Summary(cached, files, meta, generated=False)
     key = str(recaps.recap_path(files))
     with _running_lock:
@@ -123,8 +126,13 @@ def summarise(path, lib, *, recording=(), refresh=False, ask=None) -> Summary:
         _running.add(key)
     try:
         recap = recaps.generate(
-            files, header=sessions.header_text(lib, meta, len(files)), ask=ask
+            files,
+            header=sessions.header_text(lib, meta, len(files)),
+            style=recaps.summary_style(lib, meta),
+            ask=ask,
         )
+        if not recap.summary:
+            raise SummaryError(NO_SUMMARY)
     except recaps.RecapError as e:
         raise SummaryError(NOTHING_SAID) from e
     except FileNotFoundError as e:  # tagged, but nobody spoke: no .txt
@@ -148,7 +156,23 @@ def title(lib, meta) -> str:
     )
 
 
+def fit(text: str, limit: int) -> str:
+    """``text`` within ``limit`` characters, cut at the end of a sentence
+    (else a word) when it runs over. The model is told the budget; this is
+    the guarantee that the post is one Discord message."""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    cut = max(head.rfind(". "), head.rfind(".\n"), head.rfind("! "), head.rfind("? "))
+    if cut >= limit // 2:
+        return head[: cut + 1].rstrip()
+    cut = head.rfind(" ", 0, limit - 1)
+    return head[: cut if cut > 0 else limit - 1].rstrip() + "…"
+
+
 def messages(lib, summary: Summary, limit: int = 2000) -> list:
-    """The Discord messages to post, in order. The session id is never in
-    them."""
-    return split_message(f"{title(lib, summary.meta)}\n\n{summary.recap.text}", limit)
+    """What to post: always exactly one Discord message, the title and the
+    short in-world summary. The session id is never in it."""
+    head = title(lib, summary.meta)
+    return [head + "\n\n" + fit(summary.recap.summary, limit - len(head) - 2)]

@@ -39,22 +39,101 @@ def _night_13(t):
 
 
 def test_parse_splits_topics_from_the_recap():
-    topics, text = recaps.parse(ANSWER)
+    topics, summary, text = recaps.parse(ANSWER)
     assert topics == "Fixie, the Afterlife, Militech deal, stolen datashard"
+    assert summary == ""  # no SUMMARY section: everything is recap
     assert text.startswith("At 7:01 PM") and "TOPICS" not in text
 
 
+FULL = (
+    "TOPICS: Fixie, Militech\n"
+    "\n"
+    "SUMMARY:\n"
+    "The crew's deal with Militech went sideways, choom.\n"
+    "\n"
+    "They delta'd before the corpos closed in.\n"
+    "\n"
+    "RECAP:\n"
+    "At 7:01 PM the deal with Militech went bad.\n"
+    "At 9:01 PM the crew ran."
+)
+
+
+def test_parse_separates_the_summary_from_the_reference_recap():
+    topics, summary, text = recaps.parse(FULL)
+    assert topics == "Fixie, Militech"
+    assert summary == (
+        "The crew's deal with Militech went sideways, choom.\n\n"
+        "They delta'd before the corpos closed in."
+    )
+    assert (
+        text == "At 7:01 PM the deal with Militech went bad.\nAt 9:01 PM the crew ran."
+    )
+    # markdown dressing, text on the label's own line, and either order
+    dressed = (
+        "**TOPICS:** a, b\n\n## Recap\nplain facts\n\n**SUMMARY:** short and themed"
+    )
+    assert recaps.parse(dressed) == ("a, b", "short and themed", "plain facts")
+    # a line that merely starts with the word is not a label
+    assert recaps.parse("SUMMARY:\nx\nRECAP:\nRecapping the night, they left.")[2] == (
+        "Recapping the night, they left."
+    )
+
+
 def test_parse_accepts_markdown_dressing_and_a_missing_topics_line():
-    assert recaps.parse("**TOPICS:** a, b\n\nrecap") == ("a, b", "recap")
-    assert recaps.parse("Just the recap.") == ("", "Just the recap.")
-    assert recaps.parse("") == ("", "")
+    assert recaps.parse("**TOPICS:** a, b\n\nthe recap") == ("a, b", "", "the recap")
+    # a sentence that begins with a label's word is not a label
+    assert recaps.parse("Summary of the heist: it failed.")[2].startswith("Summary of")
+    assert recaps.parse("Just the recap.") == ("", "", "Just the recap.")
+    assert recaps.parse("") == ("", "", "")
 
 
 def test_parse_cuts_long_topics_at_a_comma():
     many = ", ".join(f"topic number {i}" for i in range(60))
-    topics, _ = recaps.parse(f"TOPICS: {many}\n\nrecap")
+    topics, _, _ = recaps.parse(f"TOPICS: {many}\n\nrecap")
     assert len(topics) <= recaps.TOPICS_MAX_CHARS
     assert topics.endswith(tuple("0123456789")) and not topics.endswith(",")
+
+
+def test_the_summary_is_stored_and_the_style_goes_in_the_system_header(lib, tmp_path):
+    _earlier_fixture(lib, tmp_path)
+    files = _night_13(tmp_path)
+    meta = sessions.read_meta(files[0])
+    style = recaps.summary_style(lib, meta)
+    assert style.startswith("SUMMARY STYLE: ") and "Night City" in style
+    seen = []
+    recap = recaps.generate(
+        files,
+        header="SESSION: Game: X\nSTYLE: a light touch",
+        style=style,
+        ask=_fake_ask(FULL, seen=seen),
+    )
+    # the light /ask voice is replaced by the summary's own directions
+    assert seen[0]["header"] == (
+        "SESSION: Game: X\n" + recaps.SUMMARY_RULES + "\n" + style
+    )
+    assert "SUMMARY STYLE" in seen[0]["q"] and "game world" in seen[0]["q"]
+    assert recap.summary.startswith("The crew's deal") and "choom" in recap.summary
+    assert "choom" not in recap.text  # the reference stays plain
+    assert recaps.load(files).summary == recap.summary
+    # /ask is offered the plain recap, never the themed summary
+    note = recaps.note("2026-10-13", "Tuesday, October 13, 2026", recap)
+    assert "choom" not in note.body and "7:01 PM" in note.body
+
+
+def test_summary_style_per_game(lib):
+    from types import SimpleNamespace as NS
+
+    assert "bard" in recaps.summary_style(lib, NS(game="dnd-5e"))
+    assert recaps.summary_style(lib, NS(game=None)) == ""
+    assert recaps.summary_style(lib, NS(game="unknown-game")) == ""
+    # any other game with a voice gets directions built from its name
+    lib.games["mothership"] = NS(name="Mothership", voice="grim")
+    other = recaps.summary_style(lib, NS(game="mothership"))
+    assert other.startswith("SUMMARY STYLE: ") and "Mothership" in other
+    # voice switched off in library.yml: no theming
+    lib.games["cyberpunk-red"].voice = ""
+    assert recaps.summary_style(lib, NS(game="cyberpunk-red")) == ""
 
 
 # ── storage ───────────────────────────────────────────────────────────
@@ -74,7 +153,7 @@ def test_generate_writes_a_recap_beside_the_first_recording(lib, tmp_path):
     assert "the deal went bad" in seen[0]["transcript"]
     assert "we ran" in seen[0]["transcript"]
     assert "[371]" not in seen[0]["transcript"]
-    assert seen[0]["header"] == "SESSION: Game: X"
+    assert seen[0]["header"] == "SESSION: Game: X\n" + recaps.SUMMARY_RULES
     assert recaps.load(files) == recap
     assert recaps.load(list(reversed(files))) == recap
 
@@ -305,3 +384,24 @@ def test_script_recaps_an_unevenly_tagged_night_as_ask_groups_it(
     assert "we ran" in seen[0]["transcript"]
     assert "recap-2026-10-13" in [n.id for n in sessions.earlier_session_notes(now)]
     assert mod.main(args, ask=_fake_ask(seen=seen)) == 0 and len(seen) == 1
+
+
+def test_the_summary_rules_forbid_nudges_and_analysis():
+    """Owner's direction: the summary retells the session; it never steers
+    the next one or interprets this one. The rules ride in the system
+    prompt on every recap call, with or without a style."""
+    rules = recaps.SUMMARY_RULES.lower()
+    for phrase in (
+        "do not suggest",
+        "should or could do next",
+        "open threads",
+        "do not analyse",
+        "judging whether a choice was wise",
+        "what an npc intends",
+        "what happened in response",
+        "especially badly",
+    ):
+        assert phrase in rules, phrase
+    # and the question no longer asks for loose ends
+    assert "left hanging" not in recaps.QUESTION
+    assert "SUMMARY RULES" in recaps.QUESTION

@@ -254,8 +254,23 @@ if __name__ == "__main__":
             bot._connecting_guilds.discard(guild_id)
 
     @bot.slash_command(name="scribe", description="Start transcribing voice to text.")
-    async def ink(ctx: discord.context.ApplicationContext):
-        await ctx.trigger_typing()
+    async def ink(
+        ctx: discord.context.ApplicationContext,
+        session_id: discord.Option(
+            str,
+            description="Carry on an earlier session (id from the dashboard) instead of starting a new one",
+            required=False,
+            default=None,
+        ),
+    ):
+        # With a session id the reply is private and the recording notice is
+        # a plain channel message: a public reply would let anyone read the
+        # id off the command, and knowing it is what authorises /summary.
+        continuing = bool(session_id and session_id.strip())
+        if continuing:
+            await ctx.defer(ephemeral=True)
+        else:
+            await ctx.trigger_typing()
         if ctx.guild_id not in bot.guild_to_helper:
             await ctx.respond(
                 f"Not connected yet. Use {command_mention(ctx, 'connect')} first.",
@@ -267,6 +282,30 @@ if __name__ == "__main__":
                 "Already recording. Can't run two taps at once.", ephemeral=True
             )
             return
+        earlier = None
+        if continuing:
+            try:
+                earlier = await asyncio.to_thread(
+                    session_summary.find,
+                    os.path.join(os.getcwd(), "transcripts"),
+                    session_id,
+                    ctx.guild_id,
+                )
+            except session_summary.SummaryError as e:
+                # Not started: recording under the wrong session is worse
+                # than a second try.
+                await ctx.respond(
+                    f"{e.user_message}\nRecording has **not** started. Run "
+                    "`/scribe` again with the right id, or without one to "
+                    "start a new session.",
+                    ephemeral=True,
+                )
+                return
+        # Set or cleared on every /scribe; a recovery restart reuses it.
+        if earlier is not None:
+            bot.guild_continue_from[ctx.guild_id] = str(earlier)
+        else:
+            bot.guild_continue_from.pop(ctx.guild_id, None)
         if not bot.start_recording(ctx):
             await ctx.respond(
                 "Couldn't start recording — the transcriber failed to start. "
@@ -288,7 +327,27 @@ if __name__ == "__main__":
         notice = scribe_notice(bot.guild_whisper_sinks.get(ctx.guild_id))
         if notice:
             message += f"\n\n{notice}"
-        await ctx.respond(message, ephemeral=False)
+        if not continuing:
+            await ctx.respond(message, ephemeral=False)
+            return
+        meta = getattr(bot.guild_whisper_sinks.get(ctx.guild_id), "session_meta", None)
+        joined = getattr(meta, "source", None) == "continued"
+        await ctx.respond(
+            f"Recording, as part of the session of {meta.session_day}."
+            if joined
+            else "Recording, but the session could not be joined (check the "
+            "bot's log); this is a new session.",
+            ephemeral=True,
+        )
+        try:
+            await ctx.channel.send(message)
+        except Exception as e:
+            logger.warning(f"/scribe: could not post the recording notice: {e}")
+            await ctx.followup.send(
+                "I couldn't post the recording notice in this channel (missing "
+                "permission?). Let the table know recording is on.",
+                ephemeral=True,
+            )
 
     @bot.slash_command(name="stop", description="Stop transcribing.")
     async def stop(ctx: discord.context.ApplicationContext):
@@ -354,7 +413,9 @@ if __name__ == "__main__":
                 f"{capture_line}"
             )
 
-    async def _deliver_summary(ctx, path, *, refresh=False, public=True) -> bool:
+    async def _deliver_summary(
+        ctx, path, *, refresh=False, public=True, hide_command=False
+    ) -> bool:
         """Write (or reuse) the summary of the session ``path`` belongs to
         and send it: to the channel as public follow-ups, or with
         ``public=False`` to the caller alone (it is saved either way).
@@ -407,6 +468,20 @@ if __name__ == "__main__":
             f"{'written' if result.generated else 'from cache'}, "
             f"{len(parts)} message(s), {'public' if public else 'private'}"
         )
+        if public and hide_command:
+            # /summary: a public follow-up would hang off the command that
+            # carried the session id, so post plain channel messages.
+            try:
+                for part in parts:
+                    await ctx.channel.send(part)
+            except Exception as e:
+                logger.warning(f"/summary: could not post to the channel: {e}")
+                await _tell(
+                    "The summary is saved, but I couldn't post it in this "
+                    "channel (missing permission?)."
+                )
+                return False
+            return True
         for i, part in enumerate(parts):
             try:
                 await ctx.followup.send(part, ephemeral=not public)
@@ -467,7 +542,9 @@ if __name__ == "__main__":
             "`public: True` to post it to the channel.",
             ephemeral=True,
         )
-        await _deliver_summary(ctx, str(path), refresh=refresh, public=public)
+        await _deliver_summary(
+            ctx, str(path), refresh=refresh, public=public, hide_command=True
+        )
 
     @bot.slash_command(name="disconnect", description="Leave the voice channel.")
     async def disconnect(
