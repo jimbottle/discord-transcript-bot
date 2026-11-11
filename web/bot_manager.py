@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -58,16 +59,63 @@ class BotManager:
                 return line[1:]
         return None
 
-    def _find_bot_pid(self):
+    def _proc_command(self, pid):
+        """The full command line of `pid`, or None. -ww: without it
+        Linux ps cuts the line at 80 columns, which loses the script
+        path after a long interpreter path."""
+        try:
+            out = subprocess.run(
+                ["ps", "-ww", "-o", "command=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return out.stdout.strip() or None
+
+    @staticmethod
+    def _runs_project_main(command, cwd):
+        """True when `command`, started in `cwd`, runs THIS project's
+        main.py.
+
+        An MCP server started from this directory as
+        `python /elsewhere/google_workspace_mcp/main.py` has "main.py"
+        in its command line and this project as its cwd, and used to be
+        reported as the bot (discord-transcript-bot-93b). So the script
+        argument itself must resolve to PROJECT_ROOT/main.py.
+        """
+        if not command or not cwd:
+            return False
+        ours = os.path.realpath(os.path.join(PROJECT_ROOT, "main.py"))
+        # An absolute path survives even when it contains spaces, which
+        # the token split below would break apart.
+        if re.search(re.escape(ours) + r"(\s|$)", command):
+            return True
+        for tok in command.split()[1:]:
+            if os.path.basename(tok) != "main.py":
+                continue
+            if os.path.realpath(os.path.join(cwd, tok)) == ours:
+                return True
+        return False
+
+    def _is_bot(self, pid):
+        """`pid` is a live process running this project's main.py."""
+        return self._runs_project_main(self._proc_command(pid), self._proc_cwd(pid))
+
+    def _find_bot_pid(self, health=None):
         """PID of a `main.py` bot we did NOT spawn (make start / detached),
         or None.
 
-        `main.py` is a very common entrypoint name, so a name match
-        alone is not enough — a crashed run can leave a stale health
-        file while some unrelated `python main.py` runs elsewhere. So we
-        confirm a candidate's working directory IS this project before
-        trusting it as our bot.
+        The bot records its own pid in the health file, so that pid is
+        checked first; it only counts while it is still a process
+        running this project's main.py (a crashed run leaves the file
+        behind, and the pid can be reused). A health file without a pid
+        (written by an older bot) falls back to scanning for one.
         """
+        recorded = (health or {}).get("pid")
+        if isinstance(recorded, int) and not isinstance(recorded, bool):
+            return recorded if self._is_bot(recorded) else None
         try:
             out = subprocess.run(
                 ["pgrep", "-f", "main.py"],
@@ -77,14 +125,12 @@ class BotManager:
             )
         except (OSError, subprocess.SubprocessError):
             return None
-        project = os.path.realpath(PROJECT_ROOT)
         for tok in out.stdout.split():
             try:
                 pid = int(tok)
             except ValueError:
                 continue
-            cwd = self._proc_cwd(pid)
-            if cwd and os.path.realpath(cwd) == project:
+            if self._is_bot(pid):
                 return pid
         return None
 
@@ -116,12 +162,12 @@ class BotManager:
         if self._process is None:
             # We didn't spawn it — but it may be running externally
             # (`make start`, a detached run). Require BOTH a health file
-            # AND a main.py process whose cwd is this project (see
+            # AND a live process running this project's main.py (see
             # _find_bot_pid). Read health once and reuse it (no
-            # double-read / TOCTOU). Skip the pgrep+lsof cost entirely
+            # double-read / TOCTOU). Skip the process lookups entirely
             # when there's no health file.
             health = self._read_health()
-            pid = self._find_bot_pid() if health is not None else None
+            pid = self._find_bot_pid(health) if health is not None else None
             if pid is not None:
                 return self._status_from_health(health, pid, external=True)
             return {"status": "stopped", "pid": None, "external": False}

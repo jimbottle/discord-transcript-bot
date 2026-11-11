@@ -17,7 +17,9 @@ class HealthCheck:
     def _write_status(self, phase: str, current_check: str = None):
         """Write current health status to the status file for the web UI."""
         os.makedirs(os.path.dirname(STATUS_FILE), exist_ok=True)
-        payload = {"phase": phase, "checks": dict(self.checks)}
+        # pid: the dashboard uses it to tell this bot from any other
+        # process (web/bot_manager.py, discord-transcript-bot-93b).
+        payload = {"phase": phase, "pid": os.getpid(), "checks": dict(self.checks)}
         if current_check:
             payload["current_check"] = current_check
         tmp = STATUS_FILE + ".tmp"
