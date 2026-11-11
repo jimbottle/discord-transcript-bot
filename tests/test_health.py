@@ -292,3 +292,14 @@ def test_unconfigured_checkout_probes_the_local_server_not_anthropic(monkeypatch
     hc._check_ask_provider()
     check = hc.checks["ask_provider"]
     assert check["ok"] is False and "127.0.0.1:9" in check["message"]
+
+
+def test_status_file_records_the_bot_pid(tmp_path):
+    """The dashboard identifies the bot by this pid
+    (web/bot_manager.py, discord-transcript-bot-93b)."""
+    import json
+
+    hc = HealthCheck()
+    hc._write_status("ready")
+    with open(health_module.STATUS_FILE) as f:
+        assert json.load(f)["pid"] == os.getpid()
