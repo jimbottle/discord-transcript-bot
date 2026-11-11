@@ -480,13 +480,31 @@ def test_earlier_session_notes_hold_the_model_facing_transcript(lib, tmp_path):
     assert last.index_line().startswith("- session-2026-10-13 — Earlier session")
 
 
-def test_a_game_only_tag_connects_to_the_campaigns_sessions(lib, tmp_path):
+def test_a_game_and_group_tag_connects_without_a_campaign(lib, tmp_path):
     now = _earlier_fixture(lib, tmp_path)
     old = tmp_path / "2026-09-01_19-00-00.txt"
     old.write_text("[19:00:00] Jim (Jill) [371]: session zero\n")
-    sessions.retag(old, lib, game="cyberpunk-red", whole_session=False)
+    sessions.retag(old, lib, game="cyberpunk-red", group="noah-gm", whole_session=False)
     days = [day for day, _ in sessions.earlier_sessions(now)]
     assert days == ["2026-09-01", "2026-10-06", "2026-10-13"]
+
+
+def test_another_groups_recordings_of_the_same_game_are_never_offered(lib, tmp_path):
+    now = _earlier_fixture(lib, tmp_path)
+    # same game, other table; and same game with no group at all
+    other = tmp_path / "2026-09-02_19-00-00.txt"
+    other.write_text("[19:00:00] C (D) [2]: their secret heist\n")
+    sessions.retag(
+        other, lib, game="cyberpunk-red", group="side-table", whole_session=False
+    )
+    loose = tmp_path / "2026-09-03_19-00-00.txt"
+    loose.write_text("[19:00:00] E (F) [3]: nobody's table\n")
+    sessions.retag(loose, lib, game="cyberpunk-red", whole_session=False)
+    days = [day for day, _ in sessions.earlier_sessions(now)]
+    assert days == ["2026-10-06", "2026-10-13"]
+    assert "secret heist" not in "".join(
+        n.body for n in sessions.earlier_session_notes(now)
+    )
 
 
 def test_an_oversized_earlier_session_keeps_its_most_recent_part(

@@ -297,11 +297,13 @@ def earlier_max_chars() -> int:
 
 def _same_story(a: SessionMeta, b: SessionMeta) -> bool:
     """Whether two recordings belong to the same ongoing game. The same
-    campaign when both name one; otherwise the same game, so recordings
-    that only carry a game tag still connect."""
+    campaign when both name one; otherwise the same game *and* the same
+    group, so a recording tagged without a campaign still connects but
+    never to another table that happens to play the same game: one bot
+    serves several groups, and an earlier transcript is that group's."""
     if a.campaign and b.campaign:
         return a.campaign == b.campaign
-    return bool(a.game) and a.game == b.game
+    return bool(a.game and a.group) and a.game == b.game and a.group == b.group
 
 
 def earlier_sessions(transcript_path) -> list:
