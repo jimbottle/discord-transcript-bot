@@ -125,6 +125,11 @@ class RecapError(Exception):
     """A recap could not be made (nothing transcribed, or an empty answer)."""
 
 
+class NoRecapSection(RecapError):
+    """The model answered, but without a usable RECAP part (for example it
+    dropped the ``RECAP:`` label, so everything landed in the summary)."""
+
+
 @dataclass
 class Recap:
     text: str
@@ -241,7 +246,43 @@ def parse(answer: str):
     )
 
 
-def generate(files, *, header: str = "", style: str = "", ask=None) -> Recap:
+# How the summary generator may use the campaign's notes and earlier
+# sessions (discord-transcript-bot-3bx). They are offered on demand, like
+# /ask's: only the index is sent, and this tells the model what a lookup is
+# for, so a summary of tonight never turns into a summary of the campaign.
+CONTEXT_RULES = (
+    "CONTEXT: The CAMPAIGN NOTES INDEX, when there is one, lists the "
+    "campaign's reference notes and its earlier sessions (recap- and "
+    "session- ids). The transcript is speech-to-text and often garbles "
+    "names. Use the index, and read a note or an earlier session's recap "
+    "when you need to, only to get a name or its spelling right and to "
+    "know who or what something already established is. Do not read an "
+    "earlier session's full transcript. Everything you write is about this "
+    "session's events alone: bring in nothing from the notes or earlier "
+    "sessions beyond a correct name or a few words saying who someone is."
+)
+
+
+def context_for(files, lib):
+    """``(note_dirs, extra_notes)`` the generator may look things up in:
+    the session's game, group and campaign note folders, and the campaign's
+    earlier sessions as on-demand notes. Empty for an untagged session or
+    without a library. Never raises."""
+    files = sorted(Path(f) for f in files)
+    meta = sessions.read_meta(files[0]) if files else None
+    if meta is None or lib is None:
+        return [], []
+    try:
+        dirs = list(
+            lib.note_dirs(game=meta.game, group=meta.group, campaign=meta.campaign)
+        )
+    except Exception as e:  # noqa: BLE001 - a recap must not fail on notes
+        logger.warning("recap: could not resolve note folders: %s", e)
+        dirs = []
+    return dirs, sessions.earlier_session_notes(files[0])
+
+
+def generate(files, *, header: str = "", style: str = "", lib=None, ask=None) -> Recap:
     """Write and cache the recap of the session made of ``files``. One
     blocking model call through ``provider.ask`` (so the GM check and the
     backend's limits apply); raises its ``AskFailed``/``AskBlocked``, or
@@ -249,7 +290,9 @@ def generate(files, *, header: str = "", style: str = "", ask=None) -> Recap:
     ``STYLE:`` line (the light voice of /ask answers) is replaced by
     ``SUMMARY_RULES`` and ``style`` (:func:`summary_style`), which go into
     the system prompt and govern the SUMMARY part only; the RECAP part
-    stays plain."""
+    stays plain. With ``lib``, the campaign's notes and earlier sessions
+    are offered to the model on demand (:func:`context_for`): index lines
+    only, read through ``read_campaign_notes`` when a name needs checking."""
     if ask is None:
         from src.llm import provider
 
@@ -263,9 +306,14 @@ def generate(files, *, header: str = "", style: str = "", ask=None) -> Recap:
     plain = (plain + "\n" if plain else "") + SUMMARY_RULES
     if style:
         plain += "\n" + style
-    result = ask(body, QUESTION, header=plain)
+    note_dirs, earlier = context_for(files, lib)
+    if note_dirs or earlier:
+        plain += "\n" + CONTEXT_RULES
+    result = ask(body, QUESTION, header=plain, note_dirs=note_dirs, extra_notes=earlier)
     topics, summary, text = parse(result.answer)
     if not text:
+        if summary:
+            raise NoRecapSection("the model's answer had no RECAP section")
         raise RecapError("the model returned an empty recap")
     recap = Recap(
         text=text,

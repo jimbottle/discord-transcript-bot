@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import time
+from dataclasses import replace
 from typing import Optional
 
 import discord
@@ -588,7 +589,19 @@ class VoloBot(discord.Bot):
                 # /scribe session_id:<id>: carry that session on.
                 sessions.ensure_session_id(earlier)
                 earlier_meta = sessions.read_meta(earlier) or earlier_meta
-                meta = sessions.continued_meta(meta, earlier_meta)
+                joined = sessions.continued_meta(replace(meta), earlier_meta)
+                if joined.key == earlier_meta.key:
+                    meta = joined
+                else:
+                    # An earlier recording with no campaign and no server on
+                    # its tag has a key nothing recorded here can share;
+                    # joining would leave two sessions with one id
+                    # (roborev #7158). /scribe reports it was not joined.
+                    logger.warning(
+                        f"Cannot continue session {earlier_meta.key}: a new "
+                        f"recording here would be {joined.key}. Starting a "
+                        "new session; give the old one a campaign to join it."
+                    )
             sessions.write_meta(whisper_sink.session_file, meta)
             # Joins the session's existing id after a restart, else a new one.
             meta.session_id = sessions.ensure_session_id(whisper_sink.session_file)

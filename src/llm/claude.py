@@ -285,14 +285,23 @@ def build_lore_request(question: str, index: str, header: str = "") -> dict:
 
 
 def ask_lore(
-    question: str, *, header: str = "", note_dirs=(), include_gm: bool = False
+    question: str,
+    *,
+    header: str = "",
+    note_dirs=(),
+    include_gm: bool = False,
+    extra_notes=(),
 ) -> AskResult:
-    """Answer a campaign question from reference notes alone (dashboard
-    Lore page; deliberately not wired to any Discord command). Blocking.
-    ``include_gm`` admits ``audience: gm`` notes for this one question."""
+    """Answer a campaign question from its reference notes and, when given,
+    its session records (dashboard Lore page; deliberately not wired to any
+    Discord command). Blocking. ``include_gm`` admits ``audience: gm``
+    notes for this one question. ``extra_notes`` are the campaign's
+    sessions as on-demand notes (``Campaign.session_notes``): only their
+    index lines are sent, and a recap or transcript is read through the
+    same tool when the question needs it."""
     if not configured():
         raise AskFailed(NO_KEY_MSG)
-    notes = campaign.load_notes(note_dirs, include_gm=include_gm)
+    notes = campaign.load_notes(note_dirs, include_gm=include_gm) + list(extra_notes)
     if not notes:
         if not include_gm and campaign.load_notes(note_dirs, include_gm=True):
             raise AskFailed(ONLY_GM_NOTES_MSG)

@@ -295,6 +295,35 @@ def test_lore_reads_notes(monkeypatch, notes_dir):
     assert "TRANSCRIPT" not in fake.calls[0]["messages"][0]["content"]
 
 
+def test_lore_reads_session_records_within_the_session_budget(monkeypatch):
+    monkeypatch.setenv("LOCAL_LLM_MAX_TRANSCRIPT_CHARS", "120")  # 60 in total
+    recap = local.campaign.Note(
+        id="recap-2026-10-13", title="Recap", summary="short", body="recap of the 13th"
+    )
+    fake = _use(
+        monkeypatch,
+        _Fake(
+            _response(
+                "",
+                [
+                    _call(
+                        ["recap-2026-10-13", "session-2026-10-13", "session-2026-10-06"]
+                    )
+                ],
+                "tool_calls",
+            ),
+            _response("ok"),
+        ),
+    )
+    r = local.ask_lore("q", extra_notes=[recap] + _two_sessions())
+    # the recap is free, one transcript fits, the second is refused in words
+    assert r.notes_used == ["recap-2026-10-13", "session-2026-10-13"]
+    tool = fake.calls[1]["messages"][-1]["content"]
+    assert "recap of the 13th" in tool and "night 13" in tool
+    assert "Not read" in tool and "night 06" not in tool
+    assert "TRANSCRIPT" not in fake.calls[0]["messages"][0]["content"]
+
+
 # ── the GM check on the local model ────────────────────────────────────
 
 

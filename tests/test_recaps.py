@@ -23,9 +23,11 @@ ANSWER = (
 
 
 def _fake_ask(answer=ANSWER, seen=None):
-    def ask(transcript, question, *, header=""):
+    def ask(transcript, question, *, header="", **context):
         if seen is not None:
-            seen.append({"transcript": transcript, "q": question, "header": header})
+            seen.append(
+                {"transcript": transcript, "q": question, "header": header, **context}
+            )
         return AskResult(answer=answer, model="test-model")
 
     return ask
@@ -297,7 +299,7 @@ def test_script_reports_a_failure_and_carries_on(lib, tmp_path, monkeypatch, cap
     monkeypatch.setenv("LIBRARY_DIR", str(tmp_path))
     calls = []
 
-    def flaky(transcript, question, *, header=""):
+    def flaky(transcript, question, *, header="", **context):
         calls.append(1)
         if len(calls) == 1:
             raise AskFailed("The model server is down.")

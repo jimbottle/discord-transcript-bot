@@ -95,8 +95,14 @@ def ask(
     )
 
 
-def ask_lore(question, *, header="", note_dirs=(), include_gm=False):
+def ask_lore(question, *, header="", note_dirs=(), include_gm=False, extra_notes=()):
+    """``extra_notes``: the campaign's sessions as on-demand notes
+    (``Campaign.session_notes``)."""
     backend = local if name() == LOCAL else claude
     return backend.ask_lore(
-        question, header=header, note_dirs=note_dirs, include_gm=include_gm
+        question,
+        header=header,
+        note_dirs=note_dirs,
+        include_gm=include_gm,
+        extra_notes=extra_notes,
     )

@@ -1099,7 +1099,7 @@ def test_lore_ask_answers_from_notes_and_records_history(
 
     seen = {}
 
-    def ask_lore(question, header="", note_dirs=(), include_gm=False):
+    def ask_lore(question, header="", note_dirs=(), include_gm=False, extra_notes=()):
         seen.update(header=header, dirs=list(note_dirs), include_gm=include_gm)
         return web_app.provider.AskResult(
             answer="A fixer, choom.", model="m", notes_used=["npcs"]
@@ -1712,6 +1712,116 @@ def test_dashboard_shows_the_session_id_and_backfills_old_recordings(client, del
     for sid in ids:
         assert f"<code>{sid}</code>" in page
     # stable on the next view, and on the transcript page
-    assert client.get("/transcripts").get_data(as_text=True).count(ids[0]) == 1
+    again = client.get("/transcripts").get_data(as_text=True)
+    assert again.count(f"<code>{ids[0]}</code>") == 1
     one = client.get(f"/transcripts/{files[0].name}").get_data(as_text=True)
     assert ids[0] in one and ids[1] not in one
+
+
+def test_lore_ask_offers_the_campaigns_session_records(
+    client, lore_library, ask_configured, monkeypatch, tmp_path
+):
+    """discord-transcript-bot-3bx: recaps and transcripts reach Lore as
+    on-demand notes, for that campaign only."""
+    from datetime import datetime
+
+    from src import library, sessions
+
+    tdir = tmp_path / "transcripts"
+    tdir.mkdir()
+    monkeypatch.setattr(transcript_service, "TRANSCRIPTS_DIR", tdir)
+    lib = library.load(lore_library)
+    for stamp, campaign_id, line in (
+        ("2026-10-13_19-00-00", "rtnc", "the deal went bad"),
+        ("2026-10-14_19-00-00", "empty", "another table's night"),
+    ):
+        f = tdir / f"{stamp}.txt"
+        f.write_text(f"[19:01:00] Noah (GM) [420]: {line}\n")
+        sessions.write_meta(
+            f,
+            sessions.build_meta(
+                lib,
+                campaign=campaign_id,
+                started_at=datetime.strptime(stamp, "%Y-%m-%d_%H-%M-%S"),
+            ),
+        )
+    seen = {}
+
+    def ask_lore(question, extra_notes=(), **kw):
+        seen["notes"] = list(extra_notes)
+        return web_app.provider.AskResult(answer="ok", model="m")
+
+    monkeypatch.setattr(web_app.provider, "ask_lore", ask_lore)
+    r = client.post(
+        "/lore/ask",
+        json={"question": "what happened?", "campaign": "rtnc"},
+        headers=_XHR,
+    )
+    assert r.status_code == 200
+    assert [n.id for n in seen["notes"]] == ["session-2026-10-13"]
+    assert "the deal went bad" in seen["notes"][0].body
+
+
+# ── copy button for the session id ────────────────────────────────────
+
+
+def test_copy_id_behaviour():
+    """tests/js/copy_id.test.mjs: copies data-copy, label feedback and
+    reset, textarea fallback, failure message, ignores other clicks."""
+    _run_node_test("copy_id.test.mjs")
+
+
+def test_session_id_has_a_copy_button_on_every_page_that_shows_it(client, deletable):
+    from src import sessions
+
+    tdir, _, files = deletable
+    page = client.get("/transcripts").get_data(as_text=True)
+    sid = sessions.read_meta(files[0]).session_id
+    assert "copy-id.js" in page  # loaded from the base template
+    assert f'class="copy-id" data-copy="{sid}"' in page
+    assert page.count('class="copy-id"') == 2  # one per recording row
+    one = client.get(f"/transcripts/{files[0].name}").get_data(as_text=True)
+    assert f'class="copy-id" data-copy="{sid}"' in one
+    live = client.get("/live").get_data(as_text=True)
+    assert 'id="session-id-copy"' in live and 'id="session-id-box"' in live
+    # the Live poll fills the box in; the id is no longer buried in the text
+    assert "idCopy.dataset.copy = sid" in live
+    assert '" · session id " + s.session_id' not in live
+
+
+def test_lore_page_lets_you_ask_when_a_campaign_has_only_session_records(
+    client, lore_library, monkeypatch, tmp_path
+):
+    """roborev #7160: POST /lore/ask answers from session records alone,
+    but the page kept the question box disabled without library notes."""
+    from datetime import datetime
+
+    from src import library, sessions
+
+    tdir = tmp_path / "transcripts"
+    tdir.mkdir()
+    monkeypatch.setattr(transcript_service, "TRANSCRIPTS_DIR", tdir)
+    # neither notes nor records: still disabled
+    body = client.get("/lore?campaign=empty").get_data(as_text=True)
+    assert 'data-empty="true"' in body
+    lib = library.load(lore_library)
+    for stamp, campaign_id in (
+        ("2026-10-13_19-00-00", "empty"),
+        ("2026-10-14_19-00-00", "rtnc"),
+    ):
+        f = tdir / f"{stamp}.txt"
+        f.write_text("[19:01:00] Noah (GM) [420]: the deal went bad\n")
+        sessions.write_meta(
+            f,
+            sessions.build_meta(
+                lib,
+                campaign=campaign_id,
+                started_at=datetime.strptime(stamp, "%Y-%m-%d_%H-%M-%S"),
+            ),
+        )
+    body = client.get("/lore?campaign=empty").get_data(as_text=True)
+    assert 'data-empty="false"' in body
+    assert "1 session on record" in body
+    # only GM-only notes, but records to ask about: no "tick GM notes" hint
+    (lore_library / "campaigns" / "rtnc" / "notes" / "npcs.md").unlink()
+    assert b'id="gm-only-hint"' not in client.get("/lore").data

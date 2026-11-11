@@ -473,6 +473,10 @@ def lore():
         group_name=lib.name("group", c.group_id) if c else None,
         notes=all_notes,
         table_count=len(table_notes),
+        # Sessions on record are askable too (their recaps and transcripts
+        # are fetched on demand). The count comes from the tags, not from
+        # reading the transcripts.
+        session_count=len(c.sessions) if c else 0,
         ask_configured=provider.configured(),
     )
 
@@ -523,6 +527,9 @@ def lore_ask():
             header=model.campaign_header(c.id),
             note_dirs=list(c.note_dirs),
             include_gm=include_gm,
+            # The campaign's sessions, on demand: index lines only, a recap
+            # or transcript is fetched when the question needs it (3bx).
+            extra_notes=c.session_notes(),
         )
     except provider.AskBlocked as e:
         _log(question_log.BLOCKED, started, error=e.user_message, verdict=e.verdict)

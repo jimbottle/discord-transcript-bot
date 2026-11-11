@@ -543,15 +543,52 @@ def earlier_session_notes(transcript_path) -> list:
     transcript as the model reads it), preceded by ``recap-YYYY-MM-DD`` when
     a recap of it is cached (discord-transcript-bot-fkj). Only the one-line index entry rides
     along with a question. Never raises: /ask must work without them."""
-    from src import recaps
-    from src.llm.campaign import RECAP_PREFIX, Note
-
-    notes = []
     try:
         sessions_ = earlier_sessions(transcript_path)
     except OSError as e:
         logger.warning("could not list earlier sessions: %s", e)
         return []
+    return session_notes(sessions_)
+
+
+def campaign_sessions(transcripts_dir, campaign_id) -> list:
+    """``[(session_day, [files])]`` for every session of ``campaign_id``,
+    oldest first, each night grouped the way /ask groups it
+    (:func:`story_night_files`), so its cached recap is found."""
+    if not campaign_id:
+        return []
+    by_day = {}
+    try:
+        paths = sorted(Path(transcripts_dir).glob("*.txt"))
+    except OSError as e:
+        logger.warning("could not list the campaign's sessions: %s", e)
+        return []
+    for txt in paths:
+        meta = read_meta(txt)
+        if meta is None or meta.campaign != campaign_id:
+            continue
+        if meta.session_day not in by_day:
+            by_day[meta.session_day] = story_night_files(txt)
+    return sorted(by_day.items())
+
+
+def campaign_session_notes(transcripts_dir, campaign_id) -> list:
+    """Every session of a campaign as on-demand notes (recap first, then
+    the transcript), for questions asked about the campaign as a whole:
+    the dashboard's Lore page (discord-transcript-bot-3bx). Only their
+    index lines go with a question. Never raises."""
+    return session_notes(
+        campaign_sessions(transcripts_dir, campaign_id), label="Session"
+    )
+
+
+def session_notes(sessions_, label: str = "Earlier session") -> list:
+    """``[(day, files)]`` as notes: ``recap-<day>`` when a recap is cached,
+    then ``session-<day>`` with the transcript as the model reads it."""
+    from src import recaps
+    from src.llm.campaign import RECAP_PREFIX, Note
+
+    notes = []
     cap = earlier_max_chars()
     for day, files in sessions_:
         body = model_text(join(files)).strip()
@@ -577,7 +614,7 @@ def earlier_session_notes(transcript_path) -> list:
         notes.append(
             Note(
                 id=EARLIER_PREFIX + day,
-                title=f"Earlier session, {nice}",
+                title=f"{label}, {nice}",
                 summary=(
                     f"full transcript of the session played on {nice} "
                     f"(about {lines} lines"

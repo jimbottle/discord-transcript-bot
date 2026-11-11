@@ -12,7 +12,7 @@
         {% set s = t.session %}
         <tr>
             <td>{{ s.session_day if s.tagged else '—' }}</td>
-            <td>{% if s.session_id %}<code>{{ s.session_id }}</code>{% else %}—{% endif %}</td>
+            <td>{% if s.session_id %}<span class="session-id"><code>{{ s.session_id }}</code> <button type="button" class="copy-id" data-copy="{{ s.session_id }}" title="Copy the session id" aria-label="Copy session id {{ s.session_id }}">Copy</button></span>{% else %}—{% endif %}</td>
             <td>{{ s.campaign or ('untagged' if not s.tagged else '—') }}</td>
             <td>{{ s.game or '—' }}</td>
             <td>{{ s.group or '—' }}</td>

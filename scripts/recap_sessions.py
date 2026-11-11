@@ -95,6 +95,7 @@ def main(argv=None, ask=None) -> int:
                 files,
                 header=sessions.header_text(model.lib, s.meta, len(files)),
                 style=recaps.summary_style(model.lib, s.meta),
+                lib=model.lib,
                 ask=ask,
             )
         except Exception as e:  # AskFailed, AskBlocked, RecapError, OSError
