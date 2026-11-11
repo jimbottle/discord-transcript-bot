@@ -53,7 +53,10 @@ the game, campaign, group and date.
 - `/session` in Discord shows what the current recording is tagged with.
 - The dashboard's Transcripts page lists session, campaign, game and group per recording.
 - `scripts/tag_session.py --list` shows every tag. `scripts/tag_session.py <files> --campaign <id>`
-  tags recordings made before tagging existed, or fixes a wrong tag.
+  tags recordings made before tagging existed, or fixes a wrong tag. `--game <id> --group <id>`
+  tags one that belongs to no campaign, so it still counts as an earlier session of that table.
+- `make recaps` writes a short recap of each finished session (one model call each, kept in
+  `transcripts/`). `/ask` reads a session's recap before its whole transcript.
 
 ## Notes and retrieval (why it is cheap)
 

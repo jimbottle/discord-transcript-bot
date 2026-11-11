@@ -337,7 +337,9 @@ def delete_transcript(filename, *, include_audio=False) -> list:
         )
     removed = []
     meta = path.with_name(path.stem + ".meta.json")
-    for f in (path, meta):
+    # A cached session recap (src/recaps.py) describes this recording.
+    recap = path.with_name(path.stem + ".recap.json")
+    for f in (path, meta, recap):
         try:
             f.unlink()
             removed.append(f"{f.parent.name}/{f.name}")

@@ -645,3 +645,7 @@ def test_earlier_sessions_are_indexed_and_read_through_the_notes_tool(monkeypatc
 def test_the_prompt_tells_the_model_about_earlier_sessions():
     assert "session-" in claude.SYSTEM_PROMPT
     assert "session-" in campaign.TOOL["description"]
+    # recaps are read before the transcripts (discord-transcript-bot-fkj)
+    for text in (claude.SYSTEM_PROMPT, campaign.TOOL["description"]):
+        assert campaign.RECAP_PREFIX in text
+        assert text.index(campaign.RECAP_PREFIX) < text.rindex("transcript only")

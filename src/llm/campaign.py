@@ -26,6 +26,9 @@ GM_NOTES_ENV = "CAMPAIGN_GM_NOTES"
 AUDIENCES = ("table", "gm")
 
 TOOL_NAME = "read_campaign_notes"
+# Short recaps of earlier sessions (src/recaps.py), offered next to the
+# session- transcripts and read first.
+RECAP_PREFIX = "recap-"
 TOOL = {
     "name": TOOL_NAME,
     "description": (
@@ -34,10 +37,13 @@ TOOL = {
         "Call this only when the question needs background the transcript does "
         "not contain (who a named person, place, gang or corporation is; what "
         "happened in an earlier session) and request only the notes whose index "
-        "line is relevant. Ids starting with session- are the full transcripts "
-        "of earlier sessions: they are long, so read one only for a question "
-        "about an earlier session, and only the session(s) it concerns. Do not "
-        "call it for questions the transcript answers."
+        "line is relevant. Ids starting with recap- are short recaps of earlier "
+        "sessions; ids starting with session- are their full transcripts, "
+        "which are long. For a question about an earlier session read the "
+        "recap(s) first, and a session- transcript only when there is no recap "
+        "or the recap lacks the detail the question needs, and only the "
+        "session(s) it concerns. Do not call it for questions the transcript "
+        "answers."
     ),
     "input_schema": {
         "type": "object",

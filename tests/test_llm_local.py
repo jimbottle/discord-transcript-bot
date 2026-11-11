@@ -533,6 +533,41 @@ def test_one_request_reads_a_capped_total_of_earlier_sessions(monkeypatch):
     assert again.startswith("Error: Not read") and "night 06" not in again
 
 
+def test_recaps_do_not_count_against_the_session_budget(monkeypatch):
+    """discord-transcript-bot-fkj: reading recaps first must not use up the
+    room the one transcript needs afterwards."""
+    monkeypatch.setenv("LOCAL_LLM_MAX_TRANSCRIPT_CHARS", "120")  # 60 in total
+    recap_notes = [
+        local.campaign.Note(
+            id=f"recap-2026-10-{day}",
+            title="Recap",
+            summary="short recap",
+            body=f"recap of night {day} " + "r" * 30,
+        )
+        for day in ("06", "13")
+    ]
+    fake = _use(
+        monkeypatch,
+        _Fake(
+            _response(
+                "", [_call(["recap-2026-10-06", "recap-2026-10-13"])], "tool_calls"
+            ),
+            _response("", [_call(["session-2026-10-13"], "c2")], "tool_calls"),
+            _response("ok"),
+        ),
+    )
+    r = local.ask("t", "q", extra_notes=recap_notes + _two_sessions())
+    assert r.notes_used == [
+        "recap-2026-10-06",
+        "recap-2026-10-13",
+        "session-2026-10-13",
+    ]
+    first = fake.calls[1]["messages"][-1]["content"]
+    assert "recap of night 06" in first and "recap of night 13" in first
+    second = fake.calls[2]["messages"][-1]["content"]
+    assert "night 13" in second and "Not read" not in second
+
+
 def test_library_notes_do_not_count_against_the_session_budget(monkeypatch, notes_dir):
     monkeypatch.setenv("LOCAL_LLM_MAX_TRANSCRIPT_CHARS", "120")
     fake = _use(

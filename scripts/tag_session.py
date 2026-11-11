@@ -8,6 +8,7 @@ Use this for recordings made before tagging existed, or ones tagged wrong.
     ./venv/bin/python scripts/tag_session.py transcripts/2026-10-20_*.txt \\
         --campaign return-to-night-city
     ./venv/bin/python scripts/tag_session.py transcripts/X.txt --guild 1467567081514864673
+    ./venv/bin/python scripts/tag_session.py transcripts/X.txt --game cyberpunk-red --group noah-gm
 
 The session day comes from the file's timestamp (with the 6am cutoff).
 An existing tag's Discord fields are kept unless overridden.
@@ -27,6 +28,11 @@ def main(argv=None) -> int:
     ap.add_argument("files", nargs="*", help="transcripts/<ts>.txt files")
     ap.add_argument("--campaign", help="campaign id from library.yml")
     ap.add_argument("--group", help="group id (defaults to the campaign's group)")
+    ap.add_argument(
+        "--game",
+        help="game id (defaults to the campaign's game); with --group and no "
+        "--campaign it still connects the recording to that table's sessions",
+    )
     ap.add_argument("--guild", type=int, help="resolve from this Discord guild id")
     ap.add_argument("--list", action="store_true", help="show every transcript's tag")
     args = ap.parse_args(argv)
@@ -43,6 +49,15 @@ def main(argv=None) -> int:
     if args.campaign and args.campaign not in lib.campaigns:
         ap.error(
             f"unknown campaign '{args.campaign}' (have: {', '.join(lib.campaigns)})"
+        )
+
+    if args.game and args.game not in lib.games:
+        ap.error(f"unknown game '{args.game}' (have: {', '.join(lib.games)})")
+    owned = lib.game_for(args.campaign) if args.campaign else None
+    if args.game and owned and owned != args.game:
+        ap.error(
+            f"campaign '{args.campaign}' is played in '{owned}', not '{args.game}'; "
+            "leave --game out, or change the campaign in library.yml"
         )
 
     for name in args.files:
@@ -73,6 +88,8 @@ def main(argv=None) -> int:
             campaign=args.campaign,
             source="manual",
         )
+        if args.game:
+            meta.game = args.game
         sessions.write_meta(txt, meta)
         print(f"{txt.name:28} {meta.key}  (group={meta.group}, game={meta.game})")
     return 0
