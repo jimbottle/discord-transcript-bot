@@ -34,7 +34,7 @@ from src import player_map_store  # noqa: E402
 # so the prompt, the transcript cache and the error messages are identical
 # whether the question comes from Discord or from the dashboard.
 from src.llm import provider  # noqa: E402
-from src import question_log, sessions  # noqa: E402
+from src import library, question_log, sessions  # noqa: E402
 from src.utils import timefmt  # noqa: E402
 import time  # noqa: E402
 
@@ -257,7 +257,36 @@ def view_log(filename):
 
 @app.route("/live")
 def live():
-    return render_template("live.html")
+    return render_template("live.html", tag_choices=_tag_choices())
+
+
+@app.route("/library/campaigns", methods=["POST"])
+def create_campaign():
+    """JSON ``{"name", "game", "group"}`` -> a new campaign the pickers can
+    use at once (``library/dashboard.yml`` plus an empty notes folder).
+    201 with the campaign; 400 with why not (empty or taken name, unknown
+    game or group)."""
+    _require_csrf_header()
+    data = request.get_json(silent=True) or {}
+    fields = {}
+    for key in ("name", "game", "group"):
+        v = data.get(key)
+        if v is not None and not isinstance(v, str):
+            return jsonify({"error": f"{key} must be a string"}), 400
+        fields[key] = (v or "").strip()
+    try:
+        c = library.add_campaign(
+            fields["name"], game=fields["game"] or None, group=fields["group"] or None
+        )
+    except library.LibraryError as e:
+        return jsonify({"error": str(e)}), 400
+    app.logger.info("campaign created from the dashboard: %s", c.id)
+    return (
+        jsonify(
+            {"id": c.id, "name": c.name, "game": c.game or "", "group": c.group or ""}
+        ),
+        201,
+    )
 
 
 @app.route("/live/data")

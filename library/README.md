@@ -31,6 +31,14 @@ game, or write your own.
 voice channels (`discord_channels`, which win, so two groups can share a server), and names
 the group's `active_campaign`. Switching campaigns is one line.
 
+You rarely need to edit that line. A new recording starts with the campaign
+used last in the same Discord server, and `active_campaign` only applies
+until something has been recorded there. To change campaign, use the picker
+on the dashboard's Live page: it moves the current session, and the next
+`/scribe` follows. "New campaign…" in that picker creates one (kept in
+`dashboard.yml`, which the app writes; `library.yml` stays yours) and makes
+its `campaigns/<id>/notes/` folder, ready for documents.
+
 ## Sessions
 
 When `/scribe` starts, the bot writes `transcripts/<ts>.meta.json` next to the transcript:

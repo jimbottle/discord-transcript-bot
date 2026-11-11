@@ -14,8 +14,11 @@ Never raises on bad config: a broken library means untagged recordings and
 no notes, not a broken bot.
 """
 
+import contextlib
+import fcntl
 import logging
 import os
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -155,6 +158,116 @@ class Library:
         return [d for d in candidates if d.is_dir()]
 
 
+# Campaigns made from the dashboard live in their own machine-written file,
+# so library.yml stays hand-edited with its comments (5bd). library.yml wins
+# when both define an id.
+DASHBOARD_FILE = "dashboard.yml"
+_DASHBOARD_THREAD_LOCK = threading.Lock()
+MAX_CAMPAIGN_NAME = 80
+
+
+class LibraryError(ValueError):
+    """A dashboard change to the library was refused; the message is
+    safe to show."""
+
+
+def _campaign_from(i, b) -> "Campaign":
+    return Campaign(
+        id=i,
+        name=str(b.get("name") or i),
+        group=(str(b["group"]) if b.get("group") else None),
+        game=(str(b["game"]) if b.get("game") else None),
+    )
+
+
+def _read_dashboard(root: Path) -> dict:
+    """The dashboard file's ``campaigns`` mapping; {} when absent or bad."""
+    path = root / DASHBOARD_FILE
+    if not path.is_file():
+        return {}
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError, yaml.YAMLError) as e:
+        logger.warning("library: cannot read %s: %s", path, e)
+        return {}
+    section = raw.get("campaigns") if isinstance(raw, dict) else None
+    return section if isinstance(section, dict) else {}
+
+
+def slug(name: str) -> str:
+    out = "".join(ch if ch.isalnum() else "-" for ch in name.lower())
+    return "-".join(part for part in out.split("-") if part)[:60]
+
+
+@contextlib.contextmanager
+def _dashboard_lock(root: Path):
+    """Exclusive lock for rewriting ``dashboard.yml``: a thread lock (the
+    dashboard serves requests on threads) plus an ``flock`` on a lock file
+    (a second dashboard process). Raises :class:`LibraryError` when the
+    library folder cannot be written."""
+    with _DASHBOARD_THREAD_LOCK:
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            fh = open(root / (DASHBOARD_FILE + ".lock"), "w")
+        except OSError as e:
+            raise LibraryError(f"could not save the campaign: {e}") from e
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            yield
+        finally:
+            fh.close()
+
+
+def add_campaign(name, game=None, group=None, root: Optional[Path] = None) -> Campaign:
+    """Create a campaign from the dashboard: an entry in ``dashboard.yml``
+    and an empty ``campaigns/<id>/notes`` folder for its documents. The id
+    is a slug of the name. Raises :class:`LibraryError` on a bad name, an
+    unknown game or group, or a name already taken."""
+    root = Path(root) if root else library_dir()
+    # One writer at a time, for the whole read, check and write: two
+    # requests at once would otherwise lose one campaign (roborev #7125).
+    with _dashboard_lock(root):
+        lib = load(root)
+        name = " ".join(str(name or "").split())
+        if not name:
+            raise LibraryError("campaign name is required")
+        if len(name) > MAX_CAMPAIGN_NAME:
+            raise LibraryError(f"campaign name is too long (max {MAX_CAMPAIGN_NAME})")
+        if game and game not in lib.games:
+            raise LibraryError(f"unknown game '{game}'")
+        if group and group not in lib.groups:
+            raise LibraryError(f"unknown group '{group}'")
+        cid = slug(name)
+        if not cid:
+            raise LibraryError("campaign name needs at least one letter or digit")
+        taken = {c.name.lower() for c in lib.campaigns.values()}
+        if cid in lib.campaigns or name.lower() in taken:
+            raise LibraryError(f"a campaign called '{name}' already exists")
+        entries = _read_dashboard(root)
+        entries[cid] = {"name": name}
+        if game:
+            entries[cid]["game"] = game
+        if group:
+            entries[cid]["group"] = group
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            path = root / DASHBOARD_FILE
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(
+                "# Campaigns created from the dashboard. Written by the app; edit\n"
+                "# library.yml for anything else.\n"
+                + yaml.safe_dump(
+                    {"campaigns": entries}, sort_keys=True, allow_unicode=True
+                ),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+            (root / "campaigns" / cid / "notes").mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise LibraryError(f"could not save the campaign: {e}") from e
+        return _campaign_from(cid, entries[cid])
+
+
 def _load_section(raw, key, build):
     items = {}
     section = raw.get(key) or {}
@@ -172,6 +285,14 @@ def _load_section(raw, key, build):
 
 def load(root: Optional[Path] = None) -> Library:
     root = Path(root) if root else library_dir()
+    lib = _load_main(root)
+    for cid, body in _read_dashboard(root).items():
+        if str(cid) not in lib.campaigns and isinstance(body, dict):
+            lib.campaigns[str(cid)] = _campaign_from(str(cid), body)
+    return lib
+
+
+def _load_main(root: Path) -> Library:
     lib = Library(root=root)
     path = root / "library.yml"
     if not path.is_file():
@@ -214,16 +335,7 @@ def load(root: Optional[Path] = None) -> Library:
             ),
         ),
     )
-    lib.campaigns = _load_section(
-        raw,
-        "campaigns",
-        lambda i, b: Campaign(
-            id=i,
-            name=str(b.get("name") or i),
-            group=(str(b["group"]) if b.get("group") else None),
-            game=(str(b["game"]) if b.get("game") else None),
-        ),
-    )
+    lib.campaigns = _load_section(raw, "campaigns", _campaign_from)
     for c in lib.campaigns.values():
         if c.group and c.group not in lib.groups:
             logger.warning(

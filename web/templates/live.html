@@ -4,8 +4,31 @@
 <hgroup>
     <h1>Live Session</h1>
     <p id="session-meta">Loading…</p>
-    <p><a id="edit-tag-link" class="search-meta" href="#" hidden>Edit campaign / game / group</a></p>
 </hgroup>
+
+<form id="campaign-picker" class="campaign-picker" hidden>
+    <label for="campaign-select">Campaign for this session</label>
+    <select id="campaign-select" name="campaign">
+        <option value="">— none —</option>
+        {% for c in tag_choices.campaigns %}
+        <option value="{{ c.id }}">{{ c.name }}</option>
+        {% endfor %}
+        <option value="__new__">New campaign…</option>
+    </select>
+    <span id="new-campaign" hidden>
+        <input id="new-campaign-name" type="text" maxlength="80" placeholder="Campaign name" aria-label="New campaign name">
+        <select id="new-campaign-game" aria-label="Game">
+            <option value="">— game —</option>
+            {% for g in tag_choices.games %}
+            <option value="{{ g.id }}">{{ g.name }}</option>
+            {% endfor %}
+        </select>
+        <button type="submit">Create and use</button>
+        <button type="button" id="new-campaign-cancel" class="secondary">Cancel</button>
+    </span>
+    <span id="campaign-status" class="search-meta" aria-live="polite"></span>
+    <p class="search-meta">Sets which notes and earlier sessions questions can read. New recordings in this Discord server start with the campaign used last. <a id="edit-tag-link" href="#" hidden>Edit game / group</a></p>
+</form>
 
 {% with ask_static=False %}{% include "_ask.html" %}{% endwith %}
 
@@ -24,8 +47,15 @@
 {% block scripts %}
 <script src="{{ url_for('static', filename='feed-order.js') }}"></script>
 <script src="{{ url_for('static', filename='live-feed.js') }}"></script>
+<script src="{{ url_for('static', filename='campaign-picker.js') }}"></script>
 <script>
 const DATA_URL = "{{ url_for('live_data') }}";
+const campaignPicker = createCampaignPicker(document.getElementById("campaign-picker"), {
+    tagUrl: function (filename) {
+        return "{{ url_for('transcripts') }}/" + encodeURIComponent(filename) + "/tag";
+    },
+    createUrl: "{{ url_for('create_campaign') }}",
+});
 const ORDER_KEY = "liveFeedOrder";
 const liveFeed = createLiveFeed(document.getElementById("live-feed"), {
     order: FeedOrder.get(ORDER_KEY, "newest"),
@@ -86,6 +116,8 @@ function render(data) {
         meta.textContent = "untagged recording " + data.filename + " · "
             + data.entries.length + " entries";
     }
+
+    campaignPicker.update(data.filename, s);
 
     lastAge = data.age_seconds;
     lastFetchAt = Date.now();

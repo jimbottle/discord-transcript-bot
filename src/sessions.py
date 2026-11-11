@@ -122,6 +122,46 @@ def build_meta(
     )
 
 
+def default_tag(lib, guild_id=None, channel_id=None, transcripts_dir=None):
+    """``(group_id, campaign_id)`` a new recording should start with
+    (discord-transcript-bot-5bd): the campaign most recently used in this
+    Discord server, so picking a campaign once (dashboard, retag) carries
+    forward, else the library's binding (the group's ``active_campaign``).
+
+    "Most recently used" is the newest recording here with a campaign the
+    library still has. It must be this table's: when the library binds the
+    server or channel to a group, another group's campaign is skipped (two
+    tables can share a server by channel); when it binds nothing, only a
+    recording made in the same voice channel counts. Never raises."""
+    group, campaign = lib.resolve(guild_id, channel_id)
+    if guild_id is None or transcripts_dir is None:
+        return group, campaign
+    try:
+        recordings = sorted(Path(transcripts_dir).glob("*.txt"), reverse=True)
+    except OSError:
+        return group, campaign
+    for txt in recordings:
+        m = read_meta(txt)
+        if m is None or m.guild_id != int(guild_id) or not m.campaign:
+            continue
+        c = lib.campaigns.get(m.campaign)
+        if c is None:
+            continue
+        owner = c.group or m.group
+        if group:
+            if owner and owner != group:
+                continue
+            # No group on the campaign or the recording: go by where it
+            # was recorded, so a table bound to the server does not pick
+            # up one played in another table's channel (roborev #7125).
+            if not owner and lib.resolve(guild_id, m.channel_id)[0] != group:
+                continue
+        elif channel_id is None or m.channel_id != int(channel_id):
+            continue
+        return owner or group, m.campaign
+    return group, campaign
+
+
 def write_meta(transcript_path, meta: SessionMeta) -> Path:
     path = meta_path(transcript_path)
     tmp = path.with_name(path.name + ".tmp")
@@ -219,6 +259,25 @@ def describe(lib, meta: Optional[SessionMeta], recordings: int = 1) -> dict:
         "channel": meta.channel,
         "recordings": recordings,
     }
+
+
+def scribe_line(lib, meta: Optional[SessionMeta]) -> str:
+    """What /scribe adds to its reply about the tag (5bd). The campaign
+    decides which notes and earlier sessions /ask can read, so a wrong or
+    missing one should be seen when recording starts, not at the first
+    question."""
+    d = describe(lib, meta)
+    if not d["tagged"] or not d.get("campaign"):
+        return (
+            "\nNo campaign is set for this recording, so questions get no "
+            "campaign notes or earlier sessions. Pick one on the dashboard's "
+            "Live page."
+        )
+    game = f" ({d['game']})" if d.get("game") else ""
+    return (
+        f"\nCampaign: **{d['campaign']}**{game}. If that's wrong, change it on "
+        "the dashboard's Live page."
+    )
 
 
 def header_text(lib, meta: Optional[SessionMeta], recordings: int = 1) -> str:
@@ -408,7 +467,11 @@ def retag(
 
     Ids are validated against the library; ``None``/"" clears a field.
     Choosing a campaign fills in its group and game unless those are given
-    explicitly. Discord fields and the session day are kept; ``source``
+    explicitly; a campaign that names no group, or no game, leaves each
+    recording's as it was (the Live picker sends only the campaign, and
+    losing them would drop their notes, the GM and the game's voice from
+    /ask; roborev #7125, #7135).
+    Discord fields and the session day are kept; ``source``
     becomes "manual". Returns the rewritten paths (oldest first)."""
     for kind, value, table in (
         ("campaign", campaign, lib.campaigns),
@@ -417,8 +480,11 @@ def retag(
     ):
         if value and value not in table:
             raise TagError(f"unknown {kind} '{value}'")
+    keep_group = keep_game = False
     if campaign:
         c = lib.campaigns[campaign]
+        keep_group = group is None and not c.group
+        keep_game = game is None and not c.game
         group = group if group is not None else c.group
         game = game if game is not None else c.game
     targets = (
@@ -438,8 +504,10 @@ def retag(
                 started_at=started.isoformat(timespec="seconds"),
             )
         meta.campaign = campaign or None
-        meta.group = group or None
-        meta.game = game or None
+        if not keep_group:
+            meta.group = group or None
+        if not keep_game:
+            meta.game = game or None
         meta.source = "manual"
         write_meta(txt, meta)
         written.append(Path(txt))
