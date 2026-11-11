@@ -670,6 +670,24 @@ def test_retag_to_a_campaign_with_no_group_keeps_the_sessions_group(lib, tmp_pat
     assert sessions.read_meta(f).group is None
 
 
+def test_retag_to_a_campaign_with_no_game_keeps_the_sessions_game(lib, tmp_path):
+    # roborev #7135: "New campaign…" with the game left empty
+    bare = library.add_campaign("Side Job", group="noah-gm", root=lib.root)
+    lib = library.load(lib.root)
+    f = _tagged(tmp_path, "2026-10-20_19-00-00", lib, guild_id=111, channel_id=5)
+    sessions.retag(f, lib, campaign=bare.id)
+    meta = sessions.read_meta(f)
+    assert (meta.campaign, meta.group, meta.game) == (
+        "side-job",
+        "noah-gm",
+        "cyberpunk-red",
+    )
+    assert "Cyberpunk RED" in sessions.header_text(lib, meta)
+    # an explicit empty game still clears it (the tag editor)
+    sessions.retag(f, lib, campaign=bare.id, game="")
+    assert sessions.read_meta(f).game is None
+
+
 def test_default_tag_skips_a_groupless_campaign_from_another_tables_channel(
     lib, tmp_path
 ):

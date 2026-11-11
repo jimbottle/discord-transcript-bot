@@ -467,9 +467,10 @@ def retag(
 
     Ids are validated against the library; ``None``/"" clears a field.
     Choosing a campaign fills in its group and game unless those are given
-    explicitly; a campaign that belongs to no group leaves each recording's
-    group as it was (the Live picker sends only the campaign, and losing
-    the group would drop its notes and GM from /ask, roborev #7125).
+    explicitly; a campaign that names no group, or no game, leaves each
+    recording's as it was (the Live picker sends only the campaign, and
+    losing them would drop their notes, the GM and the game's voice from
+    /ask; roborev #7125, #7135).
     Discord fields and the session day are kept; ``source``
     becomes "manual". Returns the rewritten paths (oldest first)."""
     for kind, value, table in (
@@ -479,10 +480,11 @@ def retag(
     ):
         if value and value not in table:
             raise TagError(f"unknown {kind} '{value}'")
-    keep_group = False
+    keep_group = keep_game = False
     if campaign:
         c = lib.campaigns[campaign]
         keep_group = group is None and not c.group
+        keep_game = game is None and not c.game
         group = group if group is not None else c.group
         game = game if game is not None else c.game
     targets = (
@@ -504,7 +506,8 @@ def retag(
         meta.campaign = campaign or None
         if not keep_group:
             meta.group = group or None
-        meta.game = game or None
+        if not keep_game:
+            meta.game = game or None
         meta.source = "manual"
         write_meta(txt, meta)
         written.append(Path(txt))
