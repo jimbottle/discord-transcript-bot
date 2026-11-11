@@ -45,7 +45,7 @@ COMMAND_SUMMARY = (
     ("ask-public", "Ask about the transcript (answer shown to everyone)."),
     ("session", "Show the group, game, campaign and session being recorded."),
     ("recap", "Summarise the session."),
-    ("summary", "Post a finished session's summary (needs its session id)."),
+    ("summary", "Summarise a finished session (needs its session id)."),
     ("transcript", "Download the session as text."),
     ("generate_pdf", "Export transcript as PDF."),
     ("update_player_map", "Sync player names with roster."),
@@ -354,11 +354,13 @@ if __name__ == "__main__":
                 f"{capture_line}"
             )
 
-    async def _deliver_summary(ctx, path, *, refresh=False) -> bool:
+    async def _deliver_summary(ctx, path, *, refresh=False, public=True) -> bool:
         """Write (or reuse) the summary of the session ``path`` belongs to
-        and post it to the channel as public follow-ups; problems go to the
-        caller alone. The interaction must already be deferred or answered.
-        Shared by /summary and /disconnect (discord-transcript-bot-qef)."""
+        and send it: to the channel as public follow-ups, or with
+        ``public=False`` to the caller alone (it is saved either way).
+        Problems always go to the caller alone. The interaction must
+        already be deferred or answered. Shared by /summary and
+        /disconnect (discord-transcript-bot-qef)."""
         lib = library.load()
         recording = [
             getattr(s, "session_file", None) for s in bot.guild_whisper_sinks.values()
@@ -403,24 +405,27 @@ if __name__ == "__main__":
         logger.info(
             f"session summary for {result.meta.key}: "
             f"{'written' if result.generated else 'from cache'}, "
-            f"{len(parts)} message(s)"
+            f"{len(parts)} message(s), {'public' if public else 'private'}"
         )
         for i, part in enumerate(parts):
             try:
-                await ctx.followup.send(part, ephemeral=False)
+                await ctx.followup.send(part, ephemeral=not public)
             except Exception as e:
                 # An interaction token lasts 15 minutes; a slow local model
-                # can outlive it. The summary is saved either way, so fall
-                # back to a plain channel message for what is left.
-                logger.warning(f"summary follow-up failed ({e}); using the channel")
+                # can outlive it. The summary is saved either way, so what
+                # is left goes to the channel, or, for a private summary,
+                # to the caller as a direct message (never the channel).
+                where = "the channel" if public else "a direct message"
+                logger.warning(f"summary follow-up failed ({e}); using {where}")
+                target = ctx.channel if public else ctx.author
                 for rest in parts[i:]:
-                    await ctx.channel.send(rest)
+                    await target.send(rest)
                 break
         return True
 
     @bot.slash_command(
         name="summary",
-        description="Post a finished session's summary. Needs the session id from the dashboard.",
+        description="Summarise a finished session. Needs the session id from the dashboard.",
         contexts={discord.InteractionContextType.guild},
     )
     async def summary(
@@ -431,6 +436,12 @@ if __name__ == "__main__":
         refresh: discord.Option(
             bool,
             description="Write the summary again even if one is saved (default: reuse it)",
+            required=False,
+            default=False,
+        ),
+        public: discord.Option(
+            bool,
+            description="Post the summary to the whole channel (default: only you)",
             required=False,
             default=False,
         ),
@@ -450,9 +461,13 @@ if __name__ == "__main__":
             await ctx.followup.send(e.user_message, ephemeral=True)
             return
         await ctx.followup.send(
-            "On it. The summary will be posted in this channel.", ephemeral=True
+            "On it. The summary will be posted in this channel."
+            if public
+            else "On it. Only you will see the summary. Run it again with "
+            "`public: True` to post it to the channel.",
+            ephemeral=True,
         )
-        await _deliver_summary(ctx, str(path), refresh=refresh)
+        await _deliver_summary(ctx, str(path), refresh=refresh, public=public)
 
     @bot.slash_command(name="disconnect", description="Leave the voice channel.")
     async def disconnect(

@@ -360,3 +360,16 @@ def test_the_tag_script_keeps_the_id_when_a_whole_night_changes_campaign(
     assert mod.main([str(stray), "--campaign", "return-to-night-city"]) == 0
     assert sessions.read_meta(stray).session_id == other_id
     assert sessions.read_meta(other).session_id == other_id
+
+
+def test_summary_is_private_unless_public_is_asked_for():
+    """The owner reviews a summary before the table sees it."""
+    src = _main_source()
+    cmd = src[src.index('name="summary"') : src.index('name="disconnect"')]
+    option = cmd[cmd.index("public: discord.Option(") :]
+    assert "default=False" in option[: option.index("),")]
+    assert "_deliver_summary(ctx, str(path), refresh=refresh, public=public)" in cmd
+    deliver = src[src.index("async def _deliver_summary") : src.index('name="summary"')]
+    assert "ctx.followup.send(part, ephemeral=not public)" in deliver
+    # a private summary never falls back to the channel
+    assert "target = ctx.channel if public else ctx.author" in deliver
