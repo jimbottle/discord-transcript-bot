@@ -1404,7 +1404,12 @@ def test_retag_endpoint_rejects_bad_input(client, tagged_session):
 
 def test_tag_editor_is_on_the_list_and_transcript_pages(client, tagged_session):
     listing = client.get("/transcripts").get_data(as_text=True)
-    assert listing.count('class="tag-form"') == 3
+    # The list edits each row in place: its Campaign / Game / Group cells are
+    # the dropdowns, joined to one form per row (no separate editor).
+    assert listing.count('class="tag-inline"') == 3
+    assert 'class="tag-form"' not in listing and "Edit campaign" not in listing
+    for name in ("campaign", "game", "group"):
+        assert listing.count(f'<select name="{name}" form="tag-') == 3
     assert 'data-group="noah-gm"' in listing and "tag-editor.js" in listing
     page = client.get("/transcripts/2026-10-20_19-38-38.txt").get_data(as_text=True)
     assert 'class="tag-form"' in page
@@ -1550,6 +1555,13 @@ def _run_node_test(name):
     assert r.returncode == 0, r.stderr or r.stdout
 
 
+def test_tag_inline_behaviour():
+    """tests/js/tag_inline.test.mjs: the Transcripts list's in-row dropdowns
+    save on change (a campaign fills its game and group), and a failed save
+    puts the row back."""
+    _run_node_test("tag_inline.test.mjs")
+
+
 def test_campaign_picker_behaviour():
     """tests/js/campaign_picker.test.mjs: choose, failed save, poll does not
     fight the reader, create-and-use, empty name, cancel."""
@@ -1626,9 +1638,11 @@ def test_order_toggle_is_on_live_and_transcript_pages(client, live_transcript):
 
 
 def test_list_page_offers_whole_session_choice(client, tagged_session):
-    # roborev #6491: each list row knows its real session size
+    # roborev #6491: each list row knows its real session size. The list's
+    # dropdowns always retag the whole session and say so; the transcript
+    # page keeps the choice (test_tag_editor_is_on_the_list_and_transcript_pages).
     listing = client.get("/transcripts").get_data(as_text=True)
-    assert listing.count("Apply to all 2 recordings") == 2
+    assert listing.count("(all 2 recordings of this session)") == 2
 
 
 def test_stale_bot_state_does_not_block_delete(client, deletable, tmp_path):
@@ -1825,3 +1839,66 @@ def test_lore_page_lets_you_ask_when_a_campaign_has_only_session_records(
     # only GM-only notes, but records to ask about: no "tick GM notes" hint
     (lore_library / "campaigns" / "rtnc" / "notes" / "npcs.md").unlink()
     assert b'id="gm-only-hint"' not in client.get("/lore").data
+
+
+def test_inline_tag_row_shows_a_tag_the_library_no_longer_has(client, deletable):
+    """roborev #7166: a recording tagged with a campaign, game or group
+    that has left the library used to show as "— none —" in its row, and
+    saving any other field then cleared the old tag without a word. The
+    stale id is now the selected option, so it is visible, and a save that
+    still carries it keeps it (roborev #7167)."""
+    from src import sessions
+
+    tdir, _, files = deletable
+    meta = sessions.read_meta(files[0])
+    meta.campaign, meta.game, meta.group = "ghost-campaign", "old-game", "gone-group"
+    sessions.write_meta(files[0], meta)
+    page = client.get("/transcripts").get_data(as_text=True)
+    for stale in ("ghost-campaign", "old-game", "gone-group"):
+        assert (
+            f'<option value="{stale}" selected>{stale} (not in library)</option>'
+            in page
+        )
+    # the other recording, tagged with nothing stale, gets no such option
+    assert page.count("(not in library)") == 3
+    # a stale id that is newly chosen (not the one already there) is refused
+    r = client.post(
+        f"/transcripts/{files[0].name}/tag",
+        json={"campaign": "other-ghost", "game": "old-game", "group": "gone-group"},
+        headers=_XHR,
+    )
+    assert r.status_code == 400 and "other-ghost" in r.get_json()["error"]
+    assert sessions.read_meta(files[0]).campaign == "ghost-campaign"
+
+
+def test_inline_tag_row_clears_one_stale_tag_beside_another(client, deletable):
+    """roborev #7167: with two stale ids on a row, every save posted the other
+    one too and was refused, so neither could be cleared. The row now posts
+    an id the recording already carries is kept, and only a newly chosen one
+    has to be in the library."""
+    from src import sessions
+
+    tdir, _, files = deletable
+    meta = sessions.read_meta(files[0])
+    meta.campaign, meta.game, meta.group = "ghost-campaign", "old-game", ""
+    sessions.write_meta(files[0], meta)
+    # what the row posts when the campaign cell is set to none
+    r = client.post(
+        f"/transcripts/{files[0].name}/tag",
+        json={"campaign": "", "game": "old-game", "group": ""},
+        headers=_XHR,
+    )
+    assert r.status_code == 200, r.get_json()
+    after = sessions.read_meta(files[0])
+    assert not after.campaign and after.game == "old-game"
+    # and when the game cell is cleared beside a stale campaign
+    after.campaign = "ghost-campaign"
+    sessions.write_meta(files[0], after)
+    r = client.post(
+        f"/transcripts/{files[0].name}/tag",
+        json={"campaign": "ghost-campaign", "game": "", "group": ""},
+        headers=_XHR,
+    )
+    assert r.status_code == 200, r.get_json()
+    after = sessions.read_meta(files[0])
+    assert after.campaign == "ghost-campaign" and not after.game
