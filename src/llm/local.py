@@ -450,9 +450,49 @@ def _text(message) -> str:
     return _THINK.sub("", getattr(message, "content", None) or "").strip()
 
 
-def _tool_messages(message, notes, used: list) -> list:
+# Ids of earlier-session notes (``sessions.EARLIER_PREFIX``). They are whole
+# transcripts, so one request may read only ``session_budget()`` characters
+# of them in total, across every call and round.
+SESSION_PREFIX = "session-"
+SESSION_REFUSED = (
+    "Not read (too much for this model to hold in one question): {ids}. "
+    "Answer from what you have and tell the user to ask about one earlier "
+    "session at a time."
+)
+
+
+def session_budget() -> int:
+    """Characters of earlier-session text one request may read; 0 = no cap
+    (``LOCAL_LLM_MAX_TRANSCRIPT_CHARS=0``)."""
+    return max_transcript_chars() // 2
+
+
+def _within_budget(ids, notes, spent: list):
+    """Split ``ids`` into those to read and the earlier sessions refused
+    because the request's budget is used up. ``spent`` is a one-item running
+    total, updated in place."""
+    budget = session_budget()
+    by_id = {n.id: n for n in notes}
+    allowed, refused = [], []
+    for i in ids:
+        note = by_id.get(i)
+        if budget and note is not None and i.startswith(SESSION_PREFIX):
+            # The first one always goes through: _fit_extra already cut it
+            # to the budget (plus its trim marker).
+            if spent[0] and spent[0] + len(note.body) > budget:
+                refused.append(i)
+                continue
+            spent[0] += len(note.body)
+        allowed.append(i)
+    return allowed, refused
+
+
+def _tool_messages(message, notes, used: list, spent: list = None) -> list:
     """The assistant turn with its tool calls, then one ``tool`` message per
-    call with the requested notes (or an error the model can read)."""
+    call with the requested notes (or an error the model can read).
+    ``spent`` carries the request's earlier-session total between rounds."""
+    if spent is None:
+        spent = [0]
     calls = getattr(message, "tool_calls", None) or []
     out = [
         {
@@ -489,7 +529,12 @@ def _tool_messages(message, notes, used: list) -> list:
         ):
             text = f"Error: unknown tool call or bad arguments: {c.function.name}"
         else:
-            text, is_error = campaign.read_notes(ids, notes)
+            ids, refused = _within_budget(ids, notes, spent)
+            text, is_error = campaign.read_notes(ids, notes) if ids else ("", True)
+            if refused:
+                text = (text + "\n\n" if text else "") + SESSION_REFUSED.format(
+                    ids=", ".join(refused)
+                )
             if is_error:
                 text = "Error: " + text
             used.extend(i for i in ids if i in known)
@@ -499,14 +544,18 @@ def _tool_messages(message, notes, used: list) -> list:
 
 def _run(messages: list, notes: list, *, tools=None) -> AskResult:
     """The call/tool loop. ``messages`` is extended in place."""
-    sent_chars = sum(len(m["content"]) for m in messages)
     totals = {"in": 0, "cached": 0, "out": 0}
     used: list = []
-    first_prompt_tokens = None
+    spent = [0]
+    # (prompt_tokens, characters sent) of the first call the server cut.
+    # Checked on every call: a tool round can add a whole earlier session,
+    # and the server then drops the start of the prompt without an error.
+    cut = None
     rounds = 0
 
     def call(with_tools):
-        nonlocal first_prompt_tokens
+        nonlocal cut
+        sent_chars = sum(len(m.get("content") or "") for m in messages)
         kwargs = {
             "model": model(),
             "messages": messages,
@@ -518,8 +567,8 @@ def _run(messages: list, notes: list, *, tools=None) -> AskResult:
         _check_not_broken(response)
         usage = getattr(response, "usage", None)
         prompt = getattr(usage, "prompt_tokens", 0) or 0
-        if first_prompt_tokens is None:
-            first_prompt_tokens = prompt
+        if cut is None and prompt and prompt * 2 < sent_chars / CHARS_PER_TOKEN:
+            cut = (prompt, sent_chars)
         totals["in"] += prompt
         totals["out"] += getattr(usage, "completion_tokens", 0) or 0
         details = getattr(usage, "prompt_tokens_details", None)
@@ -533,7 +582,7 @@ def _run(messages: list, notes: list, *, tools=None) -> AskResult:
         message = choice.message
         if not (tools and getattr(message, "tool_calls", None)):
             break
-        messages.extend(_tool_messages(message, notes, used))
+        messages.extend(_tool_messages(message, notes, used, spent))
         if rounds >= MAX_TOOL_ROUNDS:
             logger.warning(
                 f"/ask still calling tools after {rounds} rounds; answering "
@@ -556,10 +605,10 @@ def _run(messages: list, notes: list, *, tools=None) -> AskResult:
         answer += TRUNCATION_NOTE
     if not answer:
         raise AskFailed(EMPTY_MSG)
-    if first_prompt_tokens and first_prompt_tokens * 2 < sent_chars / CHARS_PER_TOKEN:
+    if cut:
         logger.warning(
-            f"Local server reported {first_prompt_tokens} prompt tokens for "
-            f"{sent_chars} characters: it truncated the prompt (context window "
+            f"Local server reported {cut[0]} prompt tokens for "
+            f"{cut[1]} characters: it truncated the prompt (context window "
             "too small)."
         )
         answer += CONTEXT_NOTE
