@@ -408,13 +408,19 @@ def ask(
     Raises :class:`AskFailed` (Discord-ready) or :class:`AskBlocked`."""
     try:
         verdict = _gate(question, context=header.split("\n")[0] if header else "")
-        notes = campaign.load_notes(note_dirs) + _fit_extra(extra_notes)
+        earlier = _fit_extra(extra_notes)
+        notes = campaign.load_notes(note_dirs) + earlier
         index = campaign.index_text(notes)
         fitted, kept, total = fit_transcript(transcript, max_transcript_chars())
         messages = build_messages(
             fitted, question, index=index, header=header, max_chars=max_chars
         )
-        result = _run(messages, notes, tools=[_tool()] if index else None)
+        result = _run(
+            messages,
+            notes,
+            tools=[_tool()] if index else None,
+            session_ids=[n.id for n in earlier],
+        )
     except LocalError as e:
         raise e.failure from e
     if kept < total:
@@ -450,15 +456,25 @@ def _text(message) -> str:
     return _THINK.sub("", getattr(message, "content", None) or "").strip()
 
 
-# Ids of earlier-session notes (``sessions.EARLIER_PREFIX``). They are whole
-# transcripts, so one request may read only ``session_budget()`` characters
-# of them in total, across every call and round.
-SESSION_PREFIX = "session-"
+# Earlier-session notes are whole transcripts, so one request may read only
+# ``session_budget()`` characters of them in total, across every call and
+# round. Which notes those are comes from the caller (``extra_notes``), not
+# from the id, so a library note called ``session-zero`` is never counted.
 SESSION_REFUSED = (
     "Not read (too much for this model to hold in one question): {ids}. "
     "Answer from what you have and tell the user to ask about one earlier "
     "session at a time."
 )
+SESSION_REPEAT = "Already provided above, not repeated: {ids}."
+
+
+class _SessionReads:
+    """What one request has read of the earlier sessions so far."""
+
+    def __init__(self, session_ids=()):
+        self.session_ids = set(session_ids)
+        self.read = set()
+        self.chars = 0
 
 
 def session_budget() -> int:
@@ -467,32 +483,42 @@ def session_budget() -> int:
     return max_transcript_chars() // 2
 
 
-def _within_budget(ids, notes, spent: list):
-    """Split ``ids`` into those to read and the earlier sessions refused
-    because the request's budget is used up. ``spent`` is a one-item running
-    total, updated in place."""
+def _within_budget(ids, notes, state: "_SessionReads"):
+    """Split ``ids`` into ``(to read, refused, repeated)``. Refused are
+    earlier sessions the request's budget has no room for; repeated are
+    earlier sessions this request already read, whose text is in the
+    conversation and is neither charged nor sent again. ``state`` is
+    updated in place."""
     budget = session_budget()
     by_id = {n.id: n for n in notes}
-    allowed, refused = [], []
+    allowed, refused, repeated = [], [], []
     for i in ids:
         note = by_id.get(i)
-        if budget and note is not None and i.startswith(SESSION_PREFIX):
-            # The first one always goes through: _fit_extra already cut it
-            # to the budget (plus its trim marker).
-            if spent[0] and spent[0] + len(note.body) > budget:
+        if note is None or i not in state.session_ids:
+            allowed.append(i)
+            continue
+        if i in state.read:
+            if i not in repeated:
+                repeated.append(i)
+            continue
+        # The first one always goes through: _fit_extra already cut it to
+        # the budget (plus its trim marker).
+        if budget and state.chars and state.chars + len(note.body) > budget:
+            if i not in refused:
                 refused.append(i)
-                continue
-            spent[0] += len(note.body)
+            continue
+        state.chars += len(note.body)
+        state.read.add(i)
         allowed.append(i)
-    return allowed, refused
+    return allowed, refused, repeated
 
 
-def _tool_messages(message, notes, used: list, spent: list = None) -> list:
+def _tool_messages(message, notes, used: list, state=None) -> list:
     """The assistant turn with its tool calls, then one ``tool`` message per
     call with the requested notes (or an error the model can read).
-    ``spent`` carries the request's earlier-session total between rounds."""
-    if spent is None:
-        spent = [0]
+    ``state`` carries the request's earlier-session reads between rounds."""
+    if state is None:
+        state = _SessionReads()
     calls = getattr(message, "tool_calls", None) or []
     out = [
         {
@@ -529,12 +555,17 @@ def _tool_messages(message, notes, used: list, spent: list = None) -> list:
         ):
             text = f"Error: unknown tool call or bad arguments: {c.function.name}"
         else:
-            ids, refused = _within_budget(ids, notes, spent)
-            text, is_error = campaign.read_notes(ids, notes) if ids else ("", True)
+            ids, refused, repeated = _within_budget(ids, notes, state)
+            # A call that only repeats sessions it already has is not an error.
+            text, is_error = (
+                campaign.read_notes(ids, notes) if ids else ("", not repeated)
+            )
+            extra = []
+            if repeated:
+                extra.append(SESSION_REPEAT.format(ids=", ".join(repeated)))
             if refused:
-                text = (text + "\n\n" if text else "") + SESSION_REFUSED.format(
-                    ids=", ".join(refused)
-                )
+                extra.append(SESSION_REFUSED.format(ids=", ".join(refused)))
+            text = "\n\n".join([text] * bool(text) + extra)
             if is_error:
                 text = "Error: " + text
             used.extend(i for i in ids if i in known)
@@ -542,11 +573,11 @@ def _tool_messages(message, notes, used: list, spent: list = None) -> list:
     return out
 
 
-def _run(messages: list, notes: list, *, tools=None) -> AskResult:
+def _run(messages: list, notes: list, *, tools=None, session_ids=()) -> AskResult:
     """The call/tool loop. ``messages`` is extended in place."""
     totals = {"in": 0, "cached": 0, "out": 0}
     used: list = []
-    spent = [0]
+    state = _SessionReads(session_ids)
     # (prompt_tokens, characters sent) of the first call the server cut.
     # Checked on every call: a tool round can add a whole earlier session,
     # and the server then drops the start of the prompt without an error.
@@ -582,7 +613,7 @@ def _run(messages: list, notes: list, *, tools=None) -> AskResult:
         message = choice.message
         if not (tools and getattr(message, "tool_calls", None)):
             break
-        messages.extend(_tool_messages(message, notes, used, spent))
+        messages.extend(_tool_messages(message, notes, used, state))
         if rounds >= MAX_TOOL_ROUNDS:
             logger.warning(
                 f"/ask still calling tools after {rounds} rounds; answering "

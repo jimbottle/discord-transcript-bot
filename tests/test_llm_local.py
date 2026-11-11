@@ -566,3 +566,54 @@ def test_a_prompt_cut_after_a_tool_round_is_named_in_the_answer(monkeypatch):
     )
     r = local.ask("t", "Last session?", extra_notes=[big])
     assert r.answer == "An answer." + local.CONTEXT_NOTE
+
+
+def test_asking_again_for_a_session_already_read_is_not_a_refusal(monkeypatch):
+    """roborev #7122: the body is already in the conversation, so a repeat
+    (same call or a later round) is neither charged nor reported unread."""
+    monkeypatch.setenv("LOCAL_LLM_MAX_TRANSCRIPT_CHARS", "120")
+    fake = _use(
+        monkeypatch,
+        _Fake(
+            _response(
+                "",
+                [_call(["session-2026-10-13", "session-2026-10-13"])],
+                finish="tool_calls",
+            ),
+            _response("", [_call(["session-2026-10-13"], "c2")], "tool_calls"),
+            _response("The 13th."),
+        ),
+    )
+    r = local.ask("t", "Last session?", extra_notes=_two_sessions())
+    assert r.notes_used == ["session-2026-10-13"]
+    first = fake.calls[1]["messages"][-1]["content"]
+    assert first.count("night 13") == 1 and "Not read" not in first
+    again = fake.calls[2]["messages"][-1]["content"]
+    assert again == "Already provided above, not repeated: session-2026-10-13."
+
+
+def test_a_library_note_named_like_a_session_is_not_charged(monkeypatch, tmp_path):
+    """roborev #7122: earlier sessions are known by where they came from,
+    not by an id prefix a GM's note can share."""
+    monkeypatch.setenv("LOCAL_LLM_MAX_TRANSCRIPT_CHARS", "120")
+    (tmp_path / "session-zero.md").write_text(
+        "---\nid: session-zero\ntitle: Session zero\nsummary: house rules\n---\n"
+        + "house rules " * 10,
+        encoding="utf-8",
+    )
+    fake = _use(
+        monkeypatch,
+        _Fake(
+            _response(
+                "",
+                [_call(["session-zero", "session-2026-10-13"])],
+                finish="tool_calls",
+            ),
+            _response("ok"),
+        ),
+    )
+    r = local.ask("t", "q", note_dirs=[tmp_path], extra_notes=_two_sessions())
+    assert r.notes_used == ["session-zero", "session-2026-10-13"]
+    result = fake.calls[1]["messages"][-1]["content"]
+    assert "house rules" in result and "night 13" in result
+    assert "Not read" not in result
