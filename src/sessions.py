@@ -388,9 +388,11 @@ def earlier_sessions(transcript_path) -> list:
 def earlier_session_notes(transcript_path) -> list:
     """Each earlier session as a note the model can read on demand through
     ``read_campaign_notes`` (id ``session-YYYY-MM-DD``, body = that night's
-    transcript as the model reads it). Only the one-line index entry rides
+    transcript as the model reads it), preceded by ``recap-YYYY-MM-DD`` when
+    a recap of it is cached (discord-transcript-bot-fkj). Only the one-line index entry rides
     along with a question. Never raises: /ask must work without them."""
-    from src.llm.campaign import Note
+    from src import recaps
+    from src.llm.campaign import RECAP_PREFIX, Note
 
     notes = []
     try:
@@ -415,6 +417,11 @@ def earlier_session_notes(transcript_path) -> list:
             nice = datetime.strptime(day, "%Y-%m-%d").strftime("%A, %B %-d, %Y")
         except ValueError:
             nice = day
+        # A cached recap (src/recaps.py) goes first and is what the model
+        # reads first; without one the transcript is the only entry.
+        recap = recaps.load(files)
+        if recap is not None:
+            notes.append(recaps.note(day, nice, recap))
         notes.append(
             Note(
                 id=EARLIER_PREFIX + day,
@@ -424,6 +431,11 @@ def earlier_session_notes(transcript_path) -> list:
                     f"(about {lines} lines"
                     + (f"; speakers: {', '.join(speakers)}" if speakers else "")
                     + ")"
+                    + (
+                        f"; long, read {RECAP_PREFIX}{day} first"
+                        if recap is not None
+                        else ""
+                    )
                 ),
                 body=body,
                 keywords=["earlier session", "last time", "previously"],

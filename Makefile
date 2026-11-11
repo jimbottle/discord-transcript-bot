@@ -4,7 +4,7 @@ RUN = $(shell [ -f op.env ] && echo "op run --env-file=$(CURDIR)/op.env --")
 
 # Every target is a command, not a file; without this `make web` says
 # "`web' is up to date" because the web/ directory exists.
-.PHONY: help start web test test-integration preflight prewarm capture-session verify-session
+.PHONY: help start web test test-integration preflight prewarm recaps capture-session verify-session
 
 # The bot's command-line options (-v/--verbose).
 help:
@@ -30,6 +30,11 @@ preflight:
 
 prewarm:
 	./venv/bin/python scripts/prewarm_models.py
+
+# Write the cached recap of every finished session that lacks one (one model
+# call each, on the /ask provider); /ask then reads recaps before transcripts.
+recaps:
+	$(RUN) ./venv/bin/python scripts/recap_sessions.py --generate
 
 capture-session:
 	CAPTURE_SESSION_AUDIO=1 $(RUN) ./venv/bin/python main.py

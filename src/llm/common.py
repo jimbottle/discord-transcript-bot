@@ -35,10 +35,14 @@ SYSTEM_PROMPT = (
     "tool, but only when the question needs background the transcript lacks, "
     "and say when an answer comes from the notes rather than the transcript. "
     "Index entries whose id starts with session- are the transcripts of "
-    "earlier sessions of the same campaign. TRANSCRIPT below is the current "
+    "earlier sessions of the same campaign, and those starting with recap- "
+    "are short recaps of them, whose topics show which night something "
+    "happened. TRANSCRIPT below is the current "
     "session; when the question is about an earlier one ('last session', "
     "'previously', something that did not happen tonight), read the relevant "
-    "earlier session the same way, starting with the most recent, and say "
+    "recap the same way (the most recent session when none stands out), "
+    "then that session's transcript only if there is no recap or the recap "
+    "lacks the detail, and say "
     "which session's date the answer comes from." + TIME_STYLE + TABLE_RULES
 )
 

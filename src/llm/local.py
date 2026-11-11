@@ -419,7 +419,11 @@ def ask(
             messages,
             notes,
             tools=[_tool()] if index else None,
-            session_ids=[n.id for n in earlier],
+            # Recaps are short: only the transcripts count against the
+            # earlier-session budget.
+            session_ids=[
+                n.id for n in earlier if not n.id.startswith(campaign.RECAP_PREFIX)
+            ],
         )
     except LocalError as e:
         raise e.failure from e

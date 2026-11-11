@@ -1474,10 +1474,13 @@ def test_delete_removes_transcript_and_tag_but_keeps_audio_by_default(
     client, deletable
 ):
     tdir, cdir, files = deletable
+    recap = tdir / "2026-10-20_19-38-38.recap.json"
+    recap.write_text("{}")
     r = _delete(client, files[1].name, confirm=True)
     assert r.status_code == 200
     assert not files[1].exists()
     assert not (tdir / "2026-10-20_19-38-38.meta.json").exists()
+    assert not recap.exists()  # the session's cached recap goes with it
     assert (cdir / "2026-10-20_19-38-38").is_dir()  # audio kept unless asked
     assert files[0].exists()  # other recordings untouched
 
