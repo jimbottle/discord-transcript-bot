@@ -430,15 +430,18 @@ if __name__ == "__main__":
         async def _tell(text):
             """A problem, to the caller alone. A slow local model can fail
             after the 15-minute interaction token has expired; the reason
-            is then posted to the channel instead of being lost with a
-            raised follow-up (roborev #7151). None of these messages
-            contains the session id."""
+            is then sent another way instead of being lost with a raised
+            follow-up (roborev #7151): to the channel for a public request,
+            and as a direct message for a private one, which must never
+            show the table that a summary was attempted (roborev #7157).
+            None of these messages contains the session id."""
             try:
                 await ctx.followup.send(text, ephemeral=True)
             except Exception as e:
-                logger.warning(f"summary error reply failed ({e}); using the channel")
+                where = "the channel" if public else "a direct message"
+                logger.warning(f"summary error reply failed ({e}); using {where}")
                 try:
-                    await ctx.channel.send(text)
+                    await (ctx.channel if public else ctx.author).send(text)
                 except Exception as e2:
                     logger.error(f"could not report the summary failure: {e2}")
 
@@ -493,8 +496,17 @@ if __name__ == "__main__":
                 where = "the channel" if public else "a direct message"
                 logger.warning(f"summary follow-up failed ({e}); using {where}")
                 target = ctx.channel if public else ctx.author
-                for rest in parts[i:]:
-                    await target.send(rest)
+                try:
+                    for rest in parts[i:]:
+                        await target.send(rest)
+                except Exception as e2:
+                    # e.g. the caller blocks direct messages. The summary is
+                    # saved; a private one is never rerouted to the channel.
+                    logger.error(
+                        f"summary could not be delivered to {where}: {e2}; "
+                        "it is saved and /summary will show it again"
+                    )
+                    return False
                 break
         return True
 

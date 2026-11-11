@@ -289,7 +289,10 @@ def test_summary_failures_are_reported_even_after_the_token_expires():
     assert errors.count("await _tell(") == 3 and "ctx.followup.send" not in errors
     tell = deliver[deliver.index("async def _tell") : deliver.index("# Blocking")]
     assert "ctx.followup.send(text, ephemeral=True)" in tell
-    assert "ctx.channel.send(text)" in tell
+    # roborev #7157: a private request's late error goes to the caller by
+    # direct message, never to the channel
+    assert "(ctx.channel if public else ctx.author).send(text)" in tell
+    assert "ctx.channel.send(text)" not in tell
 
 
 def test_the_tag_script_keeps_a_sessions_id(lib, tmp_path, monkeypatch):
@@ -489,3 +492,16 @@ def test_public_summary_is_posted_as_plain_channel_messages():
     assert "ctx.channel.send(part)" in block and "followup" not in block.replace(
         "follow-up", ""
     )
+
+
+def test_a_failed_fallback_delivery_is_caught_not_raised():
+    """roborev #7157: the caller may block direct messages; that must not
+    raise out of the command, and must not reroute to the channel."""
+    src = _main_source()
+    deliver = src[src.index("async def _deliver_summary") : src.index('name="summary"')]
+    fallback = deliver[
+        deliver.index("target = ctx.channel if public else ctx.author") :
+    ]
+    assert fallback.index("try:") < fallback.index("await target.send(rest)")
+    assert "except Exception as e2:" in fallback and "return False" in fallback
+    assert "ctx.channel.send" not in fallback
