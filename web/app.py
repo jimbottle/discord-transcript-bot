@@ -184,9 +184,10 @@ def delete_transcript_route(filename):
 @app.route("/transcripts/<filename>/tag", methods=["POST"])
 def retag_transcript(filename):
     """JSON ``{"campaign", "group", "game", "whole_session"}`` -> rewrite the
-    recording's session tag (``.meta.json``). Ids must exist in
-    library.yml; empty clears. ``whole_session`` (default true) applies the
-    change to every recording of the session."""
+    recording's session tag (``.meta.json``). A newly chosen id must exist
+    in the library; one the recording already carries is kept even if the
+    library has dropped it; empty clears. ``whole_session`` (default true)
+    applies the change to every recording of the session."""
     _require_csrf_header()
     path = transcript_path(filename)
     if path is None:
