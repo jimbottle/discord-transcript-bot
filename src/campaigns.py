@@ -20,6 +20,7 @@ it is built on. A ``Model`` is a snapshot: make a new one per request.
 """
 
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 from typing import Optional
 
@@ -75,8 +76,17 @@ class Campaign:
     group_id: Optional[str] = None
     # Existing note folders, general to specific (game, group, campaign).
     note_dirs: tuple = ()
-    # Its sessions, oldest first.
-    sessions: tuple = ()
+    _model: Optional["Model"] = field(default=None, repr=False, compare=False)
+
+    @cached_property
+    def sessions(self) -> tuple:
+        """Its sessions, oldest first. Looked up on first use (it reads
+        every recording's tag), so a dropdown or a Lore question, which
+        only need the name and the note folders, never scan the
+        transcripts (roborev #7126)."""
+        if self._model is None:
+            return ()
+        return tuple(self._model.sessions(self.id))
 
     @property
     def last_played(self) -> Optional[str]:
@@ -208,7 +218,7 @@ class Model:
             note_dirs=tuple(
                 self.lib.note_dirs(game=c.game, group=c.group, campaign=c.id)
             ),
-            sessions=tuple(self.sessions(c.id)),
+            _model=self,
         )
 
     def campaigns(self) -> list:
@@ -238,13 +248,22 @@ class Model:
         the whole session's transcript as the model reads it, the SESSION
         header, the note folders, and (on demand) the earlier sessions."""
         path = Path(transcript_path)
-        text, header, dirs, files = sessions.ask_context(path, self.lib)
+        # One pass over the tags: Discord's /ask gets here before it has
+        # acknowledged the command (roborev #7126). Same result as
+        # ``sessions.ask_context``, which tests/test_campaigns.py holds it to.
         session = self.session_of(path)
+        meta = session.meta
+        header, dirs = "", []
+        if meta is not None:
+            header = sessions.header_text(self.lib, meta, session.recordings)
+            dirs = self.lib.note_dirs(
+                game=meta.game, group=meta.group, campaign=meta.campaign
+            )
         return AskContext(
-            transcript=text,
+            transcript=session.model_text(),
             header=header,
             note_dirs=list(dirs),
-            files=list(files),
+            files=list(session.files),
             session=session,
             _path=path,
             _model=self,

@@ -251,3 +251,39 @@ def test_build_meta_dates_from_the_recording(lib):
     # guards the fixture helper: the session day comes from the file name
     m = sessions.build_meta(lib, guild_id=111, started_at=datetime(2026, 10, 20, 19))
     assert m.session_day == "2026-10-20"
+
+
+def _count_tag_reads(monkeypatch):
+    seen = []
+    real = sessions.read_meta
+    monkeypatch.setattr(
+        sessions, "read_meta", lambda p: (seen.append(str(p)), real(p))[1]
+    )
+    return seen
+
+
+def test_a_campaign_reads_the_tags_only_when_its_sessions_are_asked_for(
+    lib, tdir, played, monkeypatch
+):
+    # roborev #7126: dropdowns and Lore need the name and the note folders
+    seen = _count_tag_reads(monkeypatch)
+    model = campaigns.Model(tdir, lib)
+    rows = [c.choice() for c in model.campaigns()]
+    rtnc = model.campaign("return-to-night-city")
+    assert rows and rtnc.note_dirs and rtnc.name
+    assert seen == []
+    assert rtnc.last_played == "2026-10-20"
+    assert len(seen) == len(played)
+    # and only once per campaign object, then per model
+    assert len(rtnc.sessions) == 2 and len(seen) == len(played)
+    assert model.campaign("lost-mine").last_played and len(seen) == len(played)
+
+
+def test_ask_context_scans_the_tags_once(lib, tdir, played, monkeypatch):
+    # roborev #7126: built on the event loop before /ask is acknowledged
+    _a, _b, c, _d, _e = played
+    seen = _count_tag_reads(monkeypatch)
+    campaigns.for_recording(c, lib).ask_context(c)
+    # the recording's own tag (twice), then one pass over the folder; going
+    # through sessions.ask_context as well made it two passes
+    assert len(seen) == 2 + len(played)
