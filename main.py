@@ -8,7 +8,7 @@ from datetime import datetime
 import discord
 from dotenv import load_dotenv
 
-from src import cli, library, question_log, sessions
+from src import campaigns, cli, library, question_log, sessions
 from src.bot import command_errors
 from src.bot.guild_voice import GuildVoice
 from src.llm.provider import AskBlocked, AskFailed, ask as llm_ask
@@ -631,11 +631,13 @@ if __name__ == "__main__":
         # still work after /stop, /disconnect or a restart (csk, as fwv did
         # for /generate_pdf).
         session_file = bot.session_file_for_export(guild_id)
-        transcript_text, header, note_dirs = None, "", []
-        if session_file:
-            transcript_text, header, note_dirs, _files = sessions.ask_context(
-                session_file
-            )
+        # One object for what this question is sent with (src/campaigns.py).
+        asked = (
+            campaigns.for_recording(session_file).ask_context(session_file)
+            if session_file
+            else campaigns.AskContext()
+        )
+        transcript_text = asked.transcript
 
         source = "discord-public" if public else "discord"
 
@@ -678,12 +680,12 @@ if __name__ == "__main__":
                 # reads every earlier session's files, which grows with the
                 # campaign and must not hold up the event loop or the
                 # 3-second interaction deadline (roborev #7119).
-                earlier = sessions.earlier_session_notes(session_file)
+                earlier = asked.earlier_notes()
                 return llm_ask(
                     transcript_text,
                     question,
-                    header=header,
-                    note_dirs=note_dirs,
+                    header=asked.header,
+                    note_dirs=asked.note_dirs,
                     max_chars=answer_budget(question),
                     extra_notes=earlier,
                 )
@@ -857,10 +859,7 @@ if __name__ == "__main__":
                 "Not recording right now. Use /scribe first.", ephemeral=True
             )
             return
-        lib = library.load()
-        meta = sessions.read_meta(path)
-        files = [f for f in sessions.session_files(path) if f.exists()]
-        d = sessions.describe(lib, meta, max(1, len(files)))
+        d = campaigns.for_recording(path).describe(path)
         if not d["tagged"] or not d.get("campaign"):
             await ctx.respond(
                 "This recording isn't tied to a campaign. Add this server to a group "

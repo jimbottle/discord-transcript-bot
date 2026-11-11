@@ -43,30 +43,28 @@ def history_file() -> Path:
 def _session_fields(transcript_path) -> dict:
     if not transcript_path:
         return {"session_key": None, "files": []}
-    from src import library, sessions
+    from src import campaigns
 
-    meta = sessions.read_meta(transcript_path)
-    files = sessions.session_files(transcript_path)
-    d = sessions.describe(library.load(), meta, len(files))
+    s = campaigns.for_recording(transcript_path).session_of(transcript_path)
     return {
-        "session_key": d.get("key"),
-        "group": d.get("group_id"),
-        "game": d.get("game_id"),
-        "campaign": d.get("campaign_id"),
-        "session_day": d.get("session_day"),
-        "files": [Path(f).name for f in files],
+        "session_key": s.key,
+        "group": s.group_id,
+        "game": s.game_id,
+        "campaign": s.campaign_id,
+        "session_day": s.day,
+        "files": s.file_names,
     }
 
 
 def _campaign_fields(campaign_id: str) -> dict:
     """Tags for a question about a campaign rather than a recording."""
-    from src import library
+    from src import campaigns
 
-    c = library.load().campaigns.get(campaign_id)
+    c = campaigns.Model().campaign(campaign_id)
     return {
         "campaign": campaign_id,
-        "group": c.group if c else None,
-        "game": c.game if c else None,
+        "group": c.group_id if c else None,
+        "game": c.game_id if c else None,
     }
 
 
