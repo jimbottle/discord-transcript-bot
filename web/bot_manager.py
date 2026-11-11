@@ -60,10 +60,12 @@ class BotManager:
         return None
 
     def _proc_command(self, pid):
-        """The full command line of `pid`, or None."""
+        """The full command line of `pid`, or None. -ww: without it
+        Linux ps cuts the line at 80 columns, which loses the script
+        path after a long interpreter path."""
         try:
             out = subprocess.run(
-                ["ps", "-o", "command=", "-p", str(pid)],
+                ["ps", "-ww", "-o", "command=", "-p", str(pid)],
                 capture_output=True,
                 text=True,
                 timeout=5,
