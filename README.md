@@ -7,7 +7,7 @@ A Discord bot that sits in a voice channel and writes down what everyone says, a
 
 Transcription runs on your own machine with Whisper (MLX-Whisper on Apple Silicon, faster-whisper elsewhere), or through OpenAI's Whisper API if you prefer.
 
-> This project began in March 2025 as a fork of another Discord transcription bot. The code from that project has since been replaced in full; see [Attribution](#attribution).
+> This project began in February 2026 as a fork of another Discord transcription bot. The code from that project was replaced in full by October 2026; see [Attribution](#attribution).
 
 ## Features
 
@@ -159,7 +159,7 @@ Pull requests are welcome. Install the hooks once (`pre-commit install --hook-ty
 
 ## Attribution
 
-This repository started in March 2025 as a fork of [joshinryz/volo_discord_bot](https://github.com/joshinryz/volo_discord_bot) by Josh Robinett, with contributions from Noah Feinberg. That project publishes no license and its authors, contacted in 2026, have not granted one, so in October 2026 every remaining line and asset inherited from it was rewritten or replaced: the voice-connection record, the command-line parser, the PDF export and its background image, and the inherited parts of `main.py`, the bot class and the transcription sink. What `git blame` on the current tree still attributes to the upstream authors is boilerplate any implementation would share: imports, method signatures, and one-line Pycord and executor calls.
+This repository started in February 2026 as a fork of [joshinryz/volo_discord_bot](https://github.com/joshinryz/volo_discord_bot) by Josh Robinett, with contributions from Noah Feinberg (its last commits are from March 2025). That project publishes no license and its authors, contacted in 2026, have not granted one, so in October 2026 every remaining line and asset inherited from it was rewritten or replaced: the voice-connection record, the command-line parser, the PDF export and its background image, and the inherited parts of `main.py`, the bot class and the transcription sink. What `git blame` on the current tree still attributes to the upstream authors is boilerplate any implementation would share: imports, method signatures, and one-line Pycord and executor calls.
 
 The commit history before that point still contains the upstream code as it was received, and the upstream project remains the origin of this one's shape: a Pycord recording sink feeding Whisper, with slash commands for connect, scribe and stop.
 
