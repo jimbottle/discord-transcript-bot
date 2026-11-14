@@ -159,13 +159,13 @@ Pull requests are welcome. Install the hooks once (`pre-commit install --hook-ty
 
 ## Attribution
 
-This repository started in March 2025 as a fork of [joshinryz/volo_discord_bot](https://github.com/joshinryz/volo_discord_bot) by Josh Robinett, with contributions from Noah Feinberg. That project publishes no license, and its authors were asked and could not grant one, so in October 2026 every remaining line and asset inherited from it was rewritten or replaced: the voice-connection record, the command-line parser, the PDF export and its background image, and the inherited parts of `main.py`, the bot class and the transcription sink. `git blame` on the current tree attributes nothing to the upstream authors.
+This repository started in March 2025 as a fork of [joshinryz/volo_discord_bot](https://github.com/joshinryz/volo_discord_bot) by Josh Robinett, with contributions from Noah Feinberg. That project publishes no license and its authors, contacted in 2026, have not granted one, so in October 2026 every remaining line and asset inherited from it was rewritten or replaced: the voice-connection record, the command-line parser, the PDF export and its background image, and the inherited parts of `main.py`, the bot class and the transcription sink. What `git blame` on the current tree still attributes to the upstream authors is boilerplate any implementation would share: imports, method signatures, and one-line Pycord and executor calls.
 
 The commit history before that point still contains the upstream code as it was received, and the upstream project remains the origin of this one's shape: a Pycord recording sink feeding Whisper, with slash commands for connect, scribe and stop.
 
 ## License
 
-**No license file yet.** The code in the current tree is the repository owner's own work (see [Attribution](#attribution)), and a license will be added once one is chosen. Until then, open an issue if you want to use or redistribute it.
+[MIT](LICENSE). The license covers the current tree, which is the repository owner's own work (see [Attribution](#attribution)). It does not extend to the upstream code in commits before the October 2026 rewrite, which was never licensed.
 
 ## Architecture
 

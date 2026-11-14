@@ -3,6 +3,8 @@ name = "discord-transcript-bot"
 version = "1.0.0"
 description = "A Discord bot that records voice sessions, transcribes them, and answers questions about them"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 # Runtime dependencies mirror requirements.txt, which the Dockerfile still
 # installs from; keep the two in step until the image moves to uv.
